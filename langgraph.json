@@ -1,7 +1,10 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "agent": "./src/react_agent/graph.py:graph"
+    "agent": "src/react_agent/graphs/graph.py:graph",
+    "analysis": "src/react_agent/graphs/analysis.py:graph"
   },
-  "env": ".env"
+  "env": ".env",
+  "title": "ReAct Agent",
+  "description": "A ReAct agent that iteratively reasons about user queries and executes actions."
 }

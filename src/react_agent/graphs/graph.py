@@ -4,10 +4,13 @@ Works with a chat model with tool calling support.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, cast
+from typing import Any, Dict, List, Literal, Sequence, cast
 
 from langchain_core.messages import AIMessage
+from langchain_core.messages.base import BaseMessage
+from langchain_core.prompt_values import PromptValue
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.base import Runnable
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 

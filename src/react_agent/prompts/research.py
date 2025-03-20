@@ -6,89 +6,133 @@ in the agent framework.
 
 from .templates import STRUCTURED_OUTPUT_VALIDATION
 
+# Query analysis prompt for search term generation
+QUERY_ANALYSIS_PROMPT = """Analyze the following query and generate targeted search terms for RFP analysis.
+Query: {query}
+
+Generate search terms that would help gather information for:
+1. Porter's 5 Forces analysis
+2. SWOT analysis
+3. PESTEL analysis
+4. Market trends and pricing
+5. Vendor and supplier analysis
+6. Compliance and regulations
+7. Technical specifications and requirements
+
+Return a JSON object with:
+{
+    "search_terms": {
+        "porters_5_forces": [],
+        "swot": [],
+        "pestel": [],
+        "market_trends": [],
+        "vendor_analysis": [],
+        "compliance": [],
+        "technical": []
+    },
+    "primary_keywords": [],
+    "industry_context": "",
+    "search_priority": ["list of analysis sections in priority order"],
+    "missing_context": []
+}
+"""
+
+# Clarification prompt for insufficient search terms
+CLARIFICATION_PROMPT = """I'm analyzing your query: "{query}"
+
+Based on the current understanding:
+- Industry Context: {industry_context}
+- Primary Keywords: {primary_keywords}
+
+To provide more accurate and comprehensive research, I need additional information:
+
+{missing_sections}
+
+Could you please provide more details about these aspects? This will help me conduct more targeted and relevant research for your needs."""
+
 # Research base prompt
 RESEARCH_BASE_PROMPT = """You are a Research Agent for RFP market analysis.
 Your goal is to gather comprehensive information while maintaining the JSON structure.
 
 Required Schema:
-{
-    "rfp_analysis": {
-        "analysis": {
-            "porters_5_forces": {
+{{
+    "rfp_analysis": {{
+        "analysis": {{
+            "porters_5_forces": {{
                 "competitive_rivalry": "",
                 "threat_of_new_entrants": "",
                 "threat_of_substitutes": "",
                 "bargaining_power_buyers": "",
                 "bargaining_power_suppliers": ""
-            },
-            "swot": {
+            }},
+            "swot": {{
                 "strengths": [],
                 "weaknesses": [],
                 "opportunities": [],
                 "threats": []
-            },
-            "pestel": {
+            }},
+            "pestel": {{
                 "political": "",
                 "economic": "",
                 "social": "",
                 "technological": "",
                 "environmental": "",
                 "legal": ""
-            },
-            "gap_analysis": {
+            }},
+            "gap_analysis": {{
                 "current_state": "",
                 "desired_state": "",
                 "critical_needs": []
-            },
-            "cost_benefit_analysis": {
+            }},
+            "cost_benefit_analysis": {{
                 "benefits": [],
                 "costs": [],
                 "justification": ""
-            },
-            "risk_assessment": {
+            }},
+            "risk_assessment": {{
                 "financial_risks": [],
                 "operational_risks": [],
                 "security_risks": [],
                 "vendor_risks": [],
                 "mitigation_strategies": []
-            },
-            "tco_analysis": {
+            }},
+            "tco_analysis": {{
                 "initial_costs": [],
                 "maintenance_costs": [],
                 "support_costs": [],
                 "training_costs": [],
                 "upgrade_costs": []
-            },
-            "vendor_analysis": {
-                "vendors": [{
+            }},
+            "vendor_analysis": {{
+                "vendors": [{{
                     "name": "",
                     "pricing": "",
                     "experience": "",
                     "capabilities": "",
                     "compliance": "",
                     "customer_feedback": ""
-                }]
-            },
-            "benchmarking": {
+                }}]
+            }},
+            "benchmarking": {{
                 "industry_best_practices": [],
                 "competitor_comparisons": []
-            },
-            "stakeholder_analysis": {
+            }},
+            "stakeholder_analysis": {{
                 "key_stakeholders": [],
                 "priorities": [],
                 "business_needs": []
-            },
-            "compliance_analysis": {
+            }},
+            "compliance_analysis": {{
                 "industry_standards": [],
                 "legal_requirements": [],
                 "vendor_compliance": []
-            },
-            "business_impact": {
+            }},
+            "business_impact": {{
                 "operational_impact": "",
                 "efficiency_impact": "",
                 "scalability_impact": ""
-            },
-            "citations": {
+            }},
+            "citations": {{
                 "porters_5_forces": [],
                 "swot": [],
                 "pestel": [],
@@ -101,10 +145,10 @@ Required Schema:
                 "stakeholder_analysis": [],
                 "compliance_analysis": [],
                 "business_impact": []
-            }
-        },
+            }}
+        }},
         "market_basket": [
-            {
+            {{
                 "manufacturer_or_distributor": "",
                 "item_number": "",
                 "item_description": "",
@@ -112,16 +156,16 @@ Required Schema:
                 "estimated_qty_per_uom": 0.0,
                 "unit_cost": 0.0,
                 "citation": ""
-            }
+            }}
         ]
-    },
+    }},
     "confidence_score": 0.0,
-    "validation_status": {
+    "validation_status": {{
         "is_valid": false,
         "errors": [],
         "warnings": []
-    }
-}
+    }}
+}}
 
 RESEARCH_REQUIREMENTS:
 1. Market Analysis

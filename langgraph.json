@@ -2,7 +2,8 @@
   "dependencies": ["."],
   "graphs": {
     "agent": "src/react_agent/graphs/graph.py:graph",
-    "analysis": "src/react_agent/graphs/analysis.py:graph"
+    "analysis": "src/react_agent/graphs/analysis.py:graph",
+    "research": "src/react_agent/graphs/research.py:research_graph"
   },
   "env": ".env",
   "title": "ReAct Agent",

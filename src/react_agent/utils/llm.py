@@ -13,7 +13,7 @@ from langchain_core.runnables.base import Runnable
 
 from react_agent.configuration import Configuration
 from react_agent.state import State
-from react_agent.tools import TOOLS
+from react_agent.tools.tavily import TOOLS
 
 
 def get_message_text(msg: BaseMessage) -> str:

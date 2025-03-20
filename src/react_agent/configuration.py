@@ -37,6 +37,20 @@ class Configuration:
         },
     )
 
+    firecrawl_api_key: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "API key for the FireCrawl service. Required for web scraping and crawling."
+        },
+    )
+
+    firecrawl_url: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "Base URL for the FireCrawl service. Use this for self-hosted instances."
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

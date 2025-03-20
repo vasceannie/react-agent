@@ -16,7 +16,7 @@ from langgraph.prebuilt import ToolNode
 
 from react_agent.configuration import Configuration
 from react_agent.state import InputState, State
-from react_agent.tools import TOOLS
+from react_agent.tools.tavily import TOOLS
 from react_agent.utils.llm import call_model
 
 

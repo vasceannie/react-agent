@@ -228,4 +228,6 @@ Provide actionable feedback focusing on:
 3. Process refinements
 4. Quality enhancements"""
 
+STRUCTURED_SYSTEM_PROMPT: Final[str] = """You are a helpful assistant that can answer questions and help with tasks."""
+
 SYSTEM_PROMPT: Final[str] = """You are a helpful assistant that can answer questions and help with tasks."""

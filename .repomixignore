@@ -1,0 +1,10 @@
+# Add patterns to ignore here, one per line
+# Example:
+# *.log
+# tmp/
+.venv/
+src/react_agent/tools/tavily.py
+src/react_agent/tools/firecrawl.py
+src/react_agent/graphs/error.py
+src/react_agent/graphs/graph.py
+src/react_agent/graphs/analysis.py

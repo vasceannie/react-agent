@@ -79,15 +79,7 @@ async def call_model_json(
     messages: List[Dict[str, str]],
     config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
-    """Call the LLM and get a JSON response.
-    
-    Args:
-        messages: List of message dictionaries with 'role' and 'content'
-        config: Optional configuration for the model run
-        
-    Returns:
-        Dict containing parsed JSON response
-    """
+    """Call the LLM and get a JSON response."""
     base_config: RunnableConfig = config or {}
     configuration: Configuration = Configuration.from_runnable_config(base_config)
     model: BaseChatModel = load_chat_model(configuration.model)
@@ -96,10 +88,55 @@ async def call_model_json(
     model_config = dict(base_config)
     model_config["response_format"] = {"type": "json_object"}
     
+    # Add system message to enforce JSON response
+    system_message = {
+        "role": "system",
+        "content": "You are a helpful assistant that always responds with a single, valid JSON object. Do not include any explanations, markdown formatting, or text outside the JSON object."
+    }
+    all_messages = [system_message] + messages
+    
     response = await model.ainvoke(
-        messages,
+        all_messages,
         config=cast(RunnableConfig, model_config)
     )
     
     content = get_message_text(response)
-    return json.loads(content)
+    
+    try:
+        # First try direct JSON parsing
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # If that fails, try to extract and clean the JSON
+        import re
+        
+        # Remove any markdown code block syntax
+        content = re.sub(r'```(?:json)?\s*|\s*```', '', content)
+        
+        # Find the outermost JSON object
+        start = content.find('{')
+        if start == -1:
+            raise ValueError("No JSON object found in response")
+            
+        # Track brace depth to find matching end brace
+        depth = 1
+        pos = start + 1
+        
+        while depth > 0 and pos < len(content):
+            if content[pos] == '{':
+                depth += 1
+            elif content[pos] == '}':
+                depth -= 1
+            pos += 1
+            
+        if depth > 0:
+            raise ValueError("Unclosed JSON object in response")
+            
+        json_str = content[start:pos].strip()
+        
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            # If still failing, try more aggressive cleaning
+            clean_json = re.sub(r'\s+', ' ', json_str)  # Normalize whitespace
+            clean_json = re.sub(r'[^\x20-\x7E]', '', clean_json)  # Remove non-printable chars
+            return json.loads(clean_json)

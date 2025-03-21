@@ -52,6 +52,20 @@ class Configuration:
         },
     )
 
+    jina_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("JINA_API_KEY"),
+        metadata={
+            "description": "API key for the Jina AI service. Required for web search and summarization."
+        },
+    )
+
+    jina_url: Optional[str] = field(
+        default_factory=lambda: os.getenv("JINA_URL", "https://api.jina.ai"),
+        metadata={
+            "description": "Base URL for the Jina AI service. Use this for self-hosted instances."
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

@@ -41,8 +41,7 @@ from react_agent.prompts import (
     RESEARCH_BASE_PROMPT,
 )
 from react_agent.state import State
-from react_agent.tools.firecrawl import scrape as firecrawl_scrape
-from react_agent.tools.firecrawl import search as firecrawl_search
+from react_agent.tools.jina import search as jina_search
 from react_agent.utils.llm import call_model, call_model_json
 
 T = TypeVar('T')
@@ -64,228 +63,96 @@ def ensure_state(state: Any) -> State:
     return state
 
 async def create_search_query(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Create a search query and perform the search using FireCrawl.
+    """Create a search query and perform the search using Jina.
 
     Args:
         state (State): The current state of the conversation.
         config (Optional[RunnableConfig]): Configuration for the model run.
 
     Returns:
-        Dict[str, Any]: Updated state with search query and results.
+        Dict[str, Any]: Updated state with search results.
     """
-    def get_user_query(messages: Sequence[BaseMessage]) -> str:
-        """Extract the last user query from messages."""
-        for msg in reversed(messages):
-            if msg.type == "human":
-                content = msg.content
-                query = (
-                    " ".join([item for item in content if isinstance(item, str)])
-                    if isinstance(content, list) else str(content)
-                )
-                return query.strip()
-        return ""
+    # Get the last user query
+    query = ""
+    for msg in reversed(state.messages):
+        if msg.type == "human":
+            content = msg.content
+            query = " ".join([item for item in content if isinstance(item, str)]) if isinstance(content, list) else str(content)
+            break
 
-    def enrich_query(raw_query: str) -> str:
-        """Enrich the query with additional context, synonyms, and domain-specific terms.
-        
-        This function expands search queries to increase coverage and recall by:
-        1. Adding domain-specific terminology
-        2. Expanding with synonyms and related concepts
-        3. Including format/document types for better search results
-        4. Adding contextual modifiers based on query content
-        
-        Args:
-            raw_query: The original user query string
-            
-        Returns:
-            str: An enriched query with expanded vocabulary and context
-        """
-        # Normalize query
-        normalized_query = raw_query.lower().strip()
-        print(f"Original query: {normalized_query}")  # Debug output
-        
-        # Always add base search modifiers
-        base_modifiers = [
-            "proposal", "documentation", "rfp", "rfi",
-            "best practices", "how to", "explanation",
-            "contract", "sourcing", "sourcing event",
-            "bid", "category", "industry", "vertical"
-        ]
-        
-        # Build enriched query parts
-        enriched_parts = [raw_query]  # Start with original query
-        
-        # Add base modifiers
-        enriched_parts.extend(base_modifiers)
-        
-        # Expanded domain-specific synonyms dictionary
-        domain_synonyms = {
-            # Technical terms
-            "code": ["implementation", "source code", "codebase", "repository", "github"],
-            "api": ["endpoint", "interface", "service", "integration", "sdk"],
-            "error": ["bug", "issue", "problem", "failure", "exception"],
-            "performance": ["speed", "optimization", "efficiency", "throughput"],
-            "security": ["authentication", "authorization", "encryption", "protection"],
-            "database": ["storage", "data", "persistence", "db", "repository"],
-            "testing": ["test", "validation", "verification", "quality", "qa"],
-            "deployment": ["release", "publish", "distribution", "shipping"],
-            
-            # Development concepts
-            "architecture": ["design", "structure", "pattern", "organization"],
-            "framework": ["library", "tool", "platform", "sdk", "package"],
-            "configuration": ["setup", "settings", "options", "preferences"],
-            "documentation": ["docs", "manual", "guide", "reference", "tutorial"],
-            
-            # Common actions
-            "implement": ["create", "build", "develop", "code", "write"],
-            "fix": ["solve", "resolve", "debug", "troubleshoot", "repair"],
-            "optimize": ["improve", "enhance", "upgrade", "refactor"],
-            "integrate": ["connect", "combine", "merge", "link"]
-        }
-        
-        # Add synonyms for any matching terms
-        for word in normalized_query.split():
-            # Direct matches
-            if word in domain_synonyms:
-                enriched_parts.extend(domain_synonyms[word][:3])  # Add top 3 synonyms
-            
-            # Partial matches
-            for key, synonyms in domain_synonyms.items():
-                if key in word or any(syn in word for syn in synonyms):
-                    enriched_parts.extend(synonyms[:2])  # Add top 2 synonyms
-        
-        # Add format qualifiers
-        formats = ["tutorial", "guide", "documentation", "example", "solution"]
-        enriched_parts.extend(formats)
-        
-        # Combine all parts and remove duplicates while preserving order
-        seen = set()
-        final_parts = []
-        for part in enriched_parts:
-            if part not in seen:
-                final_parts.append(part)
-                seen.add(part)
-        
-        # Join with OR operator for broader matches
-        final_query = " OR ".join(final_parts)
-        
-        print(f"Enriched query: {final_query}")  # Debug output
-        return final_query
-        
-    def create_default_analysis() -> Dict[str, Any]:
-        """Create default analysis structure."""
-        return {
-            "search_terms": {section: [] for section in [
-                "porters_5_forces", "swot", "pestel", "market_trends",
-                "vendor_analysis", "compliance", "technical"
-            ]},
-            "primary_keywords": [],
-            "industry_context": "",
-            "search_priority": ["market_trends", "technical", "compliance"],
-            "missing_context": ["Analysis failed, needs clarification"]
-        }
-
-    async def perform_search(term: str, keywords: List[str], context: str, section: str,
-                           visited_urls: set, config: RunnableConfig) -> List[Dict[str, Any]]:
-        """Perform search for a single term and return results."""
-        results = []
-        search_query = f"{term} {' '.join(keywords)} {context}".strip()
-        try:
-            search_results = await firecrawl_search(search_query, config=config)
-            for doc in search_results or []:
-                url = doc.metadata.get("source", "")
-                if url and url not in visited_urls:
-                    visited_urls.add(url)
-                    results.append({
-                        "url": url,
-                        "title": doc.metadata.get("title", ""),
-                        "snippet": doc.page_content,
-                        "section": section,
-                        "search_term": term
-                    })
-        except Exception as e:
-            print(f"Search failed for term '{term}': {str(e)}")
-        return results
-
-    # Get user query
-    query = get_user_query(state.messages)
-    validated_config = ensure_config(config)
-    
-    # Try to get detailed search analysis
-    try:
-        analysis_response = await call_model_json(
-            messages=[{"role": "user", "content": QUERY_ANALYSIS_PROMPT.format(query=query)}],
-            config=validated_config
-        )
-        if not isinstance(analysis_response, dict):
-            analysis_response = create_default_analysis()
-    except Exception as e:
-        # Fall back to simple query enrichment approach
-        print(f"Error in detailed analysis: {str(e)}")
-        analysis_response = create_default_analysis()
-        
-    # If detailed search analysis has no search terms or is empty, use simple enrichment
-    detailed_search_terms = analysis_response.get("search_terms", {})
-    has_search_terms = any(
-        len(terms) > 0 
-        for terms in detailed_search_terms.values() 
-        if isinstance(terms, list)
-    )
-    
-    if not has_search_terms:
-        # Fall back to simple query enrichment
-        enriched_query = enrich_query(query)
-        firecrawl_results = await firecrawl_search(enriched_query, config=validated_config)
-
-        if not firecrawl_results:
-            # Try a fallback query
-            enriched_query += " site:example.com filetype:pdf"
-            firecrawl_results = await firecrawl_search(enriched_query, config=validated_config)
-
-        # Save basic results to state
+    if not query:
         return {
             "messages": [ToolMessage(
-                content=f"Generated {len(firecrawl_results or [])} search results using basic query enrichment",
-                tool_call_id="search",
-                name="firecrawl_search"
-            )],
-            "search_query": query,
-            "search_results": firecrawl_results,
-            "search_analysis": analysis_response,
-            "visited_urls": []
+                content="No query found to search with.",
+                tool_call_id="search_empty",
+                name="jina_search"
+            )]
         }
+
+    # Enrich the query using the LLM
+    enrichment_prompt = f"""Analyze the following search query and enhance it for better search results.
+    Original query: "{query}"
+
+    1. Identify key concepts and topics
+    2. Add relevant synonyms or alternative phrasings
+    3. Include any missing context that would improve results
+    4. Format as a clear, focused search query
+    5. Ensure query captures the original intent
+
+    Return a JSON object with:
+    {{
+        "enhanced_query": "the improved search query",
+        "key_concepts": ["list of main concepts"],
+        "search_strategy": "brief explanation of search approach"
+    }}
+    """
+
+    # Ensure we have a valid config
+    validated_config = ensure_config(config or {})
     
-    # Otherwise, use the detailed search approach
-    visited_urls: set[str] = set()
-    all_search_results: list[dict[str, Any]] = []
-
-    for section in analysis_response.get("search_priority", []):
-        search_terms = analysis_response.get("search_terms", {}).get(section, [])
-        if not search_terms:
-            continue
-
-        primary_keywords = analysis_response.get("primary_keywords", [])
-        industry_context = analysis_response.get("industry_context", "")
+    try:
+        enrichment_result = await call_model_json(
+            messages=[{"role": "user", "content": enrichment_prompt}],
+            config=validated_config
+        )
         
-        for term in search_terms:
-            results = await perform_search(
-                term, primary_keywords, industry_context, section,
-                visited_urls, validated_config
-            )
-            all_search_results.extend(results)
+        enhanced_query = enrichment_result.get("enhanced_query", query)
+        key_concepts = enrichment_result.get("key_concepts", [])
+        search_strategy = enrichment_result.get("search_strategy", "")
+        
+        # Log the enrichment process
+        print(f"Original query: {query}")
+        print(f"Enhanced query: {enhanced_query}")
+        print(f"Key concepts: {', '.join(key_concepts)}")
+        print(f"Search strategy: {search_strategy}")
+        
+        # Perform the search with enhanced query
+        search_results = await jina_search(enhanced_query, config=validated_config)
+    except Exception as e:
+        print(f"Query enrichment failed: {str(e)}, falling back to original query")
+        search_results = await jina_search(query, config=validated_config)
+
+    if not search_results:
+        return {
+            "messages": [ToolMessage(
+                content="No search results found.",
+                tool_call_id="search_empty",
+                name="jina_search"
+            )]
+        }
 
     return {
         "messages": [ToolMessage(
-            content=f"Generated {len(all_search_results)} search results across {len(analysis_response.get('search_priority', []))} analysis sections",
+            content=f"Found {len(search_results)} relevant results.",
             tool_call_id="search",
-            name="firecrawl_search"
+            name="jina_search"
         )],
-        "search_query": query,
-        "search_results": all_search_results,
-        "search_analysis": analysis_response,
-        "visited_urls": list(visited_urls)
+        "search_results": search_results,
+        "original_query": query,
+        "enhanced_query": enhanced_query if "enhanced_query" in locals() else query,
+        "key_concepts": key_concepts if "key_concepts" in locals() else [],
+        "search_strategy": search_strategy if "search_strategy" in locals() else ""
     }
-
 
 async def process_search_results(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     """Process and prioritize search results.
@@ -372,10 +239,10 @@ async def process_search_results(state: State, config: Optional[RunnableConfig] 
         "visited_urls": all_visited_urls
     }
 
-
 async def _extract_content_from_url(url: str, config: RunnableConfig) -> Optional[Dict[str, Any]]:
-    """Extract content from a URL using FireCrawl."""
-    scraped_docs = await firecrawl_scrape(url, mode="scrape", config=config)
+    """Extract content from a URL using Jina."""
+    # Use the URL as a search query to find content about that specific URL
+    scraped_docs = await jina_search(f"site:{url}", config=config)
     if not scraped_docs:
         return None
         
@@ -383,13 +250,13 @@ async def _extract_content_from_url(url: str, config: RunnableConfig) -> Optiona
     return {
         "content": content,
         "metadata": {
-            doc.metadata.get("source", ""): doc.metadata 
+            doc.metadata.get("url", ""): doc.metadata 
             for doc in scraped_docs
         }
     }
 
 async def extract_key_information(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Extract key information from search results using FireCrawl."""
+    """Extract key information from search results using Jina."""
     search_results = getattr(state, "search_results", [])
     visited_urls = getattr(state, "visited_urls", [])
 
@@ -398,7 +265,7 @@ async def extract_key_information(state: State, config: Optional[RunnableConfig]
             "messages": [ToolMessage(
                 content="No search results to extract information from.",
                 tool_call_id="extract_empty",
-                name="firecrawl_extract"
+                name="jina_extract"
             )]
         }
 
@@ -453,17 +320,16 @@ async def extract_key_information(state: State, config: Optional[RunnableConfig]
 
     return {
         "messages": [ToolMessage(
-            content=f"Extracted information from {len(sources)} sources using FireCrawl.",
+            content=f"Extracted information from {len(sources)} sources using Jina.",
             tool_call_id="extract",
-            name="firecrawl_extract"
+            name="jina_extract"
         )],
         "extracted_info": extracted_info,
         "sources": sources
     }
 
-
 async def synthesize_research(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Synthesize research from extracted information.
+    """Synthesize research from search results.
 
     Args:
         state (State): The current state of the conversation.
@@ -472,39 +338,42 @@ async def synthesize_research(state: State, config: Optional[RunnableConfig] = N
     Returns:
         Dict[str, Any]: Updated state with research synthesis.
     """
-    # Extract relevant information from state
-    extracted_info = getattr(state, "extracted_info", {})
-    sources = getattr(state, "sources", [])
+    search_results = getattr(state, "search_results", [])
+    
+    if not search_results:
+        return {
+            "messages": [ToolMessage(
+                content="No search results to synthesize.",
+                tool_call_id="synthesize_empty",
+                name="synthesize_research"
+            )]
+        }
 
-    if not extracted_info:
-        message = ToolMessage(
-            content="No information to synthesize. Please try a different query.",
-            tool_call_id="synthesize_empty",
-            name="synthesize_research"
-        )
-        return {"messages": [message]}
-
-    # Get the query from the last user message
-    query: Union[str, list[Union[str, dict]]] = ""
+    # Get the original query
+    query = ""
     for msg in reversed(state.messages):
         if msg.type == "human":
-            query = msg.content
-            if isinstance(query, list):
-                query = " ".join([item for item in query if isinstance(item, str)])
+            content = msg.content
+            query = " ".join([item for item in content if isinstance(item, str)]) if isinstance(content, list) else str(content)
             break
 
-    # Prepare a prompt for synthesis
+    # Prepare content for synthesis
+    content_for_synthesis = []
+    for doc in search_results:
+        content_for_synthesis.append({
+            "content": doc.page_content,
+            "metadata": doc.metadata
+        })
+
+    # Create synthesis prompt
     prompt = f"""
-    Synthesize the following information to answer the query: "{query}"
+    Based on the search results, provide a comprehensive answer to: "{query}"
 
-    Extracted Information:
-    {json.dumps(extracted_info, indent=2)}
+    Search Results:
+    {json.dumps(content_for_synthesis, indent=2)}
 
-    Sources:
-    {json.dumps([{"url": s.get("url"), "title": s.get("title")} for s in sources], indent=2)}
-
-    Provide a comprehensive synthesis that addresses the query directly.
-    Include citations to sources where appropriate.
+    Synthesize the information into a clear, well-structured response.
+    Include relevant citations to sources where appropriate.
     """
 
     synthesis_response = await call_model_json(
@@ -513,21 +382,18 @@ async def synthesize_research(state: State, config: Optional[RunnableConfig] = N
     )
 
     synthesis = synthesis_response.get("synthesis", "")
-    if not synthesis and "content" in synthesis_response:
-        synthesis = synthesis_response["content"]
-
-    # Create a tool message with the synthesis
-    message = ToolMessage(
-        content=synthesis,
-        tool_call_id="synthesize",
-        name="synthesize_research"
-    )
+    if not synthesis and isinstance(synthesis_response, dict):
+        synthesis = synthesis_response.get("content", "")
 
     return {
-        "messages": [message],
-        "synthesis": synthesis
+        "messages": [ToolMessage(
+            content=synthesis,
+            tool_call_id="synthesize",
+            name="synthesize_research"
+        )],
+        "synthesis": synthesis,
+        "synthesis_complete": True
     }
-
 
 async def validate_research_output(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     """Validate the research output for quality and accuracy.
@@ -585,105 +451,7 @@ async def validate_research_output(state: State, config: Optional[RunnableConfig
         "validation_passed": validation_passed
     }
 
-
-async def validate_search_terms(state: State, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Validate if the search terms are sufficient for meaningful research.
-    
-    Args:
-        state (State): Current state containing search analysis
-        config (Optional[RunnableConfig]): Configuration for the model run
-        
-    Returns:
-        Dict[str, Any]: Updated state with validation results
-    """
-    def get_safe_value(data: Dict[str, Any], key: str, default: Any, expected_type: type) -> Any:
-        """Safely get a value from a dictionary with type checking."""
-        value = data.get(key, default)
-        return value if isinstance(value, expected_type) else default
-
-    analysis = getattr(state, "search_analysis", {})
-    if not analysis:
-        return {
-            "messages": [AIMessage(content="No search analysis found. Please try your query again.")],
-            "needs_clarification": True,
-            "clarification_count": getattr(state, "clarification_count", 0) + 1
-        }
-
-    # Extract and validate components
-    search_terms = get_safe_value(analysis, "search_terms", {}, dict)
-    primary_keywords = get_safe_value(analysis, "primary_keywords", [], list)
-    industry_context = get_safe_value(analysis, "industry_context", "", str)
-
-    # Define expected sections
-    sections = ["porters_5_forces", "swot", "pestel", "market_trends", 
-                "vendor_analysis", "compliance", "technical"]
-
-    # Validation criteria
-    sections_covered = sum(
-        len(get_safe_value(search_terms, section, [], list)) >= 2 
-        for section in sections
-    )
-    
-    validation_criteria = {
-        "sections_coverage": (sections_covered, 4),
-        "keywords": (len(primary_keywords), 2),
-        "context": (bool(industry_context.strip()), True)
-    }
-
-    # Check validation criteria
-    failed_criteria = {
-        key: actual 
-        for key, (actual, required) in validation_criteria.items() 
-        if actual < required
-    }
-
-    if not failed_criteria:
-        return {
-            "messages": [ToolMessage(
-                content="Search terms validation passed",
-                tool_call_id="validate_terms",
-                name="validate_search_terms"
-            )],
-            "needs_clarification": False,
-            "search_terms_validated": True
-        }
-
-    # Generate clarification message
-    query = next(
-        (msg.content for msg in reversed(state.messages) 
-         if msg.type == "human" and isinstance(msg.content, str)),
-        ""
-    )
-    
-    missing_info: List[str] = []
-    if "sections_coverage" in failed_criteria:
-        missing_info.extend(
-            f"Need more details for: {section}"
-            for section in sections
-            if len(get_safe_value(search_terms, section, [], list)) < 2
-        )
-    if "keywords" in failed_criteria:
-        missing_info.append("Need more industry-specific keywords")
-    if "context" in failed_criteria:
-        missing_info.append("Need more context about the industry/domain")
-
-    return {
-        "messages": [AIMessage(content=CLARIFICATION_PROMPT.format(
-            query=query,
-            industry_context=industry_context,
-            primary_keywords=", ".join(primary_keywords),
-            missing_sections="\n".join(f"- {item}" for item in missing_info)
-        ))],
-        "needs_clarification": True,
-        "clarification_count": getattr(state, "clarification_count", 0) + 1,
-        "search_analysis": {
-            "search_terms": search_terms,
-            "primary_keywords": primary_keywords,
-            "industry_context": industry_context
-        }
-    }
-
-def route_research_flow(state: State) -> Literal["create_search_query", "validate_search_terms", "process_search_results", "extract_key_information", "synthesize_research", "validate_research_output", "__end__"]:
+def route_research_flow(state: State) -> Literal["create_search_query", "process_search_results", "extract_key_information", "synthesize_research", "validate_research_output", "__end__"]:
     """Determine the next step in the research flow.
 
     Args:
@@ -692,30 +460,22 @@ def route_research_flow(state: State) -> Literal["create_search_query", "validat
     Returns:
         str: The name of the next node to call.
     """
-    # Check if we've exceeded maximum clarification attempts
-    if getattr(state, "clarification_count", 0) >= 3:
-        return "__end__"
-        
-    if validation_passed := getattr(state, "validation_passed", False):
+    if getattr(state, "validation_passed", False):
         return "__end__"
 
-    if synthesis := getattr(state, "synthesis", ""):
+    if getattr(state, "synthesis", None):
         return "validate_research_output"
 
-    if extracted_info := getattr(state, "extracted_info", {}):
+    if getattr(state, "extracted_info", None):
         return "synthesize_research"
 
-    if search_results := getattr(state, "search_results", []):
-        return "extract_key_information"
-
-    if search_query := getattr(state, "search_query", ""):
-        if not getattr(state, "search_terms_validated", False):
-            return "validate_search_terms"
+    if getattr(state, "search_results", None) and not getattr(state, "processed_results", None):
         return "process_search_results"
 
-    # Default to creating a search query
-    return "create_search_query"
+    if getattr(state, "processed_results", None):
+        return "extract_key_information"
 
+    return "create_search_query"
 
 def create_research_graph(config: Optional[RunnableConfig] = None) -> CompiledStateGraph:
     """Create the research workflow graph.
@@ -729,38 +489,17 @@ def create_research_graph(config: Optional[RunnableConfig] = None) -> CompiledSt
     # Create the graph with the state
     builder = StateGraph(State)
 
-    # Create async handlers for each node
-    async def handle_create_search_query(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await create_search_query(validated_state, config)
-        
-    async def handle_validate_terms(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await validate_search_terms(validated_state, config)
-        
-    async def handle_process_results(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await process_search_results(validated_state, config)
-        
-    async def handle_extract_info(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await extract_key_information(validated_state, config)
-        
-    async def handle_synthesize(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await synthesize_research(validated_state, config)
-        
-    async def handle_validate(state: Any) -> Dict[str, Any]:
-        validated_state = ensure_state(state)
-        return await validate_research_output(validated_state, config)
-
-    # Add nodes with async handlers
-    builder.add_node("create_search_query", handle_create_search_query)
-    builder.add_node("validate_search_terms", handle_validate_terms)
-    builder.add_node("process_search_results", handle_process_results)
-    builder.add_node("extract_key_information", handle_extract_info)
-    builder.add_node("synthesize_research", handle_synthesize)
-    builder.add_node("validate_research_output", handle_validate)
+    # Add nodes
+    builder.add_node("create_search_query", 
+                    create_search_query)
+    builder.add_node("process_search_results", 
+                    process_search_results)
+    builder.add_node("extract_key_information", 
+                    extract_key_information)
+    builder.add_node("synthesize_research", 
+                    synthesize_research)
+    builder.add_node("validate_research_output", 
+                    validate_research_output)
 
     # Add conditional edges
     builder.add_conditional_edges(
@@ -768,7 +507,6 @@ def create_research_graph(config: Optional[RunnableConfig] = None) -> CompiledSt
         route_research_flow,
         {
             "create_search_query": "create_search_query",
-            "validate_search_terms": "validate_search_terms",
             "process_search_results": "process_search_results",
             "extract_key_information": "extract_key_information",
             "synthesize_research": "synthesize_research",
@@ -778,26 +516,13 @@ def create_research_graph(config: Optional[RunnableConfig] = None) -> CompiledSt
     )
 
     # Add edges between nodes
-    builder.add_edge("create_search_query", "validate_search_terms")
-    builder.add_edge("validate_search_terms", "process_search_results")
+    builder.add_edge("create_search_query", "process_search_results")
     builder.add_edge("process_search_results", "extract_key_information")
     builder.add_edge("extract_key_information", "synthesize_research")
     builder.add_edge("synthesize_research", "validate_research_output")
+    builder.add_edge("validate_research_output", "__end__")
 
-    # Add conditional edge from validation
-    builder.add_conditional_edges(
-        "validate_research_output",
-        lambda state: "__end__" if getattr(state, "validation_passed", False) else "create_search_query",
-        {
-            "__end__": "__end__",
-            "create_search_query": "create_search_query"
-        }
-    )
+    return builder.compile()
 
-    # Compile with interrupt points
-    return builder.compile(
-        interrupt_after=["validate_search_terms"]  # Allow user input after validation
-    )
-
-# Create default graph instance with default configuration
+# Create default graph instance
 research_graph = create_research_graph()

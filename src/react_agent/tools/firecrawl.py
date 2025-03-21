@@ -61,13 +61,18 @@ class FireCrawlClient:
     def _get_endpoint(self, mode: FirecrawlMode) -> str:
         """Get endpoint URL for given mode."""
         endpoints = {
-            "search": "/search",
-            "scrape": "/scrape",
-            "crawl": "/crawl",
-            "map": "/map",
-            "extract": "/extract"
+            "search": "/v1/search",
+            "scrape": "/v1/scrape",
+            "crawl": "/v1/crawl",
+            "map": "/v1/map",
+            "extract": "/v1/extract"
         }
-        return urljoin(self.base_url, endpoints[mode])
+        # Ensure base URL doesn't have trailing slash and endpoint starts with slash
+        base = self.base_url.rstrip('/')
+        endpoint = endpoints[mode]
+        if not endpoint.startswith('/'):
+            endpoint = f'/{endpoint}'
+        return f"{base}{endpoint}"
 
     async def _make_request(
         self,

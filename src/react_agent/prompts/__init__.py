@@ -12,13 +12,13 @@ from react_agent.prompts.analysis import (
 )
 from react_agent.prompts.market import (
     MARKET_DATA_PROMPT,
+    MARKET_PROMPT,
 )
 from react_agent.prompts.reflection import (
     REFLECTION_PROMPT,
 )
 from react_agent.prompts.research import (
     ADDITIONAL_TOPICS_PROMPT,
-    MARKET_PROMPT,
     RESEARCH_AGENT_PROMPT,
     RESEARCH_BASE_PROMPT,
     TOPICS_PROMPT,

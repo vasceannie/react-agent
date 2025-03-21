@@ -1,1676 +1,1107 @@
-"""
-Combined Research Flow with Typed State, Human-in-the-Loop, and Activity Nodes
------------------------------------------------------------------------------
-This module demonstrates a unified approach that merges the flow logic from
-the first snippet with the typed state and ephemeral (human-input) pattern
-from the second snippet.
+"""Enhanced modular research framework using LangGraph.
+
+This module implements a modular approach to the research process,
+with specialized components for different research categories and
+improved error handling and validation.
 """
 
 from __future__ import annotations
 import json
-from typing import Any, Dict, List, Optional, Literal, Sequence, Annotated, Tuple, Union
-from typing_extensions import TypedDict
-from datetime import datetime
-from langgraph.constants import START, END
-from langgraph.graph import StateGraph, END, START
-from langgraph.graph.state import CompiledStateGraph
+import asyncio
+from typing import Any, Dict, List, Optional, Sequence, Union, cast, Tuple, Literal, Hashable
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, BaseMessage
+from langgraph.constants import START
+from langgraph.graph.state import CompiledStateGraph
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
 from langchain_core.documents import Document
+from typing_extensions import Annotated, TypedDict
 
 from react_agent.utils.validations import is_valid_url
 from react_agent.utils.llm import call_model, call_model_json
-from react_agent.tools.jina import search as jina_search
-from react_agent.prompts import (
-    CLARIFICATION_PROMPT,
+from react_agent.tools.jina import search, optimize_query
+from react_agent.prompts.research import (
     QUERY_ANALYSIS_PROMPT,
-    RESEARCH_AGENT_PROMPT,
-    RESEARCH_BASE_PROMPT,
+    CLARIFICATION_PROMPT,
+    EXTRACTION_PROMPTS,
+    SYNTHESIS_PROMPT,
+    VALIDATION_PROMPT,
+    SEARCH_QUALITY_THRESHOLDS,
+    get_extraction_prompt
 )
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight, log_step
 
 # Initialize logger
 logger = get_logger(__name__)
 
-# --------------------------------------------------------------------
-# 1. Define merge strategies for state updates
-# --------------------------------------------------------------------
-def replace_search_results(existing: List[Dict[str, Any]], new: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Replace existing search results with new ones."""
-    return new
-
-def merge_urls(existing: List[str], new: List[str]) -> List[str]:
-    """Merge URL lists, removing duplicates."""
-    return list(set(existing + new)) if existing else new
-
-def append_status(existing: List[str], new: List[str]) -> List[str]:
-    """Append new status updates to existing ones."""
-    return existing + new if existing else new
-
-def merge_extracted_info(existing: Dict[str, List[Any]], new: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
-    """Merge extracted information, combining lists for matching keys."""
-    result = existing.copy()
-    for key, values in new.items():
-        if key in result:
-            result[key].extend(values)
-        else:
-            result[key] = values
-    return result
+# Define SearchType as a Literal type
+SearchType = Literal['general', 'authoritative', 'recent', 'comprehensive', 'technical']
 
 # --------------------------------------------------------------------
-# 2. Define the typed state with merge strategies
+# 1. Define the modular state classes
 # --------------------------------------------------------------------
+
+class ResearchCategory(TypedDict):
+    """State for a specific research category."""
+    category: str  # The category being researched (market_dynamics, etc.)
+    query: str  # The search query for this category
+    search_results: List[Dict[str, Any]]  # Raw search results
+    extracted_facts: List[Dict[str, Any]]  # Extracted facts
+    sources: List[Dict[str, Any]]  # Source information
+    complete: bool  # Whether this category is complete
+    quality_score: float  # Quality score for this category (0.0-1.0)
+    retry_count: int  # Number of retry attempts
+    last_search_query: Optional[str]  # Last search query used
+    status: str  # Status of this category (pending, in_progress, complete, failed)
+
 class ResearchState(TypedDict):
-    """A typed state capturing all necessary data for the research flow."""
-    # Basic conversation data with message handling
+    """Main research state with modular components."""
+    # Basic conversation data
     messages: Annotated[Sequence[BaseMessage], add_messages]
     
-    # Original query and enriched query
+    # Original query and analysis
     original_query: str
-    enriched_query: Optional[Dict[str, Any]]
-
-    # Flags/fields for missing context and clarifications
+    query_analysis: Optional[Dict[str, Any]]
+    
+    # Clarity and context
     missing_context: List[str]
     needs_clarification: bool
     clarification_request: Optional[str]
     human_feedback: Optional[str]
-
-    # Search-phase data with merge strategies
-    search_results: Annotated[List[Dict[str, Any]], replace_search_results]
-    visited_urls: Annotated[List[str], merge_urls]
     
-    # Extraction-phase data with merge strategies
-    extracted_info: Annotated[Dict[str, List[Any]], merge_extracted_info]
-    sources: List[Dict[str, Any]]
-
-    # Synthesis-phase data
+    # Category-specific research
+    categories: Dict[str, ResearchCategory]
+    
+    # Synthesis and validation
     synthesis: Optional[Dict[str, Any]]
-    synthesis_complete: bool
-
-    # Validation-phase data
-    confidence_score: float
-    validation_status: Dict[str, Any]
-    validation_passed: bool
-
-    # Additional contextual fields
-    industry_context: Optional[str]
-    search_priority: List[str]
-
-    # Status updates with append strategy
-    status_updates: Annotated[List[str], append_status]
-
-    # Quality control and feedback fields
-    search_quality_score: float
-    extraction_quality_score: float
-    search_retry_count: int
-    extraction_retry_count: int
-    last_search_query: Optional[str]
-    last_extraction_query: Optional[str]
-    search_feedback: Optional[Dict[str, Any]]
-    extraction_feedback: Optional[Dict[str, Any]]
-    extraction_status: Optional[str]
-    extraction_message: Optional[str]
-    extraction_attempt: int
-
-    # Search strategy flags
-    targeted_search: bool
-    alternate_search_strategy: bool
-    alternate_search: bool
-    alternate_extraction: bool
-
-# --------------------------------------------------------------------
-# 2. Utility function to push status updates to the user (UI, logs, etc.)
-# --------------------------------------------------------------------
-def push_status_to_user(status_message: str) -> None:
-    """Send status updates to the user interface (e.g., via WebSocket or SSE)."""
-    print(f"[STATUS UPDATE] {status_message}")
-    # Implement your real UI push here if desired.
-
-
-# --------------------------------------------------------------------
-# 3. Node (step) definitions. Below, we adapt your original logic
-#    to use the typed ResearchState and the ephemeral/HITL pattern.
-# --------------------------------------------------------------------
-
-async def initialize(state: ResearchState) -> Dict[str, Any]:
-    """Initialize the research flow with the user's query."""
-    log_step("Initializing research flow", 1, 7)
+    validation_result: Optional[Dict[str, Any]]
     
+    # Overall status
+    status: str
+    error: Optional[Dict[str, Any]]
+    complete: bool
+    
+# --------------------------------------------------------------------
+# 2. Core control flow nodes
+# --------------------------------------------------------------------
+
+async def initialize_research(state: ResearchState) -> Dict[str, Any]:
+    """Initialize the research process with the user's query."""
+    log_step("Initializing research process", 1, 10)
+
     if not state["messages"]:
         warning_highlight("No messages found in state")
-        return {}
-    
-    last_message = state["messages"][-1]
-    info_highlight("Research process initiated")
+        return {"error": {"message": "No messages in state", "phase": "initialization"}}
 
+    last_message = state["messages"][-1]
+    query = last_message.content if isinstance(last_message, BaseMessage) else ""
+
+    if not query:
+        warning_highlight("Empty query")
+        return {"error": {"message": "Empty query", "phase": "initialization"}}
+
+    info_highlight(f"Initializing research for query: {query}")
+
+    categories = {
+        category: {
+            "category": category,
+            "query": "",  # Will be filled by query analysis
+            "search_results": [],
+            "extracted_facts": [],
+            "sources": [],
+            "complete": False,
+            "quality_score": 0.0,
+            "retry_count": 0,
+            "last_search_query": None,
+            "status": "pending",
+        }
+        for category in SEARCH_QUALITY_THRESHOLDS.keys()
+    }
     return {
-        "messages": state["messages"],
-        "original_query": last_message.content if isinstance(last_message, BaseMessage) else ""
+        "original_query": query,
+        "status": "initialized",
+        "categories": categories,
+        "missing_context": [],
+        "needs_clarification": False,
+        "complete": False
     }
 
-
-async def enrich_query_node(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """
-    Analyze and enrich the user's query using UNSPSC taxonomy categories
-    instead of requesting overly specific details.
-    """
-    log_step("Enriching query", 2, 10)
+async def analyze_query(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Analyze the query to determine research categories and search terms."""
+    log_step("Analyzing research query", 2, 10)
 
     query = state["original_query"].strip()
     if not query:
-        warning_highlight("No query found to enrich")
-        return {}
-    
-    # Check for feedback from previous iterations
-    human_feedback = state.get("human_feedback", "")
-    if human_feedback:
-        info_highlight(f"Incorporating user feedback: {human_feedback}")
-        query = f"{query} [Additional context: {human_feedback}]"
-    
-    info_highlight(f"Analyzing query: {query}")
-    
-    # Use UNSPSC taxonomy categories for enrichment
-    enrichment_prompt = f"""
-    Analyze this research query and identify relevant procurement categories based on UNSPSC taxonomy:
-    
-    QUERY: {query}
-    
-    1. Identify the top 3 most relevant UNSPSC categories (Segment, Family, or Class level)
-    2. Generate search terms for market analysis in each category
-    3. Determine if this is about products, services, or both
-    4. Identify if any geographical focus is mentioned or implied
-    
-    Return a JSON object with:
-    {{
-        "unspsc_categories": [list of categories with code and name],
-        "search_terms": {{
-            "market_dynamics": [],
-            "key_suppliers": [],
-            "specifications": [],
-            "regulations": []
-        }},
-        "primary_keywords": [],
-        "product_vs_service": "",
-        "geographical_focus": "",
-        "missing_context": []
-    }}
-    
-    Note: Don't require excessive specific details for the search - use available information
-    to make reasonable assumptions where possible. Only mark as "missing_context" if it's
-    absolutely critical for meaningful research.
-    """
-    
-    data = await call_model_json(
-        messages=[{"role": "human", "content": enrichment_prompt}],
-        config=ensure_config(config)
-    )
+        warning_highlight("No query to analyze")
+        return {"error": {"message": "No query to analyze", "phase": "query_analysis"}}
 
-    # Log the enrichment results
-    log_dict(data, title="Query Enrichment Results Using UNSPSC Taxonomy")
+    if human_feedback := state.get("human_feedback", ""):
+        info_highlight(f"Including user feedback in analysis: {human_feedback}")
+        query = f"{query}\n\nAdditional context: {human_feedback}"
 
-    # Extract search terms from structured analysis
-    search_terms = []
-    if "search_terms" in data:
-        for category, terms in data["search_terms"].items():
-            if isinstance(terms, list):
-                search_terms.extend(terms)
-                info_highlight(f"Added {len(terms)} terms from {category}")
+    # Prepare the analysis prompt
+    analysis_prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
 
-    primary_keywords = data.get("primary_keywords", [])
-    all_terms = list(set(search_terms + primary_keywords))
-    enhanced_query = " OR ".join([term for term in all_terms if term]) if all_terms else query
+    try:
+        analysis_result = await call_model_json(
+            messages=[{"role": "human", "content": analysis_prompt}],
+            config=ensure_config(config)
+        )
 
-    # Check for missing context - but be more lenient
-    missing_context = data.get("missing_context", [])
-    # Only consider clarification if multiple critical elements are missing
-    needs_clarification = len(missing_context) > 2
+        # Ensure the response has the required structure
+        if not isinstance(analysis_result, dict):
+            error_highlight("Invalid response format from query analysis")
+            return {"error": {"message": "Invalid response format", "phase": "query_analysis"}}
 
-    # Build final enriched query object
-    enriched_query = {
-        "enhanced_query": enhanced_query,
-        "unspsc_categories": data.get("unspsc_categories", []),
-        "product_vs_service": data.get("product_vs_service", ""),
-        "geographical_focus": data.get("geographical_focus", ""),
-        "primary_keywords": primary_keywords,
-        "missing_context": missing_context,
-        "original_query": query,
-        "search_terms": data.get("search_terms", {})
-    }
+        # Initialize default values
+        analysis_result = {
+            "unspsc_categories": analysis_result.get("unspsc_categories", []),
+            "search_components": analysis_result.get("search_components", {
+                "primary_topic": "",
+                "industry": "",
+                "product_type": "",
+                "geographical_focus": ""
+            }),
+            "search_terms": analysis_result.get("search_terms", {
+                "market_dynamics": [],
+                "provider_landscape": [],
+                "technical_requirements": [],
+                "regulatory_landscape": [],
+                "cost_considerations": [],
+                "best_practices": [],
+                "implementation_factors": []
+            }),
+            "boolean_query": analysis_result.get("boolean_query", ""),
+            "missing_context": analysis_result.get("missing_context", [])
+        }
 
-    info_highlight(
-        f"Query enriched with {len(primary_keywords)} primary keywords and {len(search_terms)} search terms. "
-        f"Using UNSPSC taxonomy for categorization."
-    )
+        log_dict(analysis_result, title="Query Analysis Result")
 
-    return {
-        "enriched_query": enriched_query,
-        "product_vs_service": data.get("product_vs_service", ""),
-        "geographical_focus": data.get("geographical_focus", ""),
-        "missing_context": missing_context,
-        "needs_clarification": needs_clarification
-    }
+        # Check for missing context
+        missing_context = analysis_result.get("missing_context", [])
+        needs_clarification = len(missing_context) >= 2  # Only request clarification for multiple missing elements
+
+        # Update category queries based on analysis
+        categories = state["categories"]
+        for category, category_state in categories.items():
+            search_terms = analysis_result.get("search_terms", {}).get(category, [])
+            if search_terms:
+                # Create optimized query for this category
+                is_higher_ed = "higher ed" in query.lower() or "education" in query.lower()
+                optimized_query = optimize_query(query, category, is_higher_ed)
+                category_state["query"] = optimized_query
+                info_highlight(f"Set query for {category}: {optimized_query}")
+            else:
+                # Use default query if no specific terms
+                category_state["query"] = query
+
+        return {
+            "query_analysis": analysis_result,
+            "categories": categories,
+            "missing_context": missing_context,
+            "needs_clarification": needs_clarification,
+            "status": "analyzed"
+        }
+    except Exception as e:
+        error_highlight(f"Error in query analysis: {str(e)}")
+        return {"error": {"message": f"Error in query analysis: {str(e)}", "phase": "query_analysis"}}
 
 async def request_clarification(state: ResearchState) -> Dict[str, Any]:
-    """
-    Human-in-the-loop node that interrupts execution to request user clarification.
-    Uses LangGraph's interrupt mechanism to pause execution and wait for user input.
-    """
-    log_step("Requesting clarification", 3, 10)  # Updated total steps
-
-    # Format missing sections for the prompt
-    missing_sections = "\n".join([f"- {section}" for section in state["missing_context"]])
+    """Request clarification from the user for missing context."""
+    log_step("Requesting clarification", 3, 10)
     
-    # Get enriched query data safely
-    enriched_query = state.get("enriched_query") or {}
-    primary_keywords = enriched_query.get("primary_keywords", [])
+    missing_context = state["missing_context"]
+    if not missing_context:
+        return {"needs_clarification": False}
     
-    # Use the structured clarification prompt - use double curly braces to escape
+    # Format the missing context items
+    missing_sections = "\n".join([f"- {item}" for item in missing_context])
+    
+    # Get analysis data
+    analysis = state.get("query_analysis", {})
+    search_components = analysis.get("search_components", {}) if analysis else {}
+    
+    # Prepare the clarification request
     try:
-        # First verify the template string
-        clarif_template = CLARIFICATION_PROMPT
-        # Ensure template uses proper format syntax (single braces)
-        if "{{" in clarif_template:
-            clarif_template = clarif_template.replace("{{", "{").replace("}}", "}")
-            
-        # Format the template with actual values
-        clarif_msg = clarif_template.format(
+        clarification_message = CLARIFICATION_PROMPT.format(
             query=state["original_query"],
-            industry_context=state.get("industry_context", "Unknown industry"),
-            primary_keywords=", ".join(primary_keywords),
+            product_vs_service=search_components.get("product_type", "Unknown"),
+            industry_context=search_components.get("industry", "Unknown"),
+            geographical_focus=search_components.get("geographical_focus", "Unknown"),
             missing_sections=missing_sections
         )
         
-        info_highlight(f"Generated clarification request")
-    except Exception as e:
-        error_highlight(f"Error formatting clarification message: {str(e)}")
-        # Fallback to direct message if template formatting fails
-        clarif_msg = f"I need additional information about your query: '{state['original_query']}'\n\n"
-        clarif_msg += f"Specifically, I need details about:\n{missing_sections}\n\n"
-        clarif_msg += "This will help me provide more accurate and relevant research results."
-
-    return {
-        "clarification_request": clarif_msg,
-        "__interrupt__": {
-            "value": {
-                "question": clarif_msg,
-                "missing_context": state["missing_context"]
-            },
-            "resumable": True,
-            "ns": ["request_clarification"],
-            "when": "during"
+        info_highlight("Generated clarification request")
+        
+        # Set up interrupt for user input
+        return {
+            "clarification_request": clarification_message,
+            "__interrupt__": {
+                "value": {
+                    "question": clarification_message,
+                    "missing_context": missing_context
+                },
+                "resumable": True,
+                "ns": ["request_clarification"],
+                "when": "during"
+            }
         }
-    }
-
+    except Exception as e:
+        error_highlight(f"Error creating clarification request: {str(e)}")
+        # Proceed without clarification in case of error
+        return {"needs_clarification": False}
 
 async def process_clarification(state: ResearchState) -> Dict[str, Any]:
-    """
-    Process user-provided clarification and incorporate it as feedback
-    for the next research iteration.
-    """
+    """Process user clarification and update the research context."""
     log_step("Processing clarification", 4, 10)
-
+    
     if not state["messages"]:
         warning_highlight("No messages found for clarification")
         return {}
     
+    # Get the latest message which should contain the user's clarification
     last_message = state["messages"][-1]
     clarification_content = str(last_message.content).strip()
     
-    # Store as human feedback that can be used in subsequent steps
-    info_highlight(f"Storing user feedback: {clarification_content}")
+    info_highlight(f"Processing user clarification: {clarification_content}")
     
-    # Don't append [Clarification: ] to the query to avoid repetition
     return {
-        "messages": state["messages"],
-        "original_query": state["original_query"],  # Keep original query
-        "human_feedback": clarification_content,  # Store feedback separately
+        "human_feedback": clarification_content,
         "needs_clarification": False,
-        "missing_context": []
+        "missing_context": [],
+        "status": "clarified"
     }
 
-def extract_key_terms_from_results(search_results: List[Document]) -> List[str]:
-    """Extract important terms from initial search results to guide further searches."""
-    if not search_results:
-        return []
-        
-    # Extract text from search results
-    all_text = " ".join(doc.page_content for doc in search_results if doc.page_content)
+# --------------------------------------------------------------------
+# 3. Module-specific research nodes
+# --------------------------------------------------------------------
+
+async def execute_category_search(
+    state: ResearchState, 
+    category: str,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Execute search for a specific research category."""
+    log_step(f"Executing search for category: {category}", 5, 10)
     
-    # Initialize term groups
-    term_groups = []
+    categories = state["categories"]
+    if category not in categories:
+        warning_highlight(f"Unknown category: {category}")
+        return {}
     
-    # Look for capitalized phrases which often indicate specific terms
-    import re
-    cap_phrases = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', all_text)
-    if cap_phrases:
-        term_groups.append(" ".join(cap_phrases[:3]))  # Use top 3 capitalized phrases
-        
-    # Extract terms following "including", "such as", etc.
-    list_items = []
-    list_matches = re.findall(r'(?:include|including|such as|like|e\.g\.|i\.e\.|namely|for example)[:]?\s+([^.;!?]+)', all_text)
-    for match in list_matches:
-        items = re.split(r',\s+|\s+and\s+|\s+or\s+', match)
-        list_items.extend([item.strip() for item in items if len(item.strip()) > 3])
+    category_state = categories[category]
+    query = category_state["query"]
     
-    if list_items:
-        term_groups.append(" ".join(list_items[:3]))
-        
-    return term_groups
-
-async def perform_search(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Performs search with progressive fallback strategies if results are insufficient."""
-    log_step("Performing search with fallback strategies", 5, 10)
-
-    if not state["enriched_query"]:
-        warning_highlight("No enriched query available for search")
-        return {"search_results": []}
-
-    eq = state["enriched_query"]
-    enhanced_query = eq["enhanced_query"]
-    original_query = eq["original_query"]
-
+    if not query:
+        warning_highlight(f"No query available for category: {category}")
+        return {}
+    
+    # Update status
+    category_state["status"] = "searching"
+    category_state["retry_count"] += 1
+    
+    # Get category-specific search parameters
+    thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
+    recency_days = int(thresholds.get("recency_threshold_days", 365))
+    
+    # Configure search params based on category
+    search_type_mapping: Dict[str, SearchType] = {
+        "market_dynamics": "recent",  # Need fresh market data
+        "provider_landscape": "comprehensive",  # Need diverse providers
+        "technical_requirements": "technical",  # Technical content
+        "regulatory_landscape": "authoritative",  # Authoritative sources
+        "cost_considerations": "recent",  # Fresh pricing data
+        "best_practices": "comprehensive",  # Diverse practices
+        "implementation_factors": "comprehensive"  # Diverse approaches
+    }
+    
+    search_type = search_type_mapping.get(category, "general")
+    
+    info_highlight(f"Executing {search_type} search for {category} with query: {query}")
+    
     try:
-        # First attempt: Try enhanced query
-        info_highlight(f"Attempting search with enhanced query: {enhanced_query}")
-        results = await jina_search(enhanced_query, config=ensure_config(config))
+        # Keep track of the query for retry tracking
+        category_state["last_search_query"] = query
         
-        # Check if results are sufficient
-        if results and len(results) >= 3:
-            info_highlight(f"Enhanced query successful with {len(results)} results")
-        else:
-            # Fallback 1: Try original query
-            warning_highlight("Insufficient results with enhanced query, trying original query")
-            results = await jina_search(original_query, config=ensure_config(config))
-            
-            # Check if original query got results
-            if results and len(results) >= 2:
-                info_highlight(f"Original query successful with {len(results)} results")
-            else:
-                # Fallback 2: Try simplified query - just use primary keywords
-                primary_keywords = eq.get("primary_keywords", [])
-                if primary_keywords:
-                    simplified_query = " ".join(primary_keywords)
-                    warning_highlight(f"Trying simplified query: {simplified_query}")
-                    results = await jina_search(simplified_query, config=ensure_config(config))
-                    
-                    # If still insufficient, try very basic query
-                    if not results or len(results) < 2:
-                        # Fallback 3: Try broadest possible query
-                        broadest_term = original_query.split()[0] if " " in original_query else original_query
-                        warning_highlight(f"Trying broadest possible query: {broadest_term}")
-                        results = await jina_search(broadest_term, config=ensure_config(config))
-    except Exception as e:
-        warning_highlight(f"Error with search, using fallback: {str(e)}")
-        try:
-            results = await jina_search(original_query, config=ensure_config(config))
-            info_highlight(f"Fallback search completed. Processing {len(results) if results else 0} results")
-        except Exception as e:
-            error_highlight(f"Search failed completely: {str(e)}")
-            return {"search_results": []}
-
-    if not results:
-        warning_highlight("No valid search results found after multiple attempts")
-        return {"search_results": []}
-
-    # Convert Document objects to the expected format
-    formatted_results = []
-    try:
-        formatted_results.extend(
-            {
+        # Execute the search
+        search_results = await search(
+            query=query,
+            search_type=search_type,
+            recency_days=recency_days,
+            config=ensure_config(config)
+        )
+        
+        if not search_results:
+            warning_highlight(f"No search results for {category}")
+            category_state["status"] = "search_failed"
+            return {"categories": categories}
+        
+        # Convert to the expected format
+        formatted_results = []
+        for doc in search_results:
+            result = {
                 "url": doc.metadata.get("url", ""),
                 "title": doc.metadata.get("title", ""),
                 "snippet": doc.page_content,
                 "source": doc.metadata.get("source", ""),
-                "published_date": doc.metadata.get("published_date"),
+                "quality_score": doc.metadata.get("quality_score", 0.5),
+                "published_date": doc.metadata.get("published_date")
             }
-            for doc in results
-        )
-        info_highlight(f"Successfully formatted {len(formatted_results)} search results")
+            formatted_results.append(result)
         
-        # Log sample of formatted results
-        if formatted_results:
-            log_dict(
-                formatted_results[0],
-                title="Sample Formatted Result"
-            )
+        # Update the category state
+        category_state["search_results"] = formatted_results
+        category_state["status"] = "searched"
+        
+        info_highlight(f"Found {len(formatted_results)} results for {category}")
+        return {"categories": categories}
+        
     except Exception as e:
-        error_highlight(f"Error formatting results: {str(e)}")
-        return {"search_results": []}
+        error_highlight(f"Error in search for {category}: {str(e)}")
+        category_state["status"] = "search_failed"
+        return {"categories": categories}
 
-    return {"search_results": formatted_results}
-
-async def process_search_results(state: ResearchState) -> Dict[str, Any]:
-    """
-    Prioritize search results and pick top documents. 
-    Same as 'process_search_results' from snippet #1, adapted to typed state.
-    """
-    log_step("Processing search results", 6, 7)
-
-    search_results = state["search_results"]
-    visited_urls = set(state["visited_urls"] or [])
-    if not search_results:
-        warning_highlight("No search results to process")
+async def extract_category_information(
+    state: ResearchState,
+    category: str,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Extract information from search results for a specific category."""
+    log_step(f"Extracting information for category: {category}", 6, 10)
+    
+    categories = state["categories"]
+    if category not in categories:
+        warning_highlight(f"Unknown category: {category}")
         return {}
-
-    info_highlight("Scoring and ranking search results")
-    query = state["original_query"].lower()
-    keywords = query.split()
-
-    scored_results = []
-    for result in search_results:
-        url = result.get("url", "")
-        text = f"{result.get('title','')} {result.get('snippet','')}".lower()
-
-        score = sum(kw in text for kw in keywords)
-        # Small boost for certain domains
-        if any(d in url for d in ["wikipedia.org", ".gov", ".edu"]):
-            score += 2
-            info_highlight(f"Applied domain boost for {url}")
-
-        # Penalize visited
-        if url in visited_urls:
-            score -= 10
-            info_highlight(f"Applied visited penalty for {url}")
-
-        scored_results.append((score, result))
-
-    sorted_results = sorted(scored_results, key=lambda x: x[0], reverse=True)
-    top_results = []
-    newly_visited = []
-
-    for score, doc in sorted_results[:3]:
-        url = doc.get("url")
-        if url and url not in visited_urls:
-            top_results.append(doc)
-            newly_visited.append(url)
-            info_highlight(f"Selected result: {url} (score: {score})")
-
-    info_highlight(f"Selected {len(top_results)} most relevant results")
-    return {
-        "search_results": top_results,
-        "visited_urls": list(visited_urls.union(newly_visited))
-    }
-
-def verify_extraction_result(extraction_result: Dict[str, Any], original_content: str) -> bool:
-    """
-    Verify that extracted results are based on actual content and not fabricated.
-    """
-    if not isinstance(extraction_result, dict):
-        return False
-        
-    # Check for expected structure
-    if "extracted_facts" not in extraction_result:
-        return False
-        
-    # Verify that extracted facts exist in original content
-    facts = extraction_result.get("extracted_facts", [])
-    if not facts:
-        return True  # No facts to verify
-        
-    for fact_item in facts:
-        if not isinstance(fact_item, dict):
-            continue
-            
-        source_text = fact_item.get("source_text", "")
-        if not source_text or source_text not in original_content:
-            return False
     
-    # Check for unrealistic confidence scores
-    confidence_score = extraction_result.get("confidence_score", 0.0)
-    if confidence_score > 0.9 and len(original_content) < 500:
-        return False  # Suspicious high confidence on small content
-        
-    return True
-
-def calculate_data_quality(valid_urls: int, invalid_urls: int, extracted_info: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Calculate overall data quality score based on source validity and extraction results.
-    """
-    total_urls = valid_urls + invalid_urls
-    
-    if total_urls == 0:
-        return {"score": 0.0, "reason": "No sources processed"}
-        
-    # Calculate base score from valid URL ratio
-    base_score = valid_urls / total_urls if total_urls > 0 else 0
-    
-    # Check extraction comprehensiveness
-    fact_count = len(extracted_info.get("extracted_facts", []))
-    has_market_data = bool(extracted_info.get("market_data", {}).get("items", []))
-    has_vendor_info = bool(extracted_info.get("vendor_info", {}).get("items", []))
-    has_specifications = bool(extracted_info.get("specifications", {}).get("items", []))
-    
-    # Adjust score based on content richness
-    content_score = min(1.0, (fact_count / 10) + 0.1 * sum([has_market_data, has_vendor_info, has_specifications]))
-    
-    # Calculate final score
-    final_score = min(0.95, (base_score * 0.6) + (content_score * 0.4))
-    
-    reason = "High quality data" if final_score > 0.7 else \
-             "Moderate quality data" if final_score > 0.4 else \
-             "Low quality data - insufficient verified information"
-             
-    return {
-        "score": round(final_score, 2),
-        "reason": reason,
-        "stats": {
-            "valid_urls": valid_urls,
-            "invalid_urls": invalid_urls,
-            "fact_count": fact_count,
-            "has_market_data": has_market_data,
-            "has_vendor_info": has_vendor_info,
-            "has_specifications": has_specifications
-        }
-    }
-
-
-async def extract_key_information(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Extract key info with better error handling and minimum data requirements."""
-    log_step("Extracting key information", 7, 10)
-
-    # Get search results with default empty list if None
-    search_results = state["search_results"] or []
+    category_state = categories[category]
+    search_results = category_state["search_results"]
+    original_query = state["original_query"]
     
     if not search_results:
-        warning_highlight("No search results to extract from")
-        return {
-            "extracted_info": {},
-            "sources": [],
-            "extraction_status": "failed",
-            "extraction_message": "No search results available"
-        }
-
-    info_highlight(f"Processing {len(search_results)} documents for information extraction")
-    extracted_info = {}
+        warning_highlight(f"No search results to extract for {category}")
+        category_state["status"] = "extraction_failed"
+        return {"categories": categories}
+    
+    # Update status
+    category_state["status"] = "extracting"
+    
+    # Extract facts from each search result
+    extracted_facts = []
     sources = []
-    extraction_count = 0
-
-    try:
-        for idx, doc in enumerate(search_results, 1):
-            if not isinstance(doc, dict):
-                warning_highlight(f"Skipping invalid document format at index {idx}")
+    
+    for idx, result in enumerate(search_results):
+        url = result.get("url", "")
+        content = result.get("snippet", "")
+        
+        if not url or not content or not is_valid_url(url):
+            continue
+        
+        info_highlight(f"Extracting from {url} for {category}")
+        
+        try:
+            # Get the appropriate extraction prompt for this category
+            extraction_prompt = get_extraction_prompt(
+                category=category,
+                query=original_query,
+                url=url,
+                content=content
+            )
+            
+            # Call the model for extraction
+            extraction_result = await call_model_json(
+                messages=[{"role": "human", "content": extraction_prompt}],
+                config=ensure_config(config)
+            )
+            
+            # Validate the extraction result minimally to ensure it has the expected structure
+            if not extraction_result:
+                warning_highlight(f"Empty extraction result for {url}")
                 continue
                 
-            url = doc.get("url", "")
-            content = doc.get("snippet", "") or doc.get("content", "") or ""
+            # Get relevance score
+            relevance_score = extraction_result.get("relevance_score", 0.0)
             
-            if not url or not content or len(content.strip()) < 50:
-                warning_highlight(f"Skipping document with insufficient content at index {idx}")
+            # Only include if relevant
+            if relevance_score < 0.3:
+                info_highlight(f"Low relevance ({relevance_score}) for {url}, skipping")
                 continue
-                
-            info_highlight(f"Extracting information from document {idx}: {url}")
             
-            try:
-                # Enhanced extraction prompt with strict guidelines
-                extraction_prompt = f"""
-                Extract factual information from this content about {state.get('original_query', 'the research topic')}.
-                
-                URL: {url}
-                
-                CRITICAL INSTRUCTIONS:
-                1. Only extract VERIFIED facts explicitly stated in the content
-                2. Format each fact with:
-                   - The fact statement
-                   - Direct quote from the content supporting the fact
-                   - Category label (overview, standards, providers, specs, costs, etc.)
-                3. If the document doesn't contain relevant information, indicate this
-                
-                CONTENT:
-                {content}
-                
-                FORMAT YOUR RESPONSE AS JSON:
-                {{
-                  "extracted_facts": [
-                    {{
-                      "fact": "Clear factual statement",
-                      "source_text": "Direct quote from content",
-                      "category": "Category label"
-                    }}
-                  ],
-                  "relevance_score": 0.0  // 0-1 score of how relevant this content is
-                }}
-                """
-                
-                extraction_result = await call_model_json(
-                    messages=[{
-                        "role": "human", 
-                        "content": extraction_prompt
-                    }],
-                    config=ensure_config(config)
-                )
-                
-                # Check if any facts were extracted
+            # Get extracted facts based on category
+            if category == "market_dynamics":
                 facts = extraction_result.get("extracted_facts", [])
-                if not facts:
-                    warning_highlight(f"No relevant facts extracted from document {idx}")
-                    continue
                 
-                # Add each fact to appropriate category
-                for fact in facts:
-                    category = fact.get("category", "general")
-                    if category not in extracted_info:
-                        extracted_info[category] = []
-                    
-                    # Include source URL with each fact
-                    fact["source_url"] = url
-                    extracted_info[category].append(fact)
+            elif category == "provider_landscape":
+                facts = []
+                vendors = extraction_result.get("extracted_vendors", [])
+                if vendors:
+                    facts.extend([
+                        {"type": "vendor", "data": vendor} for vendor in vendors
+                    ])
                 
-                # Track sources
-                sources.append({
+                relationships = extraction_result.get("vendor_relationships", [])
+                if relationships:
+                    facts.extend([
+                        {"type": "relationship", "data": rel} for rel in relationships
+                    ])
+                
+            elif category == "technical_requirements":
+                facts = []
+                requirements = extraction_result.get("extracted_requirements", [])
+                if requirements:
+                    facts.extend([
+                        {"type": "requirement", "data": req} for req in requirements
+                    ])
+                
+                standards = extraction_result.get("standards", [])
+                if standards:
+                    facts.extend([
+                        {"type": "standard", "data": std} for std in standards
+                    ])
+                
+            elif category == "regulatory_landscape":
+                facts = []
+                regulations = extraction_result.get("extracted_regulations", [])
+                if regulations:
+                    facts.extend([
+                        {"type": "regulation", "data": reg} for reg in regulations
+                    ])
+                
+                compliance = extraction_result.get("compliance_requirements", [])
+                if compliance:
+                    facts.extend([
+                        {"type": "compliance", "data": req} for req in compliance
+                    ])
+                
+            elif category == "cost_considerations":
+                facts = []
+                costs = extraction_result.get("extracted_costs", [])
+                if costs:
+                    facts.extend([
+                        {"type": "cost", "data": cost} for cost in costs
+                    ])
+                
+                models = extraction_result.get("pricing_models", [])
+                if models:
+                    facts.extend([
+                        {"type": "pricing_model", "data": model} for model in models
+                    ])
+                
+            elif category == "best_practices":
+                facts = []
+                practices = extraction_result.get("extracted_practices", [])
+                if practices:
+                    facts.extend([
+                        {"type": "practice", "data": practice} for practice in practices
+                    ])
+                
+                methods = extraction_result.get("methodologies", [])
+                if methods:
+                    facts.extend([
+                        {"type": "methodology", "data": method} for method in methods
+                    ])
+                
+            elif category == "implementation_factors":
+                facts = []
+                factors = extraction_result.get("extracted_factors", [])
+                if factors:
+                    facts.extend([
+                        {"type": "factor", "data": factor} for factor in factors
+                    ])
+                
+                challenges = extraction_result.get("challenges", [])
+                if challenges:
+                    facts.extend([
+                        {"type": "challenge", "data": challenge} for challenge in challenges
+                    ])
+            else:
+                # Default for unknown categories
+                facts = extraction_result.get("extracted_facts", [])
+            
+            # Add source information to each fact
+            for fact in facts:
+                fact["source_url"] = url
+                fact["source_title"] = result.get("title", "")
+                
+            # Only add source and facts if we extracted something
+            if facts:
+                extracted_facts.extend(facts)
+                
+                # Add source metadata
+                source = {
                     "url": url,
-                    "title": doc.get("title", ""),
+                    "title": result.get("title", ""),
+                    "published_date": result.get("published_date"),
                     "fact_count": len(facts),
-                    "categories": list(set(fact.get("category", "general") for fact in facts))
-                })
+                    "relevance_score": relevance_score,
+                    "quality_score": result.get("quality_score", 0.5)
+                }
+                sources.append(source)
                 
-                extraction_count += 1
-                info_highlight(f"Successfully extracted {len(facts)} facts from document {idx}")
+                info_highlight(f"Extracted {len(facts)} facts from {url}")
+            else:
+                info_highlight(f"No relevant facts found in {url}")
                 
-            except Exception as e:
-                warning_highlight(f"Failed to process document {idx}: {str(e)}")
-                continue
-
-        # Check if we have minimum viable data
-        total_facts = sum(len(facts) for facts in extracted_info.values())
+        except Exception as e:
+            warning_highlight(f"Error extracting from {url}: {str(e)}")
+            continue
+    
+    # Update the category state
+    category_state["extracted_facts"] = extracted_facts
+    category_state["sources"] = sources
+    
+    # Determine if extraction was successful
+    thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
+    min_facts = thresholds.get("min_facts", 3)
+    min_sources = thresholds.get("min_sources", 2)
+    
+    if len(extracted_facts) >= min_facts and len(sources) >= min_sources:
+        category_state["status"] = "extracted"
+        category_state["complete"] = True
         
-        if extraction_count == 0 or total_facts == 0:
-            warning_highlight("CRITICAL: No useful information extracted from any documents")
-            return {
-                "extracted_info": {},
-                "sources": [],
-                "extraction_status": "failed",
-                "extraction_message": "No useful information could be extracted"
-            }
+        # Calculate quality score for this category
+        quality_score = calculate_category_quality_score(
+            category=category,
+            extracted_facts=extracted_facts,
+            sources=sources,
+            thresholds=thresholds
+        )
+        category_state["quality_score"] = quality_score
         
-        info_highlight(f"Successfully extracted {total_facts} facts from {extraction_count} sources")
-        return {
-            "extracted_info": extracted_info,
-            "sources": sources,
-            "extraction_status": "success",
-            "extraction_message": f"Extracted {total_facts} facts from {extraction_count} sources"
-        }
+        info_highlight(f"Successfully extracted information for {category} (quality: {quality_score:.2f})")
+    else:
+        category_state["status"] = "extraction_incomplete"
+        info_highlight(f"Incomplete extraction for {category}: {len(extracted_facts)} facts from {len(sources)} sources")
+        
+        # If we've retried too many times, mark as complete anyway
+        if category_state["retry_count"] >= 3:
+            category_state["complete"] = True
+            warning_highlight(f"Maximum retries reached for {category}, accepting partial results")
+    
+    return {"categories": categories}
 
-    except Exception as e:
-        error_highlight(f"Error during information extraction: {str(e)}")
-        return {
-            "extracted_info": {},
-            "sources": [],
-            "extraction_status": "error",
-            "extraction_message": f"Error: {str(e)}"
-        }
-
-def verify_extraction_quality(extraction_result, original_content):
-    """Verify that extracted information is genuinely from the content."""
-    # Check if the extraction result is a dictionary
-    if not isinstance(extraction_result, dict):
-        return {"passed": False, "reason": "Extraction result is not a dictionary"}
+# Helper function to calculate quality score for a category
+def calculate_category_quality_score(
+    category: str,
+    extracted_facts: List[Dict[str, Any]],
+    sources: List[Dict[str, Any]],
+    thresholds: Dict[str, Any]
+) -> float:
+    """Calculate quality score for a category based on extracted data."""
+    # Base score starts at 0.3
+    score = 0.3
     
-    # Check if any categories have content
-    has_content = False
-    for category, items in extraction_result.items():
-        if isinstance(items, list) and items:
-            has_content = True
-            break
+    # Add points for number of facts
+    min_facts = thresholds.get("min_facts", 3)
+    fact_ratio = min(1.0, len(extracted_facts) / (min_facts * 2))
+    score += fact_ratio * 0.2
     
-    if not has_content:
-        return {"passed": False, "reason": "No content extracted from any category"}
+    # Add points for number of sources
+    min_sources = thresholds.get("min_sources", 2)
+    source_ratio = min(1.0, len(sources) / (min_sources * 1.5))
+    score += source_ratio * 0.2
     
-    # Verify source references are present in original content
-    for category, items in extraction_result.items():
-        if not isinstance(items, list):
+    # Add points for authoritative sources
+    auth_ratio = thresholds.get("authoritative_source_ratio", 0.5)
+    authoritative_sources = [
+        s for s in sources 
+        if s.get("quality_score", 0.0) > 0.7 or
+        any(domain in s.get("url", "") for domain in ['.edu', '.gov', '.org'])
+    ]
+    auth_source_ratio = len(authoritative_sources) / len(sources) if sources else 0
+    if auth_source_ratio >= auth_ratio:
+        score += 0.2
+    else:
+        score += (auth_source_ratio / auth_ratio) * 0.1
+    
+    # Add points for recency
+    recency_threshold = thresholds.get("recency_threshold_days", 365)
+    recent_sources = 0
+    for source in sources:
+        date_str = source.get("published_date")
+        if not date_str:
             continue
             
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-                
-            source_text = item.get("source_text", "")
-            # Check if source text is in the original content
-            if source_text and source_text not in original_content:
-                return {"passed": False, "reason": f"Source text not found in original content: {source_text[:50]}..."}
+        try:
+            from dateutil import parser
+            from datetime import datetime, timezone
+            date = parser.parse(date_str)
+            now = datetime.now(timezone.utc)
+            days_old = (now - date).days
+            if days_old <= recency_threshold:
+                recent_sources += 1
+        except Exception:
+            pass
     
-    return {"passed": True}
+    if sources:
+        recency_ratio = recent_sources / len(sources)
+        score += recency_ratio * 0.1
+    
+    return min(1.0, score)
 
-def deduplicate_extracted_info(extracted_info):
-    """Remove duplicate or very similar information."""
-    result = {category: [] for category in extracted_info}
+async def execute_research_for_categories(
+    state: ResearchState,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Execute research for all categories in parallel."""
+    log_step("Executing research for all categories", 5, 10)
     
-    for category, items in extracted_info.items():
-        seen_texts = set()
-        for item in items:
-            # Create a simplified version of the text for comparison
-            text = item.get("text", "").lower()
-            simplified = ' '.join([word for word in text.split() if len(word) > 3])
+    categories = state["categories"]
+    research_tasks = []
+    
+    for category, category_state in categories.items():
+        if category_state["complete"]:
+            info_highlight(f"Category {category} already complete, skipping")
+            continue
             
-            # Check if we've seen something very similar
-            is_duplicate = False
-            for seen in seen_texts:
-                # Simple similarity check
-                if len(set(simplified.split()) & set(seen.split())) / max(len(simplified.split()), len(seen.split())) > 0.7:
-                    is_duplicate = True
-                    break
-            
-            if not is_duplicate:
-                seen_texts.add(simplified)
-                result[category].append(item)
+        # Execute search followed by extraction
+        info_highlight(f"Adding research task for {category}")
+        
+        # Create async task for this category
+        async def process_category(cat: str) -> None:
+            search_result = await execute_category_search(state, cat, config)
+            # Only extract if search was successful
+            if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
+                await extract_category_information(state, cat, config)
+        
+        task = asyncio.create_task(process_category(category))
+        research_tasks.append(task)
     
-    return result
-
-async def aggregate_research_findings(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """
-    Aggregate research findings into a comprehensive report with structured categories and enhanced validation.
-    Ensures complete coverage of all required aspects and maintains high quality standards.
-    """
-    log_step("Aggregating research findings into final report", 9, 10)
+    # Wait for all research tasks to complete
+    if research_tasks:
+        await asyncio.gather(*research_tasks)
     
-    synthesis = state.get("synthesis", {}) or {}
-    validation_status = synthesis.get("validation_status", {})
-    confidence_score = synthesis.get("confidence_score", 0.0)
+    # Check if all categories are complete
+    all_complete = all(
+        category_state["complete"] for category_state in categories.values()
+    )
     
-    if not synthesis or confidence_score < 0.4:
-        warning_highlight("Insufficient synthesis quality for aggregation")
+    if all_complete:
+        info_highlight("All categories research complete")
         return {
-            "report": None,
-            "aggregation_complete": False,
-            "validation_status": {
-                "is_valid": False,
-                "issues": ["Insufficient synthesis quality"]
-            }
+            "status": "researched",
+            "categories": categories
+        }
+    else:
+        # Some categories still incomplete
+        incomplete = [
+            category for category, category_state in categories.items()
+            if not category_state["complete"]
+        ]
+        info_highlight(f"Categories still incomplete: {', '.join(incomplete)}")
+        return {
+            "status": "research_incomplete",
+            "categories": categories
+        }
+
+# --------------------------------------------------------------------
+# 4. Synthesis and validation nodes
+# --------------------------------------------------------------------
+
+async def synthesize_research(
+    state: ResearchState,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Synthesize all research data into a comprehensive result."""
+    log_step("Synthesizing research results", 7, 10)
+    
+    categories = state["categories"]
+    original_query = state["original_query"]
+    
+    # Prepare research data for synthesis
+    research_data = {}
+    for category, category_state in categories.items():
+        research_data[category] = {
+            "facts": category_state["extracted_facts"],
+            "sources": category_state["sources"],
+            "quality_score": category_state["quality_score"]
         }
     
-    info_highlight("Starting research aggregation")
+    # Generate prompt
+    synthesis_prompt = SYNTHESIS_PROMPT.format(
+        query=original_query,
+        research_json=json.dumps(research_data, indent=2)
+    )
     
     try:
-        # Prepare the aggregation prompt with clear structure
-        aggregation_prompt = {
-            "role": "human",
-            "content": f"""
-            Create a comprehensive research report based on the synthesized findings.
-            
-            REPORT STRUCTURE:
-            1. Executive Summary
-               - Key findings and recommendations
-               - Confidence assessment
-               - Coverage overview
-            
-            2. Detailed Analysis
-               {json.dumps(synthesis.get("analysis", {}), indent=2)}
-            
-            3. Market Analysis
-               - Market dynamics and trends
-               - Competitive landscape
-               - Growth opportunities
-            
-            4. Technical Assessment
-               - Requirements and specifications
-               - Implementation considerations
-               - Risk factors
-            
-            5. Cost Analysis
-               - Market basket analysis
-               - Budget considerations
-               - ROI factors
-            
-            6. Recommendations
-               - Strategic recommendations
-               - Implementation roadmap
-               - Risk mitigation strategies
-            
-            7. Appendices
-               - Detailed market basket
-               - Source citations
-               - Data quality assessment
-            
-            VALIDATION STATUS:
-            {json.dumps(validation_status, indent=2)}
-            
-            CONFIDENCE SCORE: {confidence_score}
-            
-            FORMAT RESPONSE AS JSON:
-            {{
-              "report": {{
-                "executive_summary": {{
-                  "key_findings": [],
-                  "recommendations": [],
-                  "confidence_assessment": {{
-                    "score": 0.0,
-                    "factors": []
-                  }}
-                }},
-                "detailed_analysis": {{
-                  "sections": [],
-                  "coverage": {{
-                    "complete": [],
-                    "partial": [],
-                    "missing": []
-                  }}
-                }},
-                "market_analysis": {{
-                  "dynamics": "",
-                  "landscape": "",
-                  "opportunities": []
-                }},
-                "technical_assessment": {{
-                  "requirements": [],
-                  "implementation": [],
-                  "risks": []
-                }},
-                "cost_analysis": {{
-                  "market_basket_summary": "",
-                  "budget_factors": [],
-                  "roi_considerations": []
-                }},
-                "recommendations": {{
-                  "strategic": [],
-                  "implementation": [],
-                  "risk_mitigation": []
-                }},
-                "appendices": {{
-                  "market_basket": [],
-                  "citations": [],
-                  "quality_assessment": {{
-                    "score": 0.0,
-                    "factors": []
-                  }}
-                }}
-              }},
-              "metadata": {{
-                "generated_at": "",
-                "version": "2.0",
-                "confidence_score": 0.0,
-                "coverage_score": 0.0
-              }}
-            }}
-            """
-        }
-        
-        # Generate the report
-        report_response = await call_model_json(
-            messages=[aggregation_prompt],
+        synthesis_result = await call_model_json(
+            messages=[{"role": "human", "content": synthesis_prompt}],
             config=ensure_config(config)
         )
         
-        # Log the report generation
         log_dict(
-            report_response,
-            title="Research Report Generation"
-        )
-        
-        # Validate the report
-        report_validation = validate_report_quality(report_response)
-        
-        # Update metadata
-        report_response["metadata"].update({
-            "generated_at": datetime.now().isoformat(),
-            "confidence_score": confidence_score,
-            "coverage_score": validation_status.get("completeness", {}).get("coverage_percentage", 0.0)
-        })
-        
-        info_highlight(
-            f"Report generation complete with confidence score: {confidence_score}"
-        )
-        
-        return {
-            "report": report_response,
-            "aggregation_complete": True,
-            "validation_status": report_validation
-        }
-        
-    except Exception as e:
-        error_highlight(f"Error during report aggregation: {str(e)}")
-        return {
-            "report": None,
-            "aggregation_complete": False,
-            "validation_status": {
-                "is_valid": False,
-                "issues": [f"Aggregation error: {str(e)}"]
-            }
-        }
-
-def validate_report_quality(report_response: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Validate the quality and completeness of the generated report.
-    """
-    validation = {
-        "is_valid": True,
-        "issues": [],
-        "quality_metrics": {}
-    }
-    
-    report = report_response.get("report", {})
-    
-    # Check executive summary
-    exec_summary = report.get("executive_summary", {})
-    if not exec_summary.get("key_findings"):
-        validation["issues"].append("Missing key findings in executive summary")
-    if not exec_summary.get("recommendations"):
-        validation["issues"].append("Missing recommendations in executive summary")
-        
-    # Check detailed analysis
-    analysis = report.get("detailed_analysis", {})
-    if not analysis.get("sections"):
-        validation["issues"].append("Missing detailed analysis sections")
-    
-    # Check market analysis
-    market = report.get("market_analysis", {})
-    if not all([market.get("dynamics"), market.get("landscape"), market.get("opportunities")]):
-        validation["issues"].append("Incomplete market analysis")
-    
-    # Check technical assessment
-    tech = report.get("technical_assessment", {})
-    if not all([tech.get("requirements"), tech.get("implementation"), tech.get("risks")]):
-        validation["issues"].append("Incomplete technical assessment")
-    
-    # Check recommendations
-    recommendations = report.get("recommendations", {})
-    if not all([
-        recommendations.get("strategic"),
-        recommendations.get("implementation"),
-        recommendations.get("risk_mitigation")
-    ]):
-        validation["issues"].append("Missing recommendations")
-    
-    # Check appendices
-    appendices = report.get("appendices", {})
-    if not appendices.get("citations"):
-        validation["issues"].append("Missing citations in appendices")
-    
-    # Calculate quality metrics
-    section_scores = {
-        "executive_summary": 1.0 if not any("executive summary" in issue for issue in validation["issues"]) else 0.5,
-        "detailed_analysis": 1.0 if not any("detailed analysis" in issue for issue in validation["issues"]) else 0.5,
-        "market_analysis": 1.0 if not any("market analysis" in issue for issue in validation["issues"]) else 0.5,
-        "technical_assessment": 1.0 if not any("technical assessment" in issue for issue in validation["issues"]) else 0.5,
-        "recommendations": 1.0 if not any("recommendations" in issue for issue in validation["issues"]) else 0.5
-    }
-    
-    validation["quality_metrics"] = {
-        "section_scores": section_scores,
-        "overall_score": sum(section_scores.values()) / len(section_scores)
-    }
-    
-    validation["is_valid"] = len(validation["issues"]) == 0
-    
-    return validation
-
-async def synthesize_research(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """
-    Synthesize research with structured requirements to ensure comprehensive coverage regardless of domain.
-    Uses extracted information to generate insights with citation tracking.
-    """
-    log_step("Synthesizing comprehensive research findings", 8, 10)
-
-    extracted_info = state.get("extracted_info", {})
-    sources = state.get("sources", [])
-    
-    if not extracted_info or not any(extracted_info.values()):
-        warning_highlight("No extracted information available for synthesis")
-        return {
-            "synthesis": {
-                "analysis": {},
-                "market_basket": [],
-                "confidence_score": 0.0,
-                "validation_status": {"is_valid": False, "issues": ["No data to synthesize"]}
+            {
+                "synthesis_sections": list(synthesis_result.get("synthesis", {}).keys()),
+                "confidence_score": synthesis_result.get("confidence_assessment", {}).get("overall_score")
             },
-            "synthesis_complete": False,
-            "confidence_score": 0.0,
-            "validation_status": {"is_valid": False, "issues": ["No data to synthesize"]}
-        }
-
-    info_highlight("Starting comprehensive research synthesis")
-    
-    # Structure the synthesis requirements based on domain-agnostic categories
-    synthesis_categories = [
-        "domain_overview",          # Overview of the specific domain/industry
-        "market_dynamics",          # Market trends, size, growth rate
-        "regulatory_landscape",     # Regulations, standards, compliance requirements
-        "best_practices",          # Industry best practices and methodologies
-        "provider_landscape",       # Key vendors, suppliers, service providers
-        "technical_requirements",   # Technical specifications, compatibility
-        "implementation_factors",   # Resources, timeline, constraints
-        "cost_considerations"       # Pricing models, TCO, budget considerations
-    ]
-    
-    # Map our extracted information to these synthesis categories
-    category_mapping = {
-        "industry_overview": "domain_overview",
-        "standards_regulations": "regulatory_landscape",
-        "best_practices": "best_practices",
-        "key_providers": "provider_landscape",
-        "product_specifications": "technical_requirements",
-        "implementation_considerations": "implementation_factors",
-        "cost_factors": "cost_considerations"
-    }
-    
-    # Prepare the synthesis prompt with clear expectations
-    try:
-        synthesis_prompt = {
-            "role": "human",
-            "content": f"""
-            Create a comprehensive synthesis of research findings for: {state.get('original_query', 'the requested topic')}
-            
-            REQUIREMENTS:
-            1. Create a structured analysis covering ALL of the following categories:
-               - Domain Overview: Key characteristics and context
-               - Market Dynamics: Trends, growth rates, market size
-               - Regulatory Landscape: Compliance requirements, standards
-               - Best Practices: Methodologies, recommended approaches
-               - Provider Landscape: Key suppliers, vendors, service providers
-               - Technical Requirements: Specifications, compatibility
-               - Implementation Factors: Resources, processes, constraints
-               - Cost Considerations: Pricing models, budget factors
-            
-            2. For EACH category:
-               - Synthesize insights from multiple sources where available
-               - Identify consistencies and discrepancies across sources
-               - Include citation links to source URLs for every fact
-               - If information is missing for any category, explicitly note that
-            
-            3. For market basket items (if available):
-               - Only include items with verified information
-               - Include manufacturer, item details, and pricing
-               - Provide citation for each market basket item
-            
-            CONTEXT:
-            - Original query: {state.get('original_query', '')}
-            - Domain context: {state.get('product_vs_service', '')}
-            - Geographical focus: {state.get('geographical_focus', '')}
-            
-            AVAILABLE INFORMATION:
-            {json.dumps(extracted_info, indent=2)}
-            
-            SOURCES:
-            {json.dumps(sources, indent=2)}
-            
-            FORMAT RESPONSE AS JSON:
-            {{
-              "analysis": {{
-                "domain_overview": {{ "content": "", "citations": [] }},
-                "market_dynamics": {{ "content": "", "citations": [] }},
-                "regulatory_landscape": {{ "content": "", "citations": [] }},
-                "best_practices": {{ "content": "", "citations": [] }},
-                "provider_landscape": {{ "content": "", "citations": [] }},
-                "technical_requirements": {{ "content": "", "citations": [] }},
-                "implementation_factors": {{ "content": "", "citations": [] }},
-                "cost_considerations": {{ "content": "", "citations": [] }}
-              }},
-              "market_basket": [
-                {{
-                  "manufacturer": "",
-                  "item_number": "",
-                  "item_description": "",
-                  "uom": "",
-                  "estimated_qty": 0,
-                  "unit_cost": 0,
-                  "citation": ""
-                }}
-              ],
-              "confidence_score": 0.0,
-              "validation_status": {{
-                "is_valid": false,
-                "issues": [],
-                "completeness": {{
-                  "complete_categories": [],
-                  "incomplete_categories": [],
-                  "missing_categories": []
-                }}
-              }}
-            }}
-            """
-        }
-        
-        synthesis_response = await call_model_json(
-            messages=[synthesis_prompt],
-            config=ensure_config(config)
+            title="Synthesis Overview"
         )
         
-        # Log synthesis results
-        log_dict(
-            synthesis_response,
-            title="Comprehensive Research Synthesis"
-        )
-        
-        # Evaluate synthesis quality
-        coverage_analysis = evaluate_synthesis_coverage(synthesis_response, synthesis_categories)
-        confidence_score = calculate_synthesis_confidence(synthesis_response, coverage_analysis)
-        
-        # Update validation status
-        validation_status = synthesis_response.get("validation_status", {})
-        validation_status["completeness"] = coverage_analysis
-        
-        is_valid = (confidence_score >= 0.7 and 
-                   len(coverage_analysis.get("complete_categories", [])) >= 5 and
-                   len(coverage_analysis.get("missing_categories", [])) <= 1)
-        
-        validation_status["is_valid"] = is_valid
-        
-        # Put everything together
-        final_synthesis = {
-            "analysis": synthesis_response.get("analysis", {}),
-            "market_basket": synthesis_response.get("market_basket", []),
-            "confidence_score": confidence_score,
-            "validation_status": validation_status
-        }
-        
-        info_highlight(f"Synthesis complete with confidence score: {confidence_score}")
-        info_highlight(f"Complete categories: {len(coverage_analysis.get('complete_categories', []))}, "
-                     f"Incomplete: {len(coverage_analysis.get('incomplete_categories', []))}, "
-                     f"Missing: {len(coverage_analysis.get('missing_categories', []))}")
+        overall_score = synthesis_result.get("confidence_assessment", {}).get("overall_score", 0.0)
+        info_highlight(f"Research synthesis complete with confidence score: {overall_score:.2f}")
         
         return {
-            "synthesis": final_synthesis,
-            "synthesis_complete": True,
-            "confidence_score": confidence_score,
-            "validation_status": validation_status
+            "synthesis": synthesis_result,
+            "status": "synthesized"
         }
-        
     except Exception as e:
-        error_highlight(f"Error during synthesis: {str(e)}")
-        return {
-            "synthesis": {
-                "analysis": {},
-                "market_basket": [],
-                "confidence_score": 0.0,
-                "validation_status": {"is_valid": False, "issues": [f"Synthesis error: {str(e)}"]}
-            },
-            "synthesis_complete": False,
-            "confidence_score": 0.0,
-            "validation_status": {"is_valid": False, "issues": [f"Synthesis error: {str(e)}"]}
-        }
+        error_highlight(f"Error in research synthesis: {str(e)}")
+        return {"error": {"message": f"Error in research synthesis: {str(e)}", "phase": "synthesis"}}
 
-def evaluate_synthesis_coverage(synthesis, required_categories):
-    """Evaluate how well the synthesis covers the required categories."""
-    complete_categories = []
-    incomplete_categories = []
-    missing_categories = []
+async def validate_synthesis(
+    state: ResearchState,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Validate the synthesized research results."""
+    log_step("Validating research synthesis", 8, 10)
     
-    analysis = synthesis.get("analysis", {})
-    
-    for category in required_categories:
-        category_data = analysis.get(category, {})
-        content = category_data.get("content", "")
-        citations = category_data.get("citations", [])
-        
-        if not content:
-            missing_categories.append(category)
-        elif len(content) > 200 and citations:
-            complete_categories.append(category)
-        else:
-            incomplete_categories.append(category)
-    
-    return {
-        "complete_categories": complete_categories,
-        "incomplete_categories": incomplete_categories,
-        "missing_categories": missing_categories,
-        "coverage_percentage": len(complete_categories) / len(required_categories) if required_categories else 0
-    }
-
-def calculate_synthesis_confidence(synthesis, coverage_analysis):
-    """Calculate confidence score based on synthesis quality and coverage."""
-    # Base confidence from coverage
-    coverage_score = coverage_analysis.get("coverage_percentage", 0)
-    
-    # Check citation quality
-    citation_count = 0
-    analysis = synthesis.get("analysis", {})
-    
-    for category, data in analysis.items():
-        citation_count += len(data.get("citations", []))
-    
-    citation_score = min(1.0, citation_count / 15)  # Expect around 15 citations for full score
-    
-    # Check market basket quality
-    market_basket = synthesis.get("market_basket", [])
-    basket_score = 0
-    if market_basket:
-        valid_items = [item for item in market_basket 
-                      if all(item.get(field) for field in ["manufacturer", "item_description", "citation"])]
-        basket_score = len(valid_items) / len(market_basket) if market_basket else 0
-    
-    # Calculate weighted confidence score
-    final_score = (coverage_score * 0.5) + (citation_score * 0.3) + (basket_score * 0.2)
-    
-    # Cap at 0.95 to allow for some uncertainty
-    return min(0.95, final_score)
-
-def is_query_complex_enough(query: str) -> bool:
-    """Check if the query has enough complexity to warrant detailed validation."""
-    word_count = len(query.split())
-    contains_industry_terms = any(term in query.lower() for term in ["industry", "market", "sector", "vendors", "suppliers", "procurement"])
-    
-    return word_count >= 3 or contains_industry_terms
-
-async def validate_research_output(state: ResearchState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
-    """Validate the synthesized output with additional checks for fabricated data."""
-    log_step("Validating research output", 9, 10)
-
-    if not state["synthesis"]:
+    synthesis = state.get("synthesis")
+    if not synthesis:
         warning_highlight("No synthesis to validate")
-        return {
-            "confidence_score": 0.0,
-            "validation_status": {
-                "is_valid": False,
-                "issues": ["No synthesis available for validation"],
-                "coverage": {
-                    "topics_covered": [],
-                    "missing_topics": state.get("search_priority", []),
-                    "coverage_score": 0.0
-                },
-                "quality": {
-                    "depth_score": 0.0,
-                    "relevance_score": 0.0,
-                    "source_quality_score": 0.0
-                },
-                "recommendations": ["Perform initial research to generate synthesis"]
-            },
-            "validation_passed": False,
-            "should_retry_search": True
-        }
-
-    info_highlight("Starting validation of research synthesis")
+        return {"error": {"message": "No synthesis to validate", "phase": "validation"}}
     
-    # Get sources from the state
-    sources = state.get("sources", [])
-    source_urls = [source.get("url", "") for source in sources if source.get("url")]
-    
-    # Extract URLs from the synthesis
-    synthesis = state.get("synthesis", {}) or {}
-    market_basket = synthesis.get("market_basket", [])
-    
-    # Check for fabricated URLs in market basket
-    fabricated_urls = []
-    for item in market_basket:
-        citation = item.get("citation", "")
-        if citation and citation not in source_urls and not is_valid_url(citation):
-            fabricated_urls.append(citation)
-    
-    if fabricated_urls:
-        warning_highlight(f"Found fabricated URLs in market basket: {fabricated_urls}")
+    # Generate validation prompt
+    validation_prompt = VALIDATION_PROMPT.format(
+        synthesis_json=json.dumps(synthesis, indent=2)
+    )
     
     try:
-        # Add validation for fabricated data
-        validation_prompt = {
-            "role": "human",
-            "content": f"""Validate this research synthesis against these criteria:
-
-1. Data Authenticity: Check for fabricated or made-up data
-2. Coverage: Check if all required topics {json.dumps(state.get('search_priority', []))} are addressed
-3. Quality: Assess depth, relevance, and source quality
-4. Confidence: Rate overall confidence in the findings
-
-CRITICAL VALIDATION REQUIREMENTS:
-- Flag any fabricated URLs, especially example.com or test.com domains
-- Verify that market basket items have legitimate sources
-- Confirm that no data appears to be fabricated or hallucinated
-- Check that confidence scores are realistic given the data quality
-- Ensure all claims have proper citations to source URLs
-
-Known source URLs: {json.dumps(source_urls)}
-Potentially fabricated URLs detected: {json.dumps(fabricated_urls)}
-
-Provide validation results as JSON:
-{{
-    "confidence_score": float,  # 0.0 to 1.0
-    "validation_status": {{
-        "is_valid": bool,
-        "issues": list[str],
-        "fabricated_data_detected": bool,
-        "fabricated_elements": list[str],
-        "coverage": {{
-            "topics_covered": list[str],
-            "missing_topics": list[str],
-            "coverage_score": float  # 0.0 to 1.0
-        }},
-        "quality": {{
-            "depth_score": float,  # 0.0 to 1.0
-            "relevance_score": float,  # 0.0 to 1.0
-            "source_quality_score": float  # 0.0 to 1.0
-        }},
-        "recommendations": list[str]
-    }}
-}}
-
-Synthesis to validate: {json.dumps(state['synthesis'])}"""
-        }
-
         validation_result = await call_model_json(
-            messages=[validation_prompt],
+            messages=[{"role": "human", "content": validation_prompt}],
             config=ensure_config(config)
         )
-
+        
+        # Get validation status
+        validation_results = validation_result.get("validation_results", {})
+        is_valid = validation_results.get("is_valid", False)
+        validation_score = validation_results.get("validation_score", 0.0)
+        
         # Log validation results
         log_dict(
-            validation_result,
+            {
+                "is_valid": is_valid,
+                "validation_score": validation_score,
+                "critical_issues": validation_results.get("critical_issues", [])
+            },
             title="Validation Results"
         )
-
-        # Extract validation components
-        confidence_score = validation_result.get("confidence_score", 0.0)
-        vstatus = validation_result.get("validation_status", {})
         
-        # Adjust for fabricated data
-        fabricated_data_detected = vstatus.get("fabricated_data_detected", bool(fabricated_urls))
-        if fabricated_data_detected:
-            warning_highlight("Fabricated data detected in research synthesis")
-            confidence_score = min(confidence_score, 0.3)  # Cap confidence when fabricated data exists
-            if "issues" in vstatus:
-                vstatus["issues"].append("Fabricated data detected - results unreliable")
-            vstatus["is_valid"] = False
-        
-        # Calculate validation result
-        quality_scores = vstatus.get("quality", {})
-        coverage = vstatus.get("coverage", {})
-        
-        avg_quality_score = sum([
-            quality_scores.get("depth_score", 0.0),
-            quality_scores.get("relevance_score", 0.0),
-            quality_scores.get("source_quality_score", 0.0)
-        ]) / 3.0
-        
-        coverage_score = coverage.get("coverage_score", 0.0)
-        
-        # Validation passes ONLY if:
-        # 1. No fabricated data detected
-        # 2. Confidence score >= 0.6
-        # 3. Average quality score >= 0.6
-        # 4. Coverage score >= 0.6
-        validation_passed = (
-            not fabricated_data_detected and
-            confidence_score >= 0.6 and
-            avg_quality_score >= 0.6 and
-            coverage_score >= 0.6 and
-            not any("critical" in issue.lower() for issue in vstatus.get("issues", []))
-        )
-
-        # Determine if we should retry the search
-        should_retry_search = (
-            not validation_passed and
-            (coverage_score < 0.5 or len(coverage.get("missing_topics", [])) > len(coverage.get("topics_covered", [])))
-        )
-
-        msg = (
-            f"Validation {'passed' if validation_passed else 'failed'} "
-            f"(confidence: {confidence_score:.2f}, quality: {avg_quality_score:.2f}, coverage: {coverage_score:.2f})"
-        )
-        info_highlight(msg)
-
-        if not validation_passed:
-            warning_highlight(f"Validation failed. Issues: {vstatus.get('issues', [])}")
-            if fabricated_data_detected:
-                error_highlight("CRITICAL: Fabricated data detected in results")
-
-        return {
-            "confidence_score": confidence_score,
-            "validation_status": vstatus,
-            "validation_passed": validation_passed,
-            "should_retry_search": should_retry_search
-        }
-
+        if is_valid:
+            info_highlight(f"Validation passed with score: {validation_score:.2f}")
+            return {
+                "validation_result": validation_result,
+                "status": "validated",
+                "complete": True
+            }
+        else:
+            warning_highlight(f"Validation failed with score: {validation_score:.2f}")
+            return {
+                "validation_result": validation_result,
+                "status": "validation_failed"
+            }
     except Exception as e:
-        error_highlight(f"Error during validation: {str(e)}")
-        return {
-            "confidence_score": 0.0,
-            "validation_status": {
-                "is_valid": False,
-                "issues": [f"Validation error: {str(e)}"],
-                "fabricated_data_detected": True,  # Assume problem when validation fails
-                "coverage": {
-                    "topics_covered": [],
-                    "missing_topics": state.get("search_priority", []),
-                    "coverage_score": 0.0
-                },
-                "quality": {
-                    "depth_score": 0.0,
-                    "relevance_score": 0.0,
-                    "source_quality_score": 0.0
-                },
-                "recommendations": ["Error during validation - retry validation"]
-            },
-            "validation_passed": False,
-            "should_retry_search": True
-        }
+        error_highlight(f"Error in synthesis validation: {str(e)}")
+        return {"error": {"message": f"Error in synthesis validation: {str(e)}", "phase": "validation"}}
+
+async def prepare_final_response(
+    state: ResearchState,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Prepare the final response with the research results."""
+    log_step("Preparing final response", 9, 10)
     
+    synthesis = state.get("synthesis", {})
+    validation = state.get("validation_result", {})
+    original_query = state["original_query"]
+    
+    # Create a summary message for the user
+    synthesis_content = synthesis.get("synthesis", {}) if synthesis else {}
+    confidence = synthesis.get("confidence_assessment", {}) if synthesis else {}
+    
+    # Build an executive summary
+    executive_summary = "# Research Results: " + original_query + "\n\n"
+    
+    # Add confidence information
+    confidence_score = confidence.get("overall_score", 0.0)
+    executive_summary += f"**Confidence Score:** {confidence_score:.2f}/1.0\n\n"
+    
+    # Add key findings from most complete sections
+    executive_summary += "## Key Findings\n\n"
+    
+    # Get the most complete sections
+    section_scores = confidence.get("section_scores", {})
+    sorted_sections = sorted(
+        section_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+    
+    # Add content from top 3 sections
+    for section_name, score in sorted_sections[:3]:
+        if section_name in synthesis_content and synthesis_content[section_name]["content"]:
+            section_content = synthesis_content[section_name]["content"]
+            executive_summary += f"### {section_name.replace('_', ' ').title()}\n\n"
+            executive_summary += f"{section_content}\n\n"
+    
+    # Add limitations
+    knowledge_gaps = confidence.get("knowledge_gaps", [])
+    if knowledge_gaps:
+        executive_summary += "## Limitations\n\n"
+        for gap in knowledge_gaps:
+            executive_summary += f"- {gap}\n"
+    
+    # Create the response message
+    response_message = AIMessage(content=executive_summary)
+    
+    return {
+        "messages": [response_message],
+        "status": "complete",
+        "complete": True
+    }
 
 # --------------------------------------------------------------------
-# 4. Conditional branching logic
+# 5. Conditional routing functions
 # --------------------------------------------------------------------
 
-def should_clarify(state: ResearchState) -> str:
-    """Decide if we must request clarification from the user with more relaxed criteria."""
-    info_highlight("Checking if clarification is needed")
-    
-    # Get missing context
-    missing_context = state.get("missing_context", [])
+def should_request_clarification(state: ResearchState) -> Hashable:
+    """Determine if clarification is needed."""
+    needs_clarification = state.get("needs_clarification", False)
     has_feedback = bool(state.get("human_feedback"))
     
-    # Only request clarification for critical missing pieces and if no feedback exists
-    if len(missing_context) > 2 and not has_feedback and state.get("needs_clarification", False):
-        info_highlight("Clarification required - multiple critical context elements missing")
+    if needs_clarification and not has_feedback:
         return "request_clarification"
+    else:
+        return "execute_research_for_categories"
+
+def check_retry_or_continue(state: ResearchState) -> Hashable:
+    """Determine if we should retry incomplete categories or continue."""
+    categories = state["categories"]
+
+    # Check if any categories need retry
+    categories_to_retry = []
+    categories_to_retry.extend(
+        category
+        for category, category_state in categories.items()
+        if not category_state["complete"] and category_state["retry_count"] < 3
+    )
+    if categories_to_retry:
+        # Still have categories to retry
+        info_highlight(f"Categories to retry: {categories_to_retry}")
+        return "execute_research_for_categories"
+    else:
+        # All categories either complete or max retries reached
+        info_highlight("Research complete or max retries reached for all categories")
+        return "synthesize_research"
+
+def validate_or_complete(state: ResearchState) -> Hashable:
+    """Determine if we should validate the synthesis or finish."""
+    validation_result = state.get("validation_result", {})
+    validation_results = validation_result.get("validation_results", {}) if validation_result else {}
+    if is_valid := validation_results.get("is_valid", False):
+        info_highlight("Validation passed, preparing final response")
+    else:
+        # Not valid, but we'll still finish
+        warning_highlight("Validation failed, but preparing final response anyway")
+    return "prepare_final_response"
+
+def handle_error_or_continue(state: ResearchState) -> Hashable:
+    """Determine if we should handle an error or continue."""
+    error = state.get("error")
     
-    info_highlight("Proceeding with search using available context")
-    return "perform_search"
-
-def continue_flow_after_clarification(state: ResearchState) -> str:
-    """After clarification, return to query enrichment."""
-    info_highlight("Processing completed clarification - returning to query enrichment")
-    return "enrich_query_node"
-
-def handle_validation_result(state: ResearchState) -> str:
-    """Route to appropriate next step based on validation results."""
-    info_highlight("Determining next step based on validation results")
-
-    # Get validation status with safe defaults
-    validation_status = state.get("validation_status", {}) or {}
-    coverage = validation_status.get("coverage", {}) or {}
-    missing_topics = coverage.get("missing_topics", []) or []
-    confidence_score = state.get("confidence_score", 0.0)
-
-    if state.get("validation_passed", False):
-        info_highlight("Validation passed - ending research flow")
-        return END
-
-    # If we have missing topics, we should retry the search
-    if missing_topics:
-        warning_highlight(f"Validation failed - retrying search with missing topics: {missing_topics}")
-        # Clear previous results to ensure full reprocessing
-        state["search_results"] = []
-        state["extracted_info"] = {}
-        state["synthesis"] = None
-        state["search_priority"] = missing_topics
-        return "perform_search"
-
-    # If validation failed but no missing topics, check confidence
-    if confidence_score < 0.6:
-        warning_highlight(f"Validation failed with low confidence ({confidence_score:.2f}) - retrying search")
-        state["search_results"] = []
-        state["extracted_info"] = {}
-        state["synthesis"] = None
-        return "perform_search"
-
-    info_highlight("Validation failed but no missing topics - ending research flow")
-    return END
-
-
-# TODO Rename this here and in `handle_validation_result`
-def _extracted_from_handle_validation_result_15(missing_topics, state):
-    warning_highlight(f"Validation failed - retrying search with missing topics: {missing_topics}")
-    # Clear previous results to ensure full reprocessing
-    state["search_results"] = []
-    state["extracted_info"] = {}
-    state["synthesis"] = None
-    state["search_priority"] = missing_topics
-    return "perform_search"
+    if error:
+        error_highlight(f"Error detected: {error.get('message')} in phase {error.get('phase')}")
+        return "handle_error"
+    else:
+        return "continue"
 
 # --------------------------------------------------------------------
-# 5. Build the final unified graph
+# 6. Error handling
 # --------------------------------------------------------------------
+
+async def handle_error(state: ResearchState) -> Dict[str, Any]:
+    """Handle errors gracefully and return a helpful message."""
+    error = state.get("error", {})
+    phase = error.get("phase", "unknown") if error else "unknown"
+    message = error.get("message", "An unknown error occurred") if error else "An unknown error occurred"
+
+    error_highlight(f"Handling error in phase {phase}: {message}")
+
+    # Create a helpful error message
+    error_response = f"I encountered an issue while researching your query: {message}"
+    error_response += "\n\nHere's what I was able to find before the error occurred:"
+
+    # Include any partial results we have
+    categories = state.get("categories", {})
+    if complete_categories := [
+        category
+        for category, category_state in categories.items()
+        if category_state.get("complete", False)
+    ]:
+        error_response += f"\n\nI completed research on: {', '.join(complete_categories)}"
+
+        # Include facts from complete categories
+        for category in complete_categories:
+            category_state = categories[category]
+            facts = category_state.get("extracted_facts", [])
+            if facts:
+                error_response += f"\n\n## {category.replace('_', ' ').title()}\n"
+                for i, fact in enumerate(facts[:3]):  # Show up to 3 facts
+                    if isinstance(fact, dict):
+                        if "data" in fact and isinstance(fact["data"], dict):
+                            # Handle structured facts
+                            if "fact" in fact["data"]:
+                                error_response += f"\n- {fact['data']['fact']}"
+                            elif "requirement" in fact["data"]:
+                                error_response += f"\n- {fact['data']['requirement']}"
+                            elif "vendor_name" in fact["data"]:
+                                error_response += f"\n- {fact['data']['vendor_name']}: {fact['data'].get('description', '')}"
+                            else:
+                                # Just get the first string value we can find
+                                for k, v in fact["data"].items():
+                                    if isinstance(v, str) and v:
+                                        error_response += f"\n- {v}"
+                                        break
+                        elif "fact" in fact:
+                            error_response += f"\n- {fact['fact']}"
+    else:
+        error_response += "\n\nUnfortunately, I wasn't able to complete any research categories before the error occurred."
+
+    error_response += "\n\nWould you like me to try again with a more specific query?"
+
+    # Create the error message
+    error_message = AIMessage(content=error_response)
+
+    return {
+        "messages": [error_message],
+        "status": "error",
+        "complete": True
+    }
+
+# --------------------------------------------------------------------
+# 7. Build the graph
+# --------------------------------------------------------------------
+
 def create_research_graph() -> CompiledStateGraph:
-    """Creates a graph with improved error handling and data validation."""
-    info_highlight("Creating research graph with enhanced error handling")
+    """Create the modular research graph."""
     graph = StateGraph(ResearchState)
 
-    # 1) Graph nodes
-    info_highlight("Adding graph nodes")
-    graph.add_node("initialize", initialize)
-    graph.add_node("enrich_query_node", enrich_query_node)
+    # Add the main nodes
+    graph.add_node("initialize", initialize_research)
+    graph.add_node("analyze_query", analyze_query)
     graph.add_node("request_clarification", request_clarification)
     graph.add_node("process_clarification", process_clarification)
-    graph.add_node("perform_search", perform_search)  # Enhanced with fallbacks
-    graph.add_node("process_search_results", process_search_results)
-    graph.add_node("extract_key_information", extract_key_information)  # Improved data validation
-    graph.add_node("synthesize_research", synthesize_research)  # Better handling of limited data
-    graph.add_node("validate_research_output", validate_research_output)
-    graph.add_node("aggregate_research_findings", aggregate_research_findings)
+    graph.add_node("execute_research_for_categories", execute_research_for_categories)
+    graph.add_node("synthesize_research", synthesize_research)
+    graph.add_node("validate_synthesis", validate_synthesis)
+    graph.add_node("prepare_final_response", prepare_final_response)
+    graph.add_node("handle_error", handle_error)
+    graph.add_node("check_retry", lambda state: {"next_step": check_retry_or_continue(state)})
+    graph.add_node("validate_or_complete", lambda state: {"next_step": validate_or_complete(state)})
 
-    # 2) Edges
-    info_highlight("Configuring graph edges")
-    # Entry → Enrich
-    graph.add_edge("__start__", "initialize")
-    graph.add_edge("initialize", "enrich_query_node")
-
-    # Enrich → Clarify or Perform search
+    # Add error handling edges
     graph.add_conditional_edges(
-        "enrich_query_node",
-        should_clarify,
+        "initialize",
+        handle_error_or_continue,
+        {
+            "handle_error": "handle_error",
+            "continue": "analyze_query"
+        }
+    )
+
+    # Set start point
+    graph.add_edge(START, "initialize")
+
+    # Add conditional branch for clarification from analyze_query
+    graph.add_conditional_edges(
+        "analyze_query",
+        should_request_clarification,
         {
             "request_clarification": "request_clarification",
-            "perform_search": "perform_search"
+            "execute_research_for_categories": "execute_research_for_categories"
         }
     )
-
-    # Clarification flow
+    
     graph.add_edge("request_clarification", "process_clarification")
+    graph.add_edge("process_clarification", "analyze_query")
+
+    # Research flow
     graph.add_conditional_edges(
-        "process_clarification",
-        continue_flow_after_clarification,
+        "execute_research_for_categories",
+        handle_error_or_continue,
         {
-            "enrich_query_node": "enrich_query_node"
+            "handle_error": "handle_error",
+            "continue": "check_retry"
         }
     )
 
-    # Normal search flow
-    graph.add_edge("perform_search", "process_search_results")
-    
-    # Add data validation edge after search results processing
     graph.add_conditional_edges(
-        "process_search_results",
-        check_search_results_quality,  # New function to validate search results
+        "check_retry",
+        lambda state: state.get("next_step", "synthesize_research"),
         {
-            "extract_key_information": "extract_key_information",
-            "perform_search": "perform_search"  # Loop back if results insufficient
+            "execute_research_for_categories": "execute_research_for_categories",
+            "synthesize_research": "synthesize_research"
         }
     )
-    
-    graph.add_edge("extract_key_information", "synthesize_research")
-    
-    # Add data validation edge after information extraction
+
+    # Synthesis and validation
     graph.add_conditional_edges(
-        "extract_key_information",
-        check_extraction_quality,  # New function to validate extraction results
+        "synthesize_research",
+        handle_error_or_continue,
         {
-            "synthesize_research": "synthesize_research",
-            "perform_search": "perform_search"  # Loop back if extraction failed
+            "handle_error": "handle_error",
+            "continue": "validate_synthesis"
         }
     )
-    
-    graph.add_edge("synthesize_research", "validate_research_output")
-    
-    # Add conditional edges from validate_research_output with improved handler
+
     graph.add_conditional_edges(
-        "validate_research_output",
-        handle_validation_result,  # Enhanced handler with better error handling
+        "validate_synthesis",
+        handle_error_or_continue,
         {
-            "perform_search": "perform_search",
-            "aggregate_research_findings": "aggregate_research_findings",
-            END: END
+            "handle_error": "handle_error",
+            "continue": "validate_or_complete"
         }
     )
-    
-    # Add edge from aggregation to end
-    graph.add_edge("aggregate_research_findings", END)
 
-    # Configure interrupt points
-    info_highlight("Configuring graph interrupt points")
-    graph = graph.compile(
-        interrupt_before=["process_clarification"]
+    graph.add_conditional_edges(
+        "validate_or_complete",
+        lambda state: state.get("next_step", "prepare_final_response"),
+        {
+            "prepare_final_response": "prepare_final_response"
+        }
     )
 
-    info_highlight("Research graph creation complete")
-    return graph
+    # Final steps
+    graph.add_edge("prepare_final_response", END)
+    graph.add_edge("handle_error", END)
 
-# New validation functions for conditional edges
-def check_search_results_quality(state: ResearchState) -> str:
-    """Validate search results quality before proceeding to extraction."""
-    search_results = state.get("search_results", []) or []
-    
-    if not search_results:
-        warning_highlight("No search results found - retry search with broadened terms")
-        # Modify search strategy for retry
-        enriched_query = state.get("enriched_query", {}) or {}
-        if enriched_query:
-            # Simplify the query to get more results
-            primary_keywords = enriched_query.get("primary_keywords", []) or []
-            if primary_keywords and len(primary_keywords) > 1:
-                # Use just the first keyword for broader results
-                enriched_query["enhanced_query"] = primary_keywords[0]
-                state["enriched_query"] = enriched_query
-                info_highlight(f"Broadened search to: {primary_keywords[0]}")
-        
-        return "perform_search"
-    
-    if len(search_results) < 2:
-        warning_highlight("Insufficient search results - retry with alternative strategy")
-        # Set flag for alternate search approach
-        state["alternate_search"] = True
-        return "perform_search"
-    
-    info_highlight(f"Search produced {len(search_results)} results - proceeding to information extraction")
-    return "extract_key_information"
+    return graph.compile(interrupt_before=["process_clarification"])
 
-def check_extraction_quality(state: ResearchState) -> str:
-    """Validate extraction quality before proceeding to synthesis."""
-    extracted_info = state.get("extracted_info", {})
-    extraction_status = state.get("extraction_status", "")
-    
-    if extraction_status in ["failed", "error"]:
-        warning_highlight(f"Extraction failed: {state.get('extraction_message', 'Unknown error')}")
-        # Try different search strategy
-        if not state.get("alternate_extraction", False):
-            state["alternate_extraction"] = True
-            return "perform_search"
-    
-    if not extracted_info or not any(extracted_info.values()):
-        warning_highlight("No information extracted - retry with different strategy")
-        # Set flag for alternate extraction approach
-        state["alternate_extraction"] = True
-        return "perform_search"
-    
-    # Check if we have minimum viable data (at least 3 facts)
-    total_facts = sum(len(facts) for facts in extracted_info.values())
-    if total_facts < 3:
-        warning_highlight(f"Insufficient data extracted ({total_facts} facts) - retry search")
-        return "perform_search"
-    
-    info_highlight(f"Extraction produced {total_facts} facts - proceeding to synthesis")
-    return "synthesize_research"
-
-# --------------------------------------------------------------------
-# 6. Example usage
-# --------------------------------------------------------------------
+# Create the graph instance
 research_graph = create_research_graph()
 
-# You can now invoke this graph by passing an initial HumanMessage:
-# example_message = HumanMessage(content="I'd like to learn about quantum computing. Need details?")
-# result_state = research_graph.invoke(example_message)
-# 
-# The flow will proceed through:
-#   initialize → enrich_query_node → request_clarification (since "details?" triggers missing context) ...
-#   (Waits for user clarification) → process_clarification → enrich_query_node → perform_search → ...
-#
-# In a real application, you'll feed the user's clarification as the next invocation:
-# clarified_message = HumanMessage(content="Specifically, I want more details on quantum entanglement.")
-# result_state = research_graph.invoke(clarified_message, state=result_state)
-#
-# And so on...
+# def create_category_graph(category: str) -> CompiledStateGraph:
+#     """Create a specialized graph for a single research category."""
+#     graph = StateGraph(ResearchState)
+    
+#     # Add nodes for single category research
+#     graph.add_node("initialize", initialize_research)
+#     graph.add_node("analyze_query", analyze_query)
+#     graph.add_node("execute_category_search", lambda state, config: execute_category_search(state, category, config))
+#     graph.add_node("extract_category_information", lambda state, config: extract_category_information(state, category, config))
+#     graph.add_node("prepare_final_response", prepare_final_response)
+#     graph.add_node("handle_error", handle_error)
+    
+#     # Add edges
+#     graph.add_edge(START, "initialize")
+#     graph.add_edge("initialize", "analyze_query")
+#     graph.add_edge("analyze_query", "execute_category_search")
+#     graph.add_edge("execute_category_search", "extract_category_information")
+#     graph.add_edge("extract_category_information", "prepare_final_response")
+#     graph.add_edge("prepare_final_response", END)
+#     graph.add_edge("handle_error", END)
+    
+#     return graph.compile()

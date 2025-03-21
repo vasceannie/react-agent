@@ -60,7 +60,7 @@ class Configuration:
     )
 
     jina_url: Optional[str] = field(
-        default_factory=lambda: os.getenv("JINA_URL", "https://api.jina.ai"),
+        default_factory=lambda: os.getenv("JINA_URL", "https://s.jina.ai"),
         metadata={
             "description": "Base URL for the Jina AI service. Use this for self-hosted instances."
         },

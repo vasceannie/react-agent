@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, fields
 from typing import Annotated, Optional
 
@@ -38,14 +39,14 @@ class Configuration:
     )
 
     firecrawl_api_key: Optional[str] = field(
-        default=None,
+        default_factory=lambda: os.getenv("FIRECRAWL_API_KEY"),
         metadata={
             "description": "API key for the FireCrawl service. Required for web scraping and crawling."
         },
     )
 
     firecrawl_url: Optional[str] = field(
-        default=None,
+        default_factory=lambda: os.getenv("FIRECRAWL_URL"),
         metadata={
             "description": "Base URL for the FireCrawl service. Use this for self-hosted instances."
         },
@@ -58,5 +59,15 @@ class Configuration:
         """Create a Configuration instance from a RunnableConfig object."""
         config = ensure_config(config)
         configurable = config.get("configurable") or {}
+        
+        # Get environment variables for FireCrawl
+        env_config = {
+            "firecrawl_api_key": os.getenv("FIRECRAWL_API_KEY"),
+            "firecrawl_url": os.getenv("FIRECRAWL_URL"),
+        }
+        
+        # Merge environment variables with configurable, giving priority to configurable
+        merged_config = {**env_config, **configurable}
+        
         _fields = {f.name for f in fields(cls) if f.init}
-        return cls(**{k: v for k, v in configurable.items() if k in _fields})
+        return cls(**{k: v for k, v in merged_config.items() if k in _fields})

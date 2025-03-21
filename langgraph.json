@@ -1,11 +1,13 @@
 {
-  "dependencies": ["."],
+  "dockerfile_lines": [],
   "graphs": {
     "agent": "src/react_agent/graphs/graph.py:graph",
     "analysis": "src/react_agent/graphs/analysis.py:graph",
     "research": "src/react_agent/graphs/research.py:research_graph"
   },
   "env": ".env",
-  "title": "ReAct Agent",
-  "description": "A ReAct agent that iteratively reasons about user queries and executes actions."
+  "python_version": "3.11",
+  "dependencies": [
+    "."
+  ]
 }

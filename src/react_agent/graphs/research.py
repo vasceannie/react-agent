@@ -8,7 +8,18 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union, cast, Awaitable, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.messages.ai import AIMessageChunk
@@ -18,20 +29,21 @@ from langchain_core.messages.human import HumanMessage, HumanMessageChunk
 from langchain_core.messages.system import SystemMessage, SystemMessageChunk
 from langchain_core.messages.tool import ToolMessage, ToolMessageChunk
 from langchain_core.runnables import RunnableConfig, ensure_config
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
 from react_agent.configuration import Configuration
-from react_agent.state import State
-from react_agent.utils.llm import call_model, call_model_json
 from react_agent.prompts import (
-    RESEARCH_BASE_PROMPT,
-    RESEARCH_AGENT_PROMPT,
+    CLARIFICATION_PROMPT,
     QUERY_ANALYSIS_PROMPT,
-    CLARIFICATION_PROMPT
+    RESEARCH_AGENT_PROMPT,
+    RESEARCH_BASE_PROMPT,
 )
-from react_agent.tools.firecrawl import search as firecrawl_search, scrape as firecrawl_scrape
+from react_agent.state import State
+from react_agent.tools.firecrawl import scrape as firecrawl_scrape
+from react_agent.tools.firecrawl import search as firecrawl_search
+from react_agent.utils.llm import call_model, call_model_json
 
 T = TypeVar('T')
 
@@ -66,9 +78,100 @@ async def create_search_query(state: State, config: Optional[RunnableConfig] = N
         for msg in reversed(messages):
             if msg.type == "human":
                 content = msg.content
-                return " ".join(item for item in content if isinstance(item, str)) if isinstance(content, list) else content
+                query = (
+                    " ".join([item for item in content if isinstance(item, str)])
+                    if isinstance(content, list) else str(content)
+                )
+                return query.strip()
         return ""
 
+    def enrich_query(raw_query: str) -> str:
+        """Enrich the query with additional context, synonyms, and domain-specific terms.
+        
+        This function expands search queries to increase coverage and recall by:
+        1. Adding domain-specific terminology
+        2. Expanding with synonyms and related concepts
+        3. Including format/document types for better search results
+        4. Adding contextual modifiers based on query content
+        
+        Args:
+            raw_query: The original user query string
+            
+        Returns:
+            str: An enriched query with expanded vocabulary and context
+        """
+        # Normalize query
+        normalized_query = raw_query.lower().strip()
+        print(f"Original query: {normalized_query}")  # Debug output
+        
+        # Always add base search modifiers
+        base_modifiers = [
+            "proposal", "documentation", "rfp", "rfi",
+            "best practices", "how to", "explanation",
+            "contract", "sourcing", "sourcing event",
+            "bid", "category", "industry", "vertical"
+        ]
+        
+        # Build enriched query parts
+        enriched_parts = [raw_query]  # Start with original query
+        
+        # Add base modifiers
+        enriched_parts.extend(base_modifiers)
+        
+        # Expanded domain-specific synonyms dictionary
+        domain_synonyms = {
+            # Technical terms
+            "code": ["implementation", "source code", "codebase", "repository", "github"],
+            "api": ["endpoint", "interface", "service", "integration", "sdk"],
+            "error": ["bug", "issue", "problem", "failure", "exception"],
+            "performance": ["speed", "optimization", "efficiency", "throughput"],
+            "security": ["authentication", "authorization", "encryption", "protection"],
+            "database": ["storage", "data", "persistence", "db", "repository"],
+            "testing": ["test", "validation", "verification", "quality", "qa"],
+            "deployment": ["release", "publish", "distribution", "shipping"],
+            
+            # Development concepts
+            "architecture": ["design", "structure", "pattern", "organization"],
+            "framework": ["library", "tool", "platform", "sdk", "package"],
+            "configuration": ["setup", "settings", "options", "preferences"],
+            "documentation": ["docs", "manual", "guide", "reference", "tutorial"],
+            
+            # Common actions
+            "implement": ["create", "build", "develop", "code", "write"],
+            "fix": ["solve", "resolve", "debug", "troubleshoot", "repair"],
+            "optimize": ["improve", "enhance", "upgrade", "refactor"],
+            "integrate": ["connect", "combine", "merge", "link"]
+        }
+        
+        # Add synonyms for any matching terms
+        for word in normalized_query.split():
+            # Direct matches
+            if word in domain_synonyms:
+                enriched_parts.extend(domain_synonyms[word][:3])  # Add top 3 synonyms
+            
+            # Partial matches
+            for key, synonyms in domain_synonyms.items():
+                if key in word or any(syn in word for syn in synonyms):
+                    enriched_parts.extend(synonyms[:2])  # Add top 2 synonyms
+        
+        # Add format qualifiers
+        formats = ["tutorial", "guide", "documentation", "example", "solution"]
+        enriched_parts.extend(formats)
+        
+        # Combine all parts and remove duplicates while preserving order
+        seen = set()
+        final_parts = []
+        for part in enriched_parts:
+            if part not in seen:
+                final_parts.append(part)
+                seen.add(part)
+        
+        # Join with OR operator for broader matches
+        final_query = " OR ".join(final_parts)
+        
+        print(f"Enriched query: {final_query}")  # Debug output
+        return final_query
+        
     def create_default_analysis() -> Dict[str, Any]:
         """Create default analysis structure."""
         return {
@@ -105,23 +208,56 @@ async def create_search_query(state: State, config: Optional[RunnableConfig] = N
         return results
 
     # Get user query
-    user_query = get_user_query(state.messages)
-
-    # Get search terms analysis
+    query = get_user_query(state.messages)
+    validated_config = ensure_config(config)
+    
+    # Try to get detailed search analysis
     try:
         analysis_response = await call_model_json(
-            messages=[{"role": "user", "content": QUERY_ANALYSIS_PROMPT.format(query=user_query)}],
-            config=config
+            messages=[{"role": "user", "content": QUERY_ANALYSIS_PROMPT.format(query=query)}],
+            config=validated_config
         )
         if not isinstance(analysis_response, dict):
             analysis_response = create_default_analysis()
-    except Exception:
+    except Exception as e:
+        # Fall back to simple query enrichment approach
+        print(f"Error in detailed analysis: {str(e)}")
         analysis_response = create_default_analysis()
+        
+    # If detailed search analysis has no search terms or is empty, use simple enrichment
+    detailed_search_terms = analysis_response.get("search_terms", {})
+    has_search_terms = any(
+        len(terms) > 0 
+        for terms in detailed_search_terms.values() 
+        if isinstance(terms, list)
+    )
+    
+    if not has_search_terms:
+        # Fall back to simple query enrichment
+        enriched_query = enrich_query(query)
+        firecrawl_results = await firecrawl_search(enriched_query, config=validated_config)
 
-    # Perform searches
-    visited_urls = set()
-    all_search_results = []
-    validated_config = ensure_config(config)
+        if not firecrawl_results:
+            # Try a fallback query
+            enriched_query += " site:example.com filetype:pdf"
+            firecrawl_results = await firecrawl_search(enriched_query, config=validated_config)
+
+        # Save basic results to state
+        return {
+            "messages": [ToolMessage(
+                content=f"Generated {len(firecrawl_results or [])} search results using basic query enrichment",
+                tool_call_id="search",
+                name="firecrawl_search"
+            )],
+            "search_query": query,
+            "search_results": firecrawl_results,
+            "search_analysis": analysis_response,
+            "visited_urls": []
+        }
+    
+    # Otherwise, use the detailed search approach
+    visited_urls: set[str] = set()
+    all_search_results: list[dict[str, Any]] = []
 
     for section in analysis_response.get("search_priority", []):
         search_terms = analysis_response.get("search_terms", {}).get(section, [])
@@ -144,7 +280,7 @@ async def create_search_query(state: State, config: Optional[RunnableConfig] = N
             tool_call_id="search",
             name="firecrawl_search"
         )],
-        "search_query": user_query,
+        "search_query": query,
         "search_results": all_search_results,
         "search_analysis": analysis_response,
         "visited_urls": list(visited_urls)
@@ -177,9 +313,8 @@ async def process_search_results(state: State, config: Optional[RunnableConfig] 
     query = ""
     for msg in reversed(state.messages):
         if msg.type == "human":
-            query = msg.content
-            if isinstance(query, list):
-                query = " ".join([item for item in query if isinstance(item, str)])
+            content = msg.content
+            query = " ".join([item for item in content if isinstance(item, str)]) if isinstance(content, list) else str(content)
             break
 
     keywords = query.lower().split()
@@ -239,7 +374,7 @@ async def process_search_results(state: State, config: Optional[RunnableConfig] 
 
 
 async def _extract_content_from_url(url: str, config: RunnableConfig) -> Optional[Dict[str, Any]]:
-    """Helper function to extract content from a URL using FireCrawl."""
+    """Extract content from a URL using FireCrawl."""
     scraped_docs = await firecrawl_scrape(url, mode="scrape", config=config)
     if not scraped_docs:
         return None
@@ -267,12 +402,19 @@ async def extract_key_information(state: State, config: Optional[RunnableConfig]
             )]
         }
 
-    query = next((msg.content for msg in reversed(state.messages) 
-                  if msg.type == "human" and isinstance(msg.content, str)), "")
+    query = ""
+    for msg in reversed(state.messages):
+        if msg.type == "human":
+            content = msg.content
+            if isinstance(content, list):
+                query = " ".join([item for item in content if isinstance(item, str)])
+            else:
+                query = str(content)
+            break
     
     validated_config = ensure_config(config)
-    extracted_info = {}
-    sources = []
+    extracted_info: Dict[str, List[Any]] = {}
+    sources: List[Dict[str, Any]] = []
     
     for result in search_results:
         url = result.get("url", "")
@@ -343,7 +485,7 @@ async def synthesize_research(state: State, config: Optional[RunnableConfig] = N
         return {"messages": [message]}
 
     # Get the query from the last user message
-    query = ""
+    query: Union[str, list[Union[str, dict]]] = ""
     for msg in reversed(state.messages):
         if msg.type == "human":
             query = msg.content
@@ -513,7 +655,7 @@ async def validate_search_terms(state: State, config: Optional[RunnableConfig] =
         ""
     )
     
-    missing_info = []
+    missing_info: List[str] = []
     if "sections_coverage" in failed_criteria:
         missing_info.extend(
             f"Need more details for: {section}"

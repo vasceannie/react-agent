@@ -14,6 +14,7 @@ import contextlib
 from urllib.parse import urljoin, quote, urlparse
 import random
 from datetime import datetime
+import re
 
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
@@ -23,6 +24,7 @@ from typing_extensions import Annotated, Literal
 from react_agent.configuration import Configuration
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.validations import is_valid_url
+from react_agent.prompts.query import optimize_query, detect_vertical, expand_acronyms
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -62,6 +64,7 @@ class SearchParams:
         recency_days: Optional[int] = None,
         domains: Optional[List[str]] = None,
         exclude_domains: Optional[List[str]] = None,
+        category: Optional[str] = None,
     ):
         self.query = query
         self.search_type = search_type
@@ -70,18 +73,65 @@ class SearchParams:
         self.recency_days = recency_days
         self.domains = domains or []
         self.exclude_domains = exclude_domains or []
+        self.category = category
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API request."""
         # Clean and encode the query
         cleaned_query = self.query.replace('\n', ' ').replace('\r', ' ').strip()
+        
         # Remove any "Additional context" or similar prefixes
         cleaned_query = cleaned_query.split("Additional context:")[0].strip()
-        # Limit query length to avoid issues
-        cleaned_query = cleaned_query[:200] if len(cleaned_query) > 200 else cleaned_query
+        
+        # Fix common typos
+        cleaned_query = cleaned_query.replace("resaerch", "research")
+        
+        # Remove duplicate terms and phrases
+        # Remove duplicate phrases (e.g., "maintenance repair operations" repeated)
+        cleaned_query = re.sub(r'(\b\w+\s+\w+\s+\w+\b)(?:\s+\1)+', r'\1', cleaned_query)
+        
+        # Remove duplicate single words
+        words = cleaned_query.split()
+        cleaned_query = ' '.join(dict.fromkeys(words))
+        
+        # Remove redundant parentheses and their contents
+        cleaned_query = re.sub(r'\([^)]*\)', '', cleaned_query)
+        
+        # Optimize the query using query.py functions
+        if self.category:
+            # Detect vertical from the query
+            vertical = detect_vertical(cleaned_query)
+            # Expand acronyms
+            expanded_query = expand_acronyms(cleaned_query)
+            # Optimize query for the category
+            optimized_query = optimize_query(
+                original_query=expanded_query,
+                category=self.category,
+                vertical=vertical,
+                include_all_keywords=self.search_type == "comprehensive"
+            )
+        else:
+            # If no category, just expand acronyms
+            optimized_query = expand_acronyms(cleaned_query)
+        
+        # Limit query length to avoid issues (consistent with query.py's 180 char limit)
+        optimized_query = optimized_query[:180] if len(optimized_query) > 180 else optimized_query
+        
+        # Clean up any remaining special characters and extra spaces
+        optimized_query = re.sub(r'[^\w\s-]', ' ', optimized_query)
+        optimized_query = re.sub(r'\s+', ' ', optimized_query).strip()
+        
+        # Remove any remaining duplicate words
+        words = optimized_query.split()
+        optimized_query = ' '.join(dict.fromkeys(words))
+        
+        # Ensure the query is not too long
+        if len(optimized_query) > 100:
+            # Take the first 100 characters, but try to break at a word boundary
+            optimized_query = optimized_query[:100].rsplit(' ', 1)[0]
         
         result = {
-            "q": quote(cleaned_query),
+            "q": quote(optimized_query),
             "limit": self.max_results
         }
 
@@ -419,6 +469,7 @@ async def search(
     recency_days: Optional[int] = None,
     min_quality: Optional[float] = None,
     max_results: Optional[int] = None,
+    category: Optional[str] = None,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg]
 ) -> Optional[List[Document]]:
@@ -431,6 +482,7 @@ async def search(
         recency_days: Only include results from the last N days
         min_quality: Minimum quality score for results (0.0-1.0)
         max_results: Maximum number of results to return
+        category: Research category for query optimization
         config: Configuration containing API key and settings
         
     Returns:
@@ -454,7 +506,8 @@ async def search(
         max_results=max_results or configuration.max_search_results,
         min_quality_score=min_quality or 0.5,
         recency_days=recency_days,
-        domains=domains
+        domains=domains,
+        category=category
     )
 
     # Add default domains for educational/authoritative content if not provided
@@ -472,29 +525,6 @@ async def search(
     except Exception as e:
         error_highlight(f"Search failed: {str(e)}")
         return None
-
-# Helper function to create optimized queries
-def optimize_query(original_query: str, category: str, is_higher_ed: bool = True) -> str:
-    """Create optimized queries for specific research categories."""
-    # Clean the original query
-    original_query = original_query.split("Additional context:")[0].strip()
-    
-    # Define shorter, more focused query templates
-    query_templates = {
-        "market_dynamics": "{query} market trends analysis sourcing procurement RFPs contracts contract terms negotiation strategies",
-        "provider_landscape": "{query} vendors suppliers manufacturers distributors providers request for proposal request for quote request for information",
-        "technical_requirements": "{query} technical specifications procurement requirements RFPs bids pricing worksheets",
-        "cost_considerations": "{query} pricing cost budget volume discounts rebates bulk discounts purchase orders invoicing",
-        "best_practices": "{query} best practices case studies procurement sourcing category strategy risk management",
-        "regulatory_landscape": "{query} regulations compliance procurement sourcing contracts agreements qualifications",
-        "implementation_factors": "{query} implementation factors procurement sourcing RFPs contracts auction buying"
-    }
-    
-    if category in query_templates:
-        template = query_templates[category]
-        return template.format(query=original_query)
-    else:
-        return original_query
 
 # Export available tools
 TOOLS = [search]

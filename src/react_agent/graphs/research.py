@@ -5,12 +5,15 @@ with specialized components for different research categories and
 improved error handling and validation.
 """
 
+
 from __future__ import annotations
+import contextlib
 import json
 import asyncio
 from typing import Any, Dict, List, Optional, Sequence, Union, cast, Tuple, Literal, Hashable
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+import re
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -23,7 +26,7 @@ from typing_extensions import Annotated, TypedDict
 
 from react_agent.utils.validations import is_valid_url
 from react_agent.utils.llm import call_model, call_model_json
-from react_agent.tools.jina import search, optimize_query
+from react_agent.tools.jina import search
 from react_agent.prompts.research import (
     QUERY_ANALYSIS_PROMPT,
     CLARIFICATION_PROMPT,
@@ -34,6 +37,7 @@ from react_agent.prompts.research import (
     get_extraction_prompt,
     get_default_extraction_result
 )
+from react_agent.prompts.synthesis import ENHANCED_REPORT_TEMPLATE
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight, log_step
 from react_agent.utils.content import (
     preprocess_content,
@@ -43,16 +47,27 @@ from react_agent.utils.content import (
     validate_content,
     detect_content_type
 )
+from react_agent.utils.extraction import (
+    extract_statistics,
+    enrich_extracted_fact,
+    extract_category_information as extract_category_info
+)
+from react_agent.utils.statistics import (
+    calculate_category_quality_score,
+    calculate_overall_confidence,
+    assess_synthesis_quality
+)
+from react_agent.prompts.query import (
+    optimize_query,
+    detect_vertical,
+    expand_acronyms
+)
 
 # Initialize logger
 logger = get_logger(__name__)
 
 # Define SearchType as a Literal type
 SearchType = Literal['general', 'authoritative', 'recent', 'comprehensive', 'technical']
-
-# --------------------------------------------------------------------
-# 1. Define the modular state classes
-# --------------------------------------------------------------------
 
 class ResearchCategory(TypedDict):
     """State for a specific research category."""
@@ -66,29 +81,35 @@ class ResearchCategory(TypedDict):
     retry_count: int  # Number of retry attempts
     last_search_query: Optional[str]  # Last search query used
     status: str  # Status of this category (pending, in_progress, complete, failed)
+    statistics: List[Dict[str, Any]]  # Extracted statistics from facts
+    confidence_score: float  # Confidence score for this category (0.0-1.0)
+    cross_validation_score: float  # Cross-validation score for facts (0.0-1.0)
+    source_quality_score: float  # Quality score for sources (0.0-1.0)
+    recency_score: float  # Recency score for sources (0.0-1.0)
+    statistical_content_score: float  # Score for statistical content (0.0-1.0)
 
 class ResearchState(TypedDict):
     """Main research state with modular components."""
     # Basic conversation data
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    
+
     # Original query and analysis
     original_query: str
     query_analysis: Optional[Dict[str, Any]]
-    
+
     # Clarity and context
     missing_context: List[str]
     needs_clarification: bool
     clarification_request: Optional[str]
     human_feedback: Optional[str]
-    
+
     # Category-specific research
     categories: Dict[str, ResearchCategory]
-    
+
     # Synthesis and validation
     synthesis: Optional[Dict[str, Any]]
     validation_result: Optional[Dict[str, Any]]
-    
+
     # Overall status
     status: str
     error: Optional[Dict[str, Any]]
@@ -127,6 +148,12 @@ async def initialize_research(state: ResearchState) -> Dict[str, Any]:
             "retry_count": 0,
             "last_search_query": None,
             "status": "pending",
+            "statistics": [],
+            "confidence_score": 0.0,
+            "cross_validation_score": 0.0,
+            "source_quality_score": 0.0,
+            "recency_score": 0.0,
+            "statistical_content_score": 0.0
         }
         for category in SEARCH_QUALITY_THRESHOLDS.keys()
     }
@@ -197,13 +224,21 @@ async def analyze_query(state: ResearchState, config: Optional[RunnableConfig] =
         # Update category queries based on analysis
         categories = state["categories"]
         for category, category_state in categories.items():
-            search_terms = analysis_result.get("search_terms", {}).get(category, [])
-            if search_terms:
-                # Create optimized query for this category
-                is_higher_ed = "higher ed" in query.lower() or "education" in query.lower()
-                optimized_query = optimize_query(query, category, is_higher_ed)
+            if search_terms := analysis_result.get("search_terms", {}).get(
+                category, []
+            ):
+                # Detect vertical from the query
+                vertical = detect_vertical(query)
+
+                # Create optimized query for this category using the enhanced optimization
+                optimized_query = optimize_query(
+                    original_query=query,
+                    category=category,
+                    vertical=vertical,
+                    include_all_keywords=len(search_terms) > 5  # Include all keywords for complex queries
+                )
                 category_state["query"] = optimized_query
-                info_highlight(f"Set query for {category}: {optimized_query}")
+                info_highlight(f"Set optimized query for {category}: {optimized_query}")
             else:
                 # Use default query if no specific terms
                 category_state["query"] = query
@@ -278,8 +313,12 @@ async def process_clarification(state: ResearchState) -> Dict[str, Any]:
     
     info_highlight(f"Processing user clarification: {clarification_content}")
     
+    # Update the original query with the clarification
+    updated_query = f"{state['original_query']}\n\nAdditional context: {clarification_content}"
+    
     return {
         "human_feedback": clarification_content,
+        "original_query": updated_query,  # Update the original query with clarification
         "needs_clarification": False,
         "missing_context": [],
         "status": "clarified"
@@ -336,11 +375,12 @@ async def execute_category_search(
         # Keep track of the query for retry tracking
         category_state["last_search_query"] = query
         
-        # Execute the search
+        # Execute the search with category parameter
         search_results = await search(
             query=query,
             search_type=search_type,
             recency_days=recency_days,
+            category=category,  # Pass the category parameter
             config=ensure_config(config)
         )
         
@@ -391,6 +431,64 @@ async def execute_category_search(
         category_state["status"] = "search_failed"
         return {"categories": categories}
 
+async def _process_search_result(
+    result: Dict[str, Any],
+    category: str,
+    original_query: str,
+    config: Optional[RunnableConfig] = None
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Process a single search result and extract information."""
+    url = result.get("url", "")
+    if not url or should_skip_content(url):
+        return [], [], []
+        
+    content = result.get("snippet", "")
+    if not validate_content(content):
+        return [], [], []
+        
+    content_type = detect_content_type(url, content)
+    prompt_template = get_extraction_prompt(
+        category=category,
+        query=original_query,
+        url=url,
+        content=content
+    )
+    
+    try:
+        facts, relevance_score = await extract_category_info(
+            content=content,
+            url=url,
+            title=result.get("title", ""),
+            category=category,
+            original_query=original_query,
+            prompt_template=prompt_template,
+            extraction_model=call_model_json,
+            config=ensure_config(config)
+        )
+        
+        statistics = extract_statistics(content) or []
+        
+        # Add source information to facts
+        for fact in facts:
+            fact["source_url"] = url
+            fact["source_title"] = result.get("title", "")
+            
+        source = {
+            "url": url,
+            "title": result.get("title", ""),
+            "published_date": result.get("published_date"),
+            "fact_count": len(facts),
+            "relevance_score": relevance_score,
+            "quality_score": result.get("quality_score", 0.5),
+            "content_type": content_type
+        }
+        
+        return facts, [source], statistics
+        
+    except Exception as e:
+        warning_highlight(f"Error extracting from {url}: {str(e)}")
+        return [], [], []
+
 async def extract_category_information(
     state: ResearchState,
     category: str,
@@ -406,250 +504,59 @@ async def extract_category_information(
     
     category_state = categories[category]
     search_results = category_state["search_results"]
-    original_query = state["original_query"]
     
     if not search_results:
-        warning_highlight(f"No search results to extract for {category}")
         category_state["status"] = "extraction_failed"
         return {"categories": categories}
     
-    # Update status
     category_state["status"] = "extracting"
     
-    # Extract facts from each search result
+    # Process all search results
     extracted_facts = []
     sources = []
+    all_statistics = []
     
-    for idx, result in enumerate(search_results):
-        url = result.get("url", "")
-        content = result.get("snippet", "")
-        
-        if not url or not content or not is_valid_url(url):
-            warning_highlight(f"Skipping invalid or empty result at index {idx}")
-            continue
-        
-        info_highlight(f"Extracting from {url} for {category}")
-        
-        try:
-            # Preprocess content to reduce size
-            content = preprocess_content(content, url)
-            
-            # Get the appropriate extraction prompt for this category
-            extraction_prompt = get_extraction_prompt(
-                category=category,
-                query=original_query,
-                url=url,
-                content=content
-            )
-            
-            # Add more detailed logging
-            info_highlight(f"Using extraction prompt for {category}: {extraction_prompt[:100]}...")
-            
-            # If content is too large, chunk it and process each chunk
-            if len(content) > 40000:  # Threshold for chunking
-                info_highlight(f"Content too large ({len(content)} chars), chunking...")
-                chunks = chunk_text(content)
-                chunk_results = []
-                
-                for chunk_idx, chunk in enumerate(chunks):
-                    info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
-                    chunk_prompt = get_extraction_prompt(
-                        category=category,
-                        query=original_query,
-                        url=url,
-                        content=chunk
-                    )
-                    
-                    chunk_result = await call_model_json(
-                        messages=[{"role": "human", "content": chunk_prompt}],
-                        config=ensure_config(config),
-                        max_tokens=100000
-                    )
-                    
-                    if chunk_result and isinstance(chunk_result, dict):
-                        chunk_results.append(chunk_result)
-                
-                # Merge results from all chunks
-                extraction_result = merge_chunk_results(chunk_results, category)
-            else:
-                # Process single chunk
-                extraction_result = await call_model_json(
-                    messages=[{"role": "human", "content": extraction_prompt}],
-                    config=ensure_config(config),
-                    max_tokens=100000
-                )
-            
-            # Validate the extraction result
-            if not extraction_result or not isinstance(extraction_result, dict):
-                warning_highlight(f"Invalid extraction result format for {url}: {type(extraction_result)}")
-                # Use default empty structure
-                extraction_result = get_default_extraction_result(category)
-                
-            # Get relevance score
-            relevance_score = extraction_result.get("relevance_score", 0.0)
-            
-            # Only include if relevant
-            if relevance_score < 0.3:
-                info_highlight(f"Low relevance ({relevance_score}) for {url}, skipping")
-                continue
-            
-            # Get extracted facts based on category
-            if category == "market_dynamics":
-                facts = extraction_result.get("extracted_facts", [])
-                
-            elif category == "provider_landscape":
-                facts = []
-                vendors = extraction_result.get("extracted_vendors", [])
-                if vendors:
-                    facts.extend([
-                        {"type": "vendor", "data": vendor} for vendor in vendors
-                    ])
-                
-                relationships = extraction_result.get("vendor_relationships", [])
-                if relationships:
-                    facts.extend([
-                        {"type": "relationship", "data": rel} for rel in relationships
-                    ])
-                
-            elif category == "technical_requirements":
-                facts = []
-                requirements = extraction_result.get("extracted_requirements", [])
-                if requirements:
-                    facts.extend([
-                        {"type": "requirement", "data": req} for req in requirements
-                    ])
-                
-                standards = extraction_result.get("standards", [])
-                if standards:
-                    facts.extend([
-                        {"type": "standard", "data": std} for std in standards
-                    ])
-                
-            elif category == "regulatory_landscape":
-                facts = []
-                regulations = extraction_result.get("extracted_regulations", [])
-                if regulations:
-                    facts.extend([
-                        {"type": "regulation", "data": reg} for reg in regulations
-                    ])
-                
-                compliance = extraction_result.get("compliance_requirements", [])
-                if compliance:
-                    facts.extend([
-                        {"type": "compliance", "data": req} for req in compliance
-                    ])
-                
-            elif category == "cost_considerations":
-                facts = []
-                costs = extraction_result.get("extracted_costs", [])
-                if costs:
-                    facts.extend([
-                        {"type": "cost", "data": cost} for cost in costs
-                    ])
-                
-                models = extraction_result.get("pricing_models", [])
-                if models:
-                    facts.extend([
-                        {"type": "pricing_model", "data": model} for model in models
-                    ])
-                
-            elif category == "best_practices":
-                facts = []
-                practices = extraction_result.get("extracted_practices", [])
-                if practices:
-                    facts.extend([
-                        {"type": "practice", "data": practice} for practice in practices
-                    ])
-                
-                methods = extraction_result.get("methodologies", [])
-                if methods:
-                    facts.extend([
-                        {"type": "methodology", "data": method} for method in methods
-                    ])
-                
-            elif category == "implementation_factors":
-                facts = []
-                factors = extraction_result.get("extracted_factors", [])
-                if factors:
-                    facts.extend([
-                        {"type": "factor", "data": factor} for factor in factors
-                    ])
-                
-                challenges = extraction_result.get("challenges", [])
-                if challenges:
-                    facts.extend([
-                        {"type": "challenge", "data": challenge} for challenge in challenges
-                    ])
-            else:
-                # Default for unknown categories
-                facts = extraction_result.get("extracted_facts", [])
-            
-            # Add source information to each fact
-            for fact in facts:
-                fact["source_url"] = url
-                fact["source_title"] = result.get("title", "")
-                
-            # Only add source and facts if we extracted something
-            if facts:
-                extracted_facts.extend(facts)
-                
-                # Add source metadata
-                source = {
-                    "url": url,
-                    "title": result.get("title", ""),
-                    "published_date": result.get("published_date"),
-                    "fact_count": len(facts),
-                    "relevance_score": relevance_score,
-                    "quality_score": result.get("quality_score", 0.5),
-                    "content_type": result.get("content_type", "unknown")
-                }
-                sources.append(source)
-                
-                info_highlight(f"Extracted {len(facts)} facts from {url}")
-            else:
-                info_highlight(f"No relevant facts found in {url}")
-                
-        except Exception as e:
-            # Log more details about the exception
-            warning_highlight(f"Error extracting from {url}: {str(e)}\nException type: {type(e)}")
-            # Log a stack trace for debugging
-            import traceback
-            error_highlight(traceback.format_exc())
-            # Use default empty structure
-            extraction_result = get_default_extraction_result(category)
-            continue
+    for result in search_results:
+        facts, source, statistics = await _process_search_result(
+            result, category, state["original_query"], config
+        )
+        extracted_facts.extend(facts)
+        sources.extend(source)
+        all_statistics.extend(statistics)
     
-    # Update the category state
-    category_state["extracted_facts"] = extracted_facts
-    category_state["sources"] = sources
+    # Update category state
+    category_state.update({
+        "extracted_facts": extracted_facts,
+        "sources": sources,
+        "statistics": all_statistics,
+        "quality_score": calculate_category_quality_score(
+            category=category,
+            extracted_facts=extracted_facts,
+            sources=sources,
+            thresholds=SEARCH_QUALITY_THRESHOLDS.get(category, {})
+        )
+    })
     
-    # Determine if extraction was successful
+    # Calculate derived scores
+    quality_score = category_state["quality_score"]
+    category_state.update({
+        "confidence_score": quality_score,
+        "cross_validation_score": quality_score * 0.8,
+        "source_quality_score": quality_score * 0.9,
+        "recency_score": quality_score * 0.7,
+        "statistical_content_score": quality_score * 0.85
+    })
+    
+    # Determine completion status
     thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
     min_facts = thresholds.get("min_facts", 3)
     min_sources = thresholds.get("min_sources", 2)
     
-    if len(extracted_facts) >= min_facts and len(sources) >= min_sources:
-        category_state["status"] = "extracted"
-        category_state["complete"] = True
-        
-        # Calculate quality score for this category
-        quality_score = calculate_category_quality_score(
-            category=category,
-            extracted_facts=extracted_facts,
-            sources=sources,
-            thresholds=thresholds
-        )
-        category_state["quality_score"] = quality_score
-        
-        info_highlight(f"Successfully extracted information for {category} (quality: {quality_score:.2f})")
-    else:
-        category_state["status"] = "extraction_incomplete"
-        info_highlight(f"Incomplete extraction for {category}: {len(extracted_facts)} facts from {len(sources)} sources")
-        
-        # If we've retried too many times, mark as complete anyway
-        if category_state["retry_count"] >= 3:
-            category_state["complete"] = True
-            warning_highlight(f"Maximum retries reached for {category}, accepting partial results")
+    category_state["complete"] = (
+        len(extracted_facts) >= min_facts and len(sources) >= min_sources
+    ) or category_state["retry_count"] >= 3
+    
+    category_state["status"] = "extracted" if category_state["complete"] else "extraction_incomplete"
     
     return {"categories": categories}
 
@@ -663,17 +570,17 @@ def calculate_category_quality_score(
     """Calculate quality score for a category based on extracted data."""
     # Base score starts at 0.3
     score = 0.3
-    
+
     # Add points for number of facts
     min_facts = thresholds.get("min_facts", 3)
     fact_ratio = min(1.0, len(extracted_facts) / (min_facts * 2))
     score += fact_ratio * 0.2
-    
+
     # Add points for number of sources
     min_sources = thresholds.get("min_sources", 2)
     source_ratio = min(1.0, len(sources) / (min_sources * 1.5))
     score += source_ratio * 0.2
-    
+
     # Add points for authoritative sources
     auth_ratio = thresholds.get("authoritative_source_ratio", 0.5)
     authoritative_sources = [
@@ -686,7 +593,7 @@ def calculate_category_quality_score(
         score += 0.2
     else:
         score += (auth_source_ratio / auth_ratio) * 0.1
-    
+
     # Add points for recency
     recency_threshold = thresholds.get("recency_threshold_days", 365)
     recent_sources = 0
@@ -694,8 +601,8 @@ def calculate_category_quality_score(
         date_str = source.get("published_date")
         if not date_str:
             continue
-            
-        try:
+
+        with contextlib.suppress(Exception):
             from dateutil import parser
             from datetime import datetime, timezone
             date = parser.parse(date_str)
@@ -703,13 +610,10 @@ def calculate_category_quality_score(
             days_old = (now - date).days
             if days_old <= recency_threshold:
                 recent_sources += 1
-        except Exception:
-            pass
-    
     if sources:
         recency_ratio = recent_sources / len(sources)
         score += recency_ratio * 0.1
-    
+
     return min(1.0, score)
 
 async def execute_research_for_categories(
@@ -777,42 +681,73 @@ async def synthesize_research(
 ) -> Dict[str, Any]:
     """Synthesize all research data into a comprehensive result."""
     log_step("Synthesizing research results", 7, 10)
-    
+
     categories = state["categories"]
     original_query = state["original_query"]
-    
-    # Prepare research data for synthesis
-    research_data = {}
-    for category, category_state in categories.items():
-        research_data[category] = {
+
+    research_data = {
+        category: {
             "facts": category_state["extracted_facts"],
             "sources": category_state["sources"],
-            "quality_score": category_state["quality_score"]
+            "quality_score": category_state["quality_score"],
+            "statistics": category_state["statistics"],
+            "confidence_score": category_state["confidence_score"],
+            "cross_validation_score": category_state["cross_validation_score"],
+            "source_quality_score": category_state["source_quality_score"],
+            "recency_score": category_state["recency_score"],
+            "statistical_content_score": category_state[
+                "statistical_content_score"
+            ],
         }
-    
+        for category, category_state in categories.items()
+    }
     # Generate prompt
     synthesis_prompt = SYNTHESIS_PROMPT.format(
         query=original_query,
         research_json=json.dumps(research_data, indent=2)
     )
-    
+
     try:
         synthesis_result = await call_model_json(
             messages=[{"role": "human", "content": synthesis_prompt}],
             config=ensure_config(config)
         )
-        
+
+        # Calculate overall confidence
+        category_scores = {
+            category: state["quality_score"]
+            for category, state in categories.items()
+        }
+
+        synthesis_quality = assess_synthesis_quality(synthesis_result)
+        validation_score = 0.8  # Default validation score, can be updated later
+
+        overall_confidence = calculate_overall_confidence(
+            category_scores=category_scores,
+            synthesis_quality=synthesis_quality,
+            validation_score=validation_score
+        )
+
+        # Add confidence assessment to synthesis result
+        synthesis_result["confidence_assessment"] = {
+            "overall_score": overall_confidence,
+            "synthesis_quality": synthesis_quality,
+            "validation_score": validation_score,
+            "category_scores": category_scores
+        }
+
         log_dict(
             {
                 "synthesis_sections": list(synthesis_result.get("synthesis", {}).keys()),
-                "confidence_score": synthesis_result.get("confidence_assessment", {}).get("overall_score")
+                "confidence_score": overall_confidence,
+                "synthesis_quality": synthesis_quality,
+                "validation_score": validation_score
             },
             title="Synthesis Overview"
         )
-        
-        overall_score = synthesis_result.get("confidence_assessment", {}).get("overall_score", 0.0)
-        info_highlight(f"Research synthesis complete with confidence score: {overall_score:.2f}")
-        
+
+        info_highlight(f"Research synthesis complete with confidence score: {overall_confidence:.2f}")
+
         return {
             "synthesis": synthesis_result,
             "status": "synthesized"
@@ -876,58 +811,162 @@ async def validate_synthesis(
         error_highlight(f"Error in synthesis validation: {str(e)}")
         return {"error": {"message": f"Error in synthesis validation: {str(e)}", "phase": "validation"}}
 
+def format_citation(citation: Dict[str, Any]) -> str:
+    """Format a citation into a readable string."""
+    if not isinstance(citation, dict):
+        return ""
+
+    title = citation.get("title", "")
+    url = citation.get("url", "")
+    if title or url:
+        return f"[{title}]({url})" if title and url else title or url
+    else:
+        return ""
+
+def highlight_statistics_in_content(content: str, statistics: List[Dict[str, Any]]) -> str:
+    """Highlight statistics in content by wrapping them in markdown bold."""
+    if not statistics:
+        return content
+        
+    highlighted = content
+    for stat in statistics:
+        if value := stat.get("value"):
+            highlighted = highlighted.replace(str(value), f"**{value}**")
+    return highlighted
+
+def _format_section_content(section_data: Dict[str, Any]) -> str:
+    """Format a single section's content with statistics and citations."""
+    if not isinstance(section_data, dict) or "content" not in section_data:
+        return ""
+        
+    content = section_data.get("content", "")
+    statistics = section_data.get("statistics", [])
+    citations = section_data.get("citations", [])
+    
+    # Highlight statistics in content
+    highlighted_content = highlight_statistics_in_content(content, statistics)
+    
+    # Add citations if present
+    if citations and isinstance(citations, list):
+        citation_text = "\n\n**Sources:** " + ", ".join(
+            format_citation(citation) for citation in citations if citation
+        )
+        return highlighted_content + citation_text
+    
+    return highlighted_content
+
+def format_statistic(stat: Dict[str, Any]) -> str:
+    """Format a statistic into a readable string."""
+    if not isinstance(stat, dict):
+        return ""
+        
+    value = stat.get("value")
+    context = stat.get("context", "")
+    if not value:
+        return ""
+        
+    return f"{value} ({context})" if context else str(value)
+
+def _format_key_statistics(statistics: List[Dict[str, Any]]) -> str:
+    """Format key statistics section."""
+    key_stats = [
+        f"- {format_statistic(stat)}"
+        for stat in sorted(statistics, key=lambda x: x.get("quality_score", 0), reverse=True)[:10]
+        if format_statistic(stat)
+    ]
+    return "\n".join(key_stats) if key_stats else "No key statistics available."
+
+def _format_sources(synthesis_content: Dict[str, Any]) -> str:
+    """Format sources section from citations."""
+    sources = {
+        format_citation(citation)
+        for section_data in synthesis_content.values()
+        if isinstance(section_data, dict)
+        for citation in section_data.get("citations", [])
+        if isinstance(citation, dict) and format_citation(citation)
+    }
+    return "\n".join(f"- {source}" for source in sorted(sources)) if sources else "No sources available."
+
+def _format_confidence_notes(confidence: Dict[str, Any]) -> str:
+    """Format confidence notes from limitations and knowledge gaps."""
+    notes = []
+    if limitations := confidence.get("limitations", []):
+        notes.append("**Limitations:** " + ", ".join(limitations))
+    if knowledge_gaps := confidence.get("knowledge_gaps", []):
+        notes.append("**Knowledge Gaps:** " + ", ".join(knowledge_gaps))
+    return "\n".join(notes)
+
+async def generate_recommendations(
+    synthesis_content: Dict[str, Any],
+    query: str,
+    config: Optional[RunnableConfig] = None
+) -> str:
+    """Generate recommendations based on synthesis content."""
+    if not synthesis_content:
+        return "No recommendations available."
+        
+    recommendations = []
+    for section_data in synthesis_content.values():
+        if isinstance(section_data, dict) and "recommendations" in section_data:
+            recommendations.extend(section_data["recommendations"])
+            
+    if not recommendations:
+        return "No specific recommendations available based on the research."
+        
+    return "\n".join(f"- {rec}" for rec in recommendations)
+
 async def prepare_final_response(
     state: ResearchState,
     config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
-    """Prepare the final response with the research results."""
-    log_step("Preparing final response", 9, 10)
+    """Prepare the final response with enhanced statistics and citations."""
+    log_step("Preparing final response", 8, 10)
     
     synthesis = state.get("synthesis", {})
-    validation = state.get("validation_result", {})
-    original_query = state["original_query"]
-    
-    # Create a summary message for the user
     synthesis_content = synthesis.get("synthesis", {}) if synthesis else {}
     confidence = synthesis.get("confidence_assessment", {}) if synthesis else {}
     
-    # Build an executive summary
-    executive_summary = "# Research Results: " + original_query + "\n\n"
+    # Collect all statistics
+    all_statistics = [
+        stat
+        for category_state in state["categories"].values()
+        for stat in category_state.get("statistics", [])
+    ]
     
-    # Add confidence information
-    confidence_score = confidence.get("overall_score", 0.0)
-    executive_summary += f"**Confidence Score:** {confidence_score:.2f}/1.0\n\n"
+    # Format sections
+    sections = {
+        name: _format_section_content(data)
+        for name, data in synthesis_content.items()
+    }
     
-    # Add key findings from most complete sections
-    executive_summary += "## Key Findings\n\n"
-    
-    # Get the most complete sections
-    section_scores = confidence.get("section_scores", {})
-    sorted_sections = sorted(
-        section_scores.items(),
-        key=lambda x: x[1],
-        reverse=True
+    # Format final response
+    response = ENHANCED_REPORT_TEMPLATE.format(
+        title=f"Research Results: {state['original_query'].capitalize()}",
+        executive_summary=sections.get("executive_summary", ""),
+        key_statistics=_format_key_statistics(all_statistics),
+        domain_overview=sections.get("domain_overview", ""),
+        market_size=synthesis_content.get("market_dynamics", {}).get("market_size", ""),
+        competitive_landscape=synthesis_content.get("market_dynamics", {}).get("competitive_landscape", ""),
+        market_trends=synthesis_content.get("market_dynamics", {}).get("trends", ""),
+        key_vendors=synthesis_content.get("provider_landscape", {}).get("key_vendors", ""),
+        vendor_comparison=synthesis_content.get("provider_landscape", {}).get("vendor_comparison", ""),
+        technical_requirements=sections.get("technical_requirements", ""),
+        regulatory_landscape=sections.get("regulatory_landscape", ""),
+        implementation_factors=sections.get("implementation_factors", ""),
+        cost_structure=synthesis_content.get("cost_considerations", {}).get("cost_structure", ""),
+        pricing_models=synthesis_content.get("cost_considerations", {}).get("pricing_models", ""),
+        roi_considerations=synthesis_content.get("cost_considerations", {}).get("roi_considerations", ""),
+        best_practices=sections.get("best_practices", ""),
+        procurement_strategy=sections.get("contract_procurement_strategy", ""),
+        recommendations=await generate_recommendations(synthesis_content, state["original_query"], config),
+        sources=_format_sources(synthesis_content),
+        confidence_score=confidence.get("overall_score", 0.0),
+        generation_date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        confidence_notes=_format_confidence_notes(confidence)
     )
     
-    # Add content from top 3 sections
-    for section_name, score in sorted_sections[:3]:
-        if section_name in synthesis_content and synthesis_content[section_name]["content"]:
-            section_content = synthesis_content[section_name]["content"]
-            executive_summary += f"### {section_name.replace('_', ' ').title()}\n\n"
-            executive_summary += f"{section_content}\n\n"
-    
-    # Add limitations
-    knowledge_gaps = confidence.get("knowledge_gaps", [])
-    if knowledge_gaps:
-        executive_summary += "## Limitations\n\n"
-        for gap in knowledge_gaps:
-            executive_summary += f"- {gap}\n"
-    
-    # Create the response message
-    response_message = AIMessage(content=executive_summary)
-    
     return {
-        "messages": [response_message],
+        "messages": [AIMessage(content=response)],
         "status": "complete",
         "complete": True
     }
@@ -991,6 +1030,20 @@ def handle_error_or_continue(state: ResearchState) -> Hashable:
 # 6. Error handling
 # --------------------------------------------------------------------
 
+def _format_fact(fact: Dict[str, Any]) -> Optional[str]:
+    """Format a single fact into a readable string."""
+    if not isinstance(fact, dict):
+        return None
+        
+    data = fact.get("data", {})
+    fact_text = (
+        data.get("fact") or
+        data.get("requirement") or
+        next((v for v in data.values() if isinstance(v, str) and v), None) or
+        fact.get("fact")
+    )
+    return f"\n- {fact_text}" if fact_text else None
+
 async def handle_error(state: ResearchState) -> Dict[str, Any]:
     """Handle errors gracefully and return a helpful message."""
     error = state.get("error") or {}
@@ -1000,34 +1053,32 @@ async def handle_error(state: ResearchState) -> Dict[str, Any]:
     error_highlight(f"Handling error in phase {phase}: {message}")
 
     # Build error response with partial results
-    error_response = [f"I encountered an issue while researching your query: {message}",
-                     "\nHere's what I was able to find before the error occurred:"]
+    error_response = [
+        f"I encountered an issue while researching your query: {message}",
+        "\nHere's what I was able to find before the error occurred:"
+    ]
 
     # Add completed categories and their facts
     categories = state.get("categories", {})
-    complete_categories = [cat for cat, state in categories.items() if state.get("complete", False)]
-    
-    if complete_categories:
+    if complete_categories := [
+        cat
+        for cat, state in categories.items()
+        if state.get("complete", False)
+    ]:
         error_response.append(f"\n\nI completed research on: {', '.join(complete_categories)}")
-        
+
         for category in complete_categories:
-            facts = categories[category].get("extracted_facts", [])
-            if facts:
+            if facts := categories[category].get("extracted_facts", []):
                 error_response.append(f"\n\n## {category.replace('_', ' ').title()}")
-                for fact in facts[:3]:  # Show up to 3 facts
-                    if isinstance(fact, dict):
-                        data = fact.get("data", {})
-                        fact_text = (data.get("fact") or 
-                                   data.get("requirement") or
-                                   next((v for v in data.values() if isinstance(v, str) and v), None) or
-                                   fact.get("fact"))
-                        if fact_text:
-                            error_response.append(f"\n- {fact_text}")
+                error_response.extend(
+                    fact_text for fact in facts[:3]
+                    if (fact_text := _format_fact(fact))
+                )
     else:
         error_response.append("\n\nUnfortunately, I wasn't able to complete any research categories before the error occurred.")
 
     error_response.append("\n\nWould you like me to try again with a more specific query?")
-    
+
     return {
         "messages": [AIMessage(content="".join(error_response))],
         "status": "error",

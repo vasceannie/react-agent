@@ -87,21 +87,11 @@ def optimize_query(
     vertical: Optional[str] = None,
     include_all_keywords: bool = False
 ) -> str:
-    """Create optimized queries for specific research categories with enhanced domain-specific terms.
-    
-    Args:
-        original_query: The original search query
-        category: Research category to optimize for
-        vertical: Industry vertical context (auto-detected if None)
-        include_all_keywords: Whether to include all keywords for comprehensive searches
-        
-    Returns:
-        Optimized search query
-    """
+    """Create optimized queries for specific research categories with enhanced domain-specific terms."""
     # Clean the original query
     original_query = original_query.split("Additional context:")[0].strip()
     
-    # Expand acronyms for better search results
+    # Expanded acronyms for better search results
     expanded_query = expand_acronyms(original_query)
     
     # Detect vertical if not provided
@@ -114,71 +104,90 @@ def optimize_query(
     # Define enhanced category-specific query templates with keyword banks
     query_templates = {
         "market_dynamics": {
-            "template": "{query} market trends analysis {vertical} {procurement_terms}",
+            "template": "{primary_terms} market trends",
             "keyword_groups": ["contracts", "procurement", "strategy"]
         },
         "provider_landscape": {
-            "template": "{query} {vertical} {procurement_terms}",
+            "template": "{primary_terms} vendors suppliers",
             "keyword_groups": ["suppliers", "rfp", "strategy"]
         },
         "technical_requirements": {
-            "template": "{query} technical specifications {vertical} {procurement_terms}",
+            "template": "{primary_terms} technical specifications",
             "keyword_groups": ["rfp", "procurement", "risk"]
         },
         "regulatory_landscape": {
-            "template": "{query} regulations compliance {vertical} {procurement_terms}",
+            "template": "{primary_terms} regulations compliance",
             "keyword_groups": ["contracts", "risk", "process"]
         },
         "cost_considerations": {
-            "template": "{query} pricing cost budget {vertical} {procurement_terms}",
+            "template": "{primary_terms} pricing cost budget",
             "keyword_groups": ["pricing", "payment", "strategy"]
         },
         "best_practices": {
-            "template": "{query} best practices case studies {vertical} {procurement_terms}",
+            "template": "{primary_terms} best practices",
             "keyword_groups": ["strategy", "risk", "process"]
         },
         "implementation_factors": {
-            "template": "{query} implementation factors {vertical} {procurement_terms}",
+            "template": "{primary_terms} implementation factors",
             "keyword_groups": ["procurement", "suppliers", "risk"]
         }
     }
     
+    # Extract primary terms from the query (filter out common words)
+    words = expanded_query.split()
+    stop_words = ["help", "me", "research", "find", "information", "about", "on", "for", 
+                  "the", "and", "or", "in", "to", "with", "by", "is", "are"]
+    
+    primary_terms = []
+    for word in words:
+        if word.lower() not in stop_words and len(word) > 3:
+            primary_terms.append(word)
+            # Limit to first 3-4 meaningful terms
+            if len(primary_terms) >= 4:
+                break
+    
+    # If no primary terms found, use the whole query up to a limit
+    if not primary_terms:
+        primary_terms = words[:3]
+    
     # Get template for this category
     if category not in query_templates:
-        return expanded_query
+        return " ".join(primary_terms)
     
     template = query_templates[category]["template"]
     
-    # Add maintenance-specific terms if relevant
-    maintenance_terms = []
-    if "maintenance" in original_query.lower() or "repair" in original_query.lower():
-        for terms in MAINTENANCE_CATEGORIES.values():
-            maintenance_terms.extend(terms[:2])  # Add top 2 terms from each maintenance category
-    
-    # Get procurement terms for this category
+    # Get procurement terms for this category (but use fewer to keep query simple)
     procurement_terms = []
     if include_all_keywords:
-        # Include all keyword groups for comprehensive searches
-        for term_group in PROCUREMENT_TERMS.values():
-            procurement_terms.extend(term_group[:2])  # Top 2 terms from each group
+        # Include more keywords for comprehensive searches but still limit
+        for group, terms in PROCUREMENT_TERMS.items():
+            if group in query_templates[category]["keyword_groups"]:
+                procurement_terms.append(terms[0])  # Just top 1 term from each group
     else:
-        # Include only category-specific keyword groups
+        # Include only minimal keyword groups
         keyword_groups = query_templates[category]["keyword_groups"]
-        for group in keyword_groups:
-            if group in PROCUREMENT_TERMS:
-                procurement_terms.extend(PROCUREMENT_TERMS[group][:2])  # Top 2 terms from each group
+        if keyword_groups:
+            top_group = keyword_groups[0]
+            if top_group in PROCUREMENT_TERMS:
+                procurement_terms.append(PROCUREMENT_TERMS[top_group][0])  # Just top term
     
-    # Format the template
+    # Format the template with just essential terms
+    primary_terms_str = " ".join(primary_terms)
+    
     optimized_query = template.format(
-        query=expanded_query,
-        vertical=" ".join(vertical_terms[:2]),  # Top 2 vertical terms
-        procurement_terms=" ".join(procurement_terms + maintenance_terms)
+        primary_terms=primary_terms_str
     )
     
-    # Ensure the query isn't too long for search engines (typically ~150-200 chars)
-    if len(optimized_query) > 180:
-        # Prioritize original query with key terms
-        terms = " ".join(procurement_terms[:4])  # Limit to 4 procurement terms when query is long
-        optimized_query = f"{expanded_query} {vertical_terms[0]} {terms}"
+    # Add at most one procurement term if we need to for context
+    if procurement_terms:
+        optimized_query += " " + procurement_terms[0]
+        
+    # Add at most one vertical term if needed
+    if vertical != "general" and vertical_terms:
+        optimized_query += " " + vertical_terms[0]
+    
+    # Ensure the query isn't too long for search engines
+    if len(optimized_query) > 100:
+        optimized_query = optimized_query[:100].rsplit(' ', 1)[0]
     
     return optimized_query

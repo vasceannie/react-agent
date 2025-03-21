@@ -354,7 +354,7 @@ async def execute_category_search(
     
     # Get category-specific search parameters
     thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
-    recency_days = int(thresholds.get("recency_threshold_days", 365))
+    recency_days = int(str(thresholds.get("recency_threshold_days", 365)), base=10)
     
     # Configure search params based on category
     search_type_mapping: Dict[str, SearchType] = {

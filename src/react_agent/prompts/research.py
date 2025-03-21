@@ -186,6 +186,8 @@ FORMAT YOUR RESPONSE AS JSON:
 
 URL: {url}
 
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
 INSTRUCTIONS:
 1. ONLY extract VERIFIED facts about regulations, laws, compliance requirements, and standards
 2. Format each regulation with:
@@ -218,14 +220,54 @@ FORMAT YOUR RESPONSE AS JSON:
   ],
   "relevance_score": 0.0-1.0
 }}
-""",
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every regulation and requirement
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
+11. Ensure all JSON objects are properly closed with matching braces
+12. Do not include any line breaks or whitespace outside the JSON structure
+13. Do not include any markdown code block markers (```)
+14. Do not include any explanatory text before or after the JSON
+15. The response must start with '{{' and end with '}}' only
+
+EXAMPLE OF VALID RESPONSE:
+{{
+  "extracted_regulations": [
+    {{
+      "regulation": "Example Regulation",
+      "jurisdiction": "Example Jurisdiction",
+      "description": "Example description",
+      "source_text": "Example quote",
+      "confidence": "high"
+    }}
+  ],
+  "compliance_requirements": [
+    {{
+      "requirement": "Example requirement",
+      "description": "Example description",
+      "source_text": "Example quote",
+      "confidence": "high"
+    }}
+  ],
+  "relevance_score": 0.8
+}}""",
 
     "cost_considerations": """Extract factual information about COSTS & PRICING from this content about {query}.
 
 URL: {url}
 
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about pricing, costs, budgets, TCO, ROI, financial considerations, and procurement costs
+1. ONLY extract VERIFIED facts about pricing, costs, budgets, TCO, ROI, and financial considerations
 2. Format each fact with:
    - The specific cost information
    - Direct quote from the content supporting the fact
@@ -243,9 +285,7 @@ FORMAT YOUR RESPONSE AS JSON:
       "amount": null,  // Include if available with currency
       "context": "Description of pricing context",
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low",
-      "volume_breaks": "Volume discount information if available",
-      "contract_terms": "Contract terms affecting cost if available"
+      "confidence": "high/medium/low"
     }}
   ],
   "pricing_models": [
@@ -253,14 +293,23 @@ FORMAT YOUR RESPONSE AS JSON:
       "model_type": "subscription/one-time/usage-based/etc",
       "description": "How the pricing works",
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low",
-      "volume_discounts": "Volume discount structure if available",
-      "rebate_programs": "Rebate program details if available",
-      "contract_requirements": "Contract requirements affecting pricing if available"
+      "confidence": "high/medium/low"
     }}
   ],
   "relevance_score": 0.0-1.0
 }}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every cost and pricing model
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
 """,
 
     "best_practices": """Extract factual information about BEST PRACTICES from this content about {query}.

@@ -83,6 +83,25 @@ class SearchParams:
         # Remove any "Additional context" or similar prefixes
         cleaned_query = cleaned_query.split("Additional context:")[0].strip()
         
+        # Break down long queries into keyword-focused search
+        if len(cleaned_query.split()) > 10:
+            # Extract key terms using basic keyword extraction
+            # We're looking for nouns and specific terms, avoiding basic verbs and help phrases
+            skip_words = ["help", "me", "research", "find", "information", "about", "on", "for", 
+                         "the", "and", "or", "in", "to", "with", "by", "is", "are", "was", "were"]
+            
+            # Extract meaningful terms for search
+            terms = [word for word in cleaned_query.split() 
+                    if word.lower() not in skip_words and len(word) > 3]
+            
+            # If we found meaningful terms, use those; otherwise fall back to truncated original
+            if len(terms) >= 3:
+                cleaned_query = " ".join(terms[:7])  # Use up to 7 meaningful keywords
+            else:
+                # Just take the first few meaningful words if we couldn't extract good keywords
+                words = cleaned_query.split()
+                cleaned_query = " ".join(words[:5])
+        
         # Fix common typos
         cleaned_query = cleaned_query.replace("resaerch", "research")
         
@@ -114,8 +133,8 @@ class SearchParams:
             # If no category, just expand acronyms
             optimized_query = expand_acronyms(cleaned_query)
         
-        # Limit query length to avoid issues (consistent with query.py's 180 char limit)
-        optimized_query = optimized_query[:180] if len(optimized_query) > 180 else optimized_query
+        # Limit query length to avoid issues
+        optimized_query = optimized_query[:100] if len(optimized_query) > 100 else optimized_query
         
         # Clean up any remaining special characters and extra spaces
         optimized_query = re.sub(r'[^\w\s-]', ' ', optimized_query)
@@ -125,10 +144,12 @@ class SearchParams:
         words = optimized_query.split()
         optimized_query = ' '.join(dict.fromkeys(words))
         
-        # Ensure the query is not too long
-        if len(optimized_query) > 100:
-            # Take the first 100 characters, but try to break at a word boundary
-            optimized_query = optimized_query[:100].rsplit(' ', 1)[0]
+        # Further simplify if the query is still too complex
+        if len(optimized_query.split()) > 7:
+            optimized_query = ' '.join(optimized_query.split()[:7])
+        
+        info_highlight(f"Original query: {self.query}")
+        info_highlight(f"Optimized query for search: {optimized_query}")
         
         result = {
             "q": quote(optimized_query),
@@ -214,7 +235,7 @@ class JinaSearchClient:
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Make HTTP request to Jina API with retry logic."""
+        """Make HTTP request to Jina API with retry logic and better error handling."""
         if not self.session:
             raise ValueError("Session not initialized")
 
@@ -230,6 +251,14 @@ class JinaSearchClient:
                     params=params,
                     json=json_data
                 ) as response:
+                    # Check for no results error (422)
+                    if response.status == 422:
+                        error_text = await response.text()
+                        if "No search results available" in error_text:
+                            warning_highlight("No search results available for this query")
+                            return {"results": []}  # Return empty results rather than raising an error
+                    
+                    # Handle other errors
                     if response.status != 200:
                         error_text = await response.text()
                         error_highlight(f"Request failed with status {response.status}: {error_text}")
@@ -473,21 +502,7 @@ async def search(
     *,
     config: Annotated[RunnableConfig, InjectedToolArg]
 ) -> Optional[List[Document]]:
-    """Enhanced search with multiple strategies and quality filters.
-    
-    Args:
-        query: The search query string
-        search_type: Type of search to perform (general, authoritative, recent, etc.)
-        domains: List of domains to include in search
-        recency_days: Only include results from the last N days
-        min_quality: Minimum quality score for results (0.0-1.0)
-        max_results: Maximum number of results to return
-        category: Research category for query optimization
-        config: Configuration containing API key and settings
-        
-    Returns:
-        Optional[List[Document]]: List of search results as Documents, or None if search fails
-    """
+    """Enhanced search with multiple strategies and quality filters."""
     configuration = Configuration.from_runnable_config(config)
     if not configuration.jina_api_key:
         error_highlight("Jina API key is required")
@@ -517,11 +532,50 @@ async def search(
     try:
         retry_config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0)
         async with JinaSearchClient(
-                    api_key=configuration.jina_api_key,
-                    base_url=configuration.jina_url,
-                    retry_config=retry_config
-                ) as client:
-            return await client.search(params)
+                                    api_key=configuration.jina_api_key,
+                                    base_url=configuration.jina_url,
+                                    retry_config=retry_config
+                                ) as client:
+            
+            # First attempt with normal query
+            results = await client.search(params)
+
+            # If no results, try with simplified query
+            if not results:
+                info_highlight("No results with initial query, trying with simplified query")
+
+                # Create simplified query by keeping only key terms
+                words = query.split()
+                if simplified_query := " ".join(
+                    [
+                        w
+                        for w in words
+                        if len(w) > 3
+                        and w.lower()
+                        not in [
+                            "help",
+                            "find",
+                            "about",
+                            "information",
+                            "research",
+                            "please",
+                        ]
+                    ][:5]
+                ):
+                    params.query = simplified_query
+                    results = await client.search(params)
+
+            # If still no results, try with just the most important keyword
+            if not results and len(words) > 1:
+                info_highlight("Still no results, trying with most important keyword")
+                # Find longest word as it's likely most important
+                important_term = max(words, key=len)
+                if len(important_term) > 3:
+                    params.query = important_term
+                    results = await client.search(params)
+
+            return results
+
     except Exception as e:
         error_highlight(f"Search failed: {str(e)}")
         return None

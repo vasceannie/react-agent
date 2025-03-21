@@ -1,142 +1,248 @@
-"""Utility & helper functions."""
+"""LLM utility functions for handling model calls and content processing.
 
+This module provides utilities for interacting with language models,
+including content length management and error handling.
+"""
+
+from typing import List, Dict, Any, Optional, Union, cast
 import json
+import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, cast
+import os
 
-from langchain.chat_models import init_chat_model
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.prompt_values import PromptValue
-from langchain_core.runnables import RunnableConfig
-from langchain_core.runnables.base import Runnable
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig, ensure_config
+from openai import AsyncClient
+from openai.types.chat import ChatCompletionMessageParam
+from anthropic import AsyncAnthropic
 
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+from react_agent.utils.content import (
+    chunk_text,
+    preprocess_content,
+    estimate_tokens,
+    validate_content,
+    detect_content_type,
+    merge_chunk_results
+)
 from react_agent.configuration import Configuration
-from react_agent.state import State
-from react_agent.tools.tavily import TOOLS
 
+# Initialize logger
+logger = get_logger(__name__)
 
-def get_message_text(msg: BaseMessage) -> str:
-    """Get the text content of a message."""
-    content = msg.content
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, dict):
-        return content.get("text", "")
-    else:
-        txts = [c if isinstance(c, str) else (c.get("text") or "") for c in content]
-        return "".join(txts).strip()
+# Constants
+MAX_TOKENS: int = 16000  # Reduced from 100000 to stay within model limits
+DEFAULT_CHUNK_SIZE: int = 4000  # Reduced chunk size
+DEFAULT_OVERLAP: int = 500  # Reduced overlap
+MAX_SUMMARY_TOKENS: int = 2000  # New constant for summary model
 
+# Initialize API clients
+openai_client = AsyncClient(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_API_BASE")
+)
+anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-def load_chat_model(fully_specified_name: str) -> BaseChatModel:
-    """Load a chat model from a fully specified name.
-
+async def summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS) -> str:
+    """Summarize content using a more efficient model.
+    
     Args:
-        fully_specified_name (str): String in the format 'provider/model'.
+        input_content: The content to summarize
+        max_tokens: Maximum tokens for the summary
+        
+    Returns:
+        Summarized content
     """
-    provider: str = fully_specified_name.split("/", maxsplit=1)[0]
-    model: str = fully_specified_name.split("/", maxsplit=1)[1]
-    return init_chat_model(model, model_provider=provider)
+    try:
+        # Use a more efficient model for summarization
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",  # Use a more efficient model for summarization
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that creates concise summaries. Focus on key points and maintain factual accuracy."},
+                {"role": "user", "content": f"Please summarize the following content concisely:\n\n{input_content}"}
+            ],
+            max_tokens=max_tokens,
+            temperature=0.3  # Lower temperature for more focused summaries
+        )
+        response_content = cast(Optional[str], response.choices[0].message.content)
+        return response_content if response_content is not None else ""
+    except Exception as e:
+        error_highlight(f"Error in summarize_content: {str(e)}")
+        return input_content  # Return original content if summarization fails
 
+async def _format_openai_messages(messages: List[Dict[str, str]], system_prompt: str) -> List[ChatCompletionMessageParam]:
+    """Format messages for OpenAI API."""
+    formatted_messages: List[ChatCompletionMessageParam] = []
+    for msg in messages:
+        if msg["role"] == "system":
+            formatted_messages.append({"role": "system", "content": msg["content"]})
+        else:
+            content = msg["content"]
+            if estimate_tokens(content) > MAX_TOKENS:
+                info_highlight("Content too long, summarizing...")
+                content = await summarize_content(content)
+            formatted_messages.append({"role": "user", "content": content})
+
+    if all(msg["role"] != "system" for msg in formatted_messages):
+        formatted_messages.insert(0, {"role": "system", "content": system_prompt})
+    
+    return formatted_messages
+
+async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Optional[str]:
+    """Call OpenAI API with formatted messages."""
+    response = await openai_client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=0.7
+    )
+    return response.choices[0].message.content
 
 async def call_model(
-    state: State, config: RunnableConfig
-) -> Dict[str, List[AIMessage]]:
-    """Call the LLM powering our "agent".
+    messages: List[Dict[str, str]],
+    config: Optional[RunnableConfig] = None
+) -> Optional[Union[str, Dict[str, Any]]]:
+    """Call the language model with the given messages."""
+    if not messages:
+        error_highlight("No messages provided to call_model")
+        return None
 
-    This function prepares the prompt, initializes the model, and processes the response.
+    try:
+        config = config or {}
+        configurable = config.get("configurable", {})
+        configurable["timestamp"] = datetime.now(timezone.utc).isoformat()
+        config = {**config, "configurable": configurable}
 
-    Args:
-        state (State): The current state of the conversation.
-        config (RunnableConfig): Configuration for the model run.
+        configuration = Configuration.from_runnable_config(config)
+        logger.info(f"Calling model with {len(messages)} messages")
+        logger.debug(f"Config: {config}")
 
-    Returns:
-        dict: A dictionary containing the model's response message.
-    """
-    configuration: Configuration = Configuration.from_runnable_config(config)
+        provider, model = configuration.model.split("/", 1)
 
-    # Initialize the model with tool binding. Change the model or add more tools here.
-    model: Runnable[PromptValue | str | Sequence[BaseMessage | list[str] | tuple[str, str] | str | dict[str, Any]], BaseMessage] = load_chat_model(configuration.model).bind_tools(TOOLS)
+        if provider == "openai":
+            formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
+            return await _call_openai_api(model, formatted_messages)
+        elif provider == "anthropic":
+            formatted_messages = [
+                {"role": "user", "content": configuration.system_prompt} if messages[0]["role"] != "system" else None,
+                *[{"role": "user" if msg["role"] == "system" else msg["role"], "content": msg["content"]} for msg in messages]
+            ]
+            formatted_messages = [msg for msg in formatted_messages if msg is not None]
+            
+            response = await anthropic_client.messages.create(
+                model=model,
+                messages=formatted_messages,
+                max_tokens=MAX_TOKENS,
+                temperature=0.7
+            )
+            return str(response.content[0])
+        else:
+            error_highlight(f"Unsupported model provider: {provider}")
+            return None
 
-    # Format the system prompt. Customize this to change the agent's behavior.
-    system_message = configuration.system_prompt.format(
-        system_time=datetime.now(tz=timezone.utc).isoformat()
-    )
-
-    # Get the model's response
-    response: AIMessage = cast(
-        AIMessage,
-        await model.ainvoke(
-            input=[{"role": "system", "content": system_message}, *state.messages],
-            config=config,
-        ),
-    )
-
-    return {"messages": [response]}
-
+    except Exception as e:
+        error_highlight(f"Error in call_model: {str(e)}")
+        return None
 
 async def call_model_json(
     messages: List[Dict[str, str]],
-    config: Optional[RunnableConfig] = None
+    config: Optional[RunnableConfig] = None,
+    max_tokens: int = MAX_TOKENS
 ) -> Dict[str, Any]:
-    """Call the LLM and get a JSON response."""
-    base_config: RunnableConfig = config or {}
-    configuration: Configuration = Configuration.from_runnable_config(base_config)
-    model: BaseChatModel = load_chat_model(configuration.model)
+    """Call the LLM and get a JSON response.
     
-    # Create a new config dictionary with response format
-    model_config = dict(base_config)
-    model_config["response_format"] = {"type": "json_object"}
-    
-    # Add system message to enforce JSON response
-    system_message = {
-        "role": "system",
-        "content": "You are a helpful assistant that always responds with a single, valid JSON object. Do not include any explanations, markdown formatting, or text outside the JSON object."
-    }
-    all_messages = [system_message] + messages
-    
-    response = await model.ainvoke(
-        all_messages,
-        config=cast(RunnableConfig, model_config)
-    )
-    
-    content = get_message_text(response)
-    
+    Args:
+        messages: List of message dictionaries with role and content
+        config: Optional configuration dictionary
+        max_tokens: Maximum number of tokens to process
+        
+    Returns:
+        JSON response from the model
+    """
+    if not messages:
+        error_highlight("No messages provided to call_model_json")
+        return {}
+
     try:
-        # First try direct JSON parsing
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # If that fails, try to extract and clean the JSON
-        import re
+        # Get and validate content from last message
+        content = messages[-1].get("content", "")
+        if not content or not validate_content(content):
+            error_highlight("Invalid or empty content in last message")
+            return {}
+
+        # Preprocess and estimate tokens
+        content = preprocess_content(content, "")
+        estimated_tokens = estimate_tokens(content)
         
-        # Remove any markdown code block syntax
-        content = re.sub(r'```(?:json)?\s*|\s*```', '', content)
-        
-        # Find the outermost JSON object
-        start = content.find('{')
-        if start == -1:
-            raise ValueError("No JSON object found in response")
+        # Handle large content with chunking
+        if estimated_tokens > max_tokens:
+            info_highlight(f"Content exceeds token limit ({estimated_tokens} > {max_tokens}), chunking")
+            return await _process_chunked_content(messages, content, config)
             
-        # Track brace depth to find matching end brace
-        depth = 1
-        pos = start + 1
-        
-        while depth > 0 and pos < len(content):
-            if content[pos] == '{':
-                depth += 1
-            elif content[pos] == '}':
-                depth -= 1
-            pos += 1
+        # Process single content
+        response = await call_model(messages, config)
+        if not response:
+            error_highlight("Empty response from model")
+            return {}
             
-        if depth > 0:
-            raise ValueError("Unclosed JSON object in response")
-            
-        json_str = content[start:pos].strip()
-        
+        return _parse_json_response(response)
+                    
+    except Exception as e:
+        error_highlight(f"Error in call_model_json: {str(e)}")
+        return {}
+
+async def _process_chunked_content(
+    messages: List[Dict[str, str]],
+    content: str,
+    config: Optional[RunnableConfig]
+) -> Dict[str, Any]:
+    """Process content that exceeds token limit by chunking."""
+    chunks = chunk_text(content, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP)
+    chunk_results = []
+    
+    for i, chunk in enumerate(chunks):
+        chunk_messages = messages[:-1] + [{"role": "human", "content": chunk}]
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            # If still failing, try more aggressive cleaning
-            clean_json = re.sub(r'\s+', ' ', json_str)  # Normalize whitespace
-            clean_json = re.sub(r'[^\x20-\x7E]', '', clean_json)  # Remove non-printable chars
-            return json.loads(clean_json)
+            chunk_response = await call_model(chunk_messages, config)
+            if chunk_response:
+                chunk_results.append(chunk_response)
+        except Exception as e:
+            error_highlight(f"Error processing chunk {i+1}: {str(e)}")
+            continue
+    
+    if not chunk_results:
+        error_highlight("No valid results from chunks")
+        return {}
+        
+    return merge_chunk_results(chunk_results, "general")
+
+def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse and clean JSON response from model."""
+    if isinstance(response, dict):
+        return response
+        
+    if not isinstance(response, str):
+        error_highlight(f"Unexpected response type: {type(response)}")
+        return {}
+        
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        return _clean_and_parse_json(response)
+
+def _clean_and_parse_json(response_str: str) -> Dict[str, Any]:
+    """Clean and parse potentially malformed JSON response."""
+    if "{" not in response_str or "}" not in response_str:
+        return {}
+        
+    try:
+        start_idx = response_str.find("{")
+        end_idx = response_str.rfind("}") + 1
+        cleaned = response_str[start_idx:end_idx]
+        cleaned = cleaned.replace("'", '"').replace(",\n}", "\n}").replace(",\n]", "\n]")
+        return json.loads(cleaned)
+    except Exception as e:
+        error_highlight(f"Failed to clean and parse JSON: {str(e)}")
+        return {}
+
+__all__ = ["call_model_json", "call_model"]

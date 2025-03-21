@@ -72,7 +72,7 @@ EXTRACTION_PROMPTS: Dict[str, str] = {
 URL: {url}
 
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about market size, growth rates, trends, forecasts, and competitive dynamics
+1. ONLY extract VERIFIED facts about market size, growth rates, trends, forecasts, competitive dynamics, and procurement patterns
 2. Format each fact with:
    - The fact statement
    - Direct quote from the content supporting the fact
@@ -83,22 +83,24 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_facts": [
-    {
+    {{
       "fact": "Clear factual statement about market dynamics",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low",
-      "data_type": "market_size/growth_rate/trend/forecast/competitive"
-    }
+      "data_type": "market_size/growth_rate/trend/forecast/competitive/procurement_pattern"
+    }}
   ],
-  "market_metrics": {
+  "market_metrics": {{
     "market_size": null,  // Include if available with units
     "growth_rate": null,  // Include if available with time period
-    "forecast_period": null  // Include if available
-  },
+    "forecast_period": null,  // Include if available
+    "procurement_volume": null,  // Include if available
+    "contract_value": null  // Include if available
+  }},
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "provider_landscape": """Extract factual information about PROVIDERS/VENDORS from this content about {query}.
@@ -106,7 +108,7 @@ FORMAT YOUR RESPONSE AS JSON:
 URL: {url}
 
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about vendors, suppliers, service providers, and market players
+1. ONLY extract VERIFIED facts about vendors, suppliers, service providers, manufacturers, distributors, and market players
 2. Format each fact with:
    - The vendor name and specific details
    - Direct quote from the content supporting the fact
@@ -117,26 +119,30 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_vendors": [
-    {
+    {{
       "vendor_name": "Name of vendor",
       "description": "What they provide",
       "market_position": "leader/challenger/niche",
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low"
-    }
+      "confidence": "high/medium/low",
+      "contract_status": "active/expired/pending",
+      "contract_terms": "Key contract terms if available",
+      "pricing_model": "Pricing structure if available"
+    }}
   ],
   "vendor_relationships": [
-    {
-      "relationship_type": "partnership/competition/acquisition",
+    {{
+      "relationship_type": "partnership/competition/acquisition/contract",
       "entities": ["vendor1", "vendor2"],
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low"
-    }
+      "confidence": "high/medium/low",
+      "contract_details": "Contract details if available"
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "technical_requirements": """Extract factual information about TECHNICAL REQUIREMENTS from this content about {query}.
@@ -155,25 +161,25 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_requirements": [
-    {
+    {{
       "requirement": "Specific technical requirement",
       "category": "hardware/software/compliance/integration/performance",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "standards": [
-    {
+    {{
       "standard_name": "Name of standard or protocol",
       "description": "Brief description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "regulatory_landscape": """Extract factual information about REGULATIONS & COMPLIANCE from this content about {query}.
@@ -192,26 +198,26 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_regulations": [
-    {
+    {{
       "regulation": "Name of regulation/law/standard",
       "jurisdiction": "Geographical or industry scope",
       "description": "Brief description of requirement",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "compliance_requirements": [
-    {
+    {{
       "requirement": "Specific compliance requirement",
       "description": "What must be done",
       "source_text": "Direct quote from content", 
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "cost_considerations": """Extract factual information about COSTS & PRICING from this content about {query}.
@@ -219,7 +225,7 @@ FORMAT YOUR RESPONSE AS JSON:
 URL: {url}
 
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about pricing, costs, budgets, TCO, ROI, and financial considerations
+1. ONLY extract VERIFIED facts about pricing, costs, budgets, TCO, ROI, financial considerations, and procurement costs
 2. Format each fact with:
    - The specific cost information
    - Direct quote from the content supporting the fact
@@ -230,37 +236,44 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_costs": [
-    {
+    {{
       "cost_item": "Specific cost element",
       "amount": null,  // Include if available with currency
       "context": "Description of pricing context",
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low"
-    }
+      "confidence": "high/medium/low",
+      "volume_breaks": "Volume discount information if available",
+      "contract_terms": "Contract terms affecting cost if available"
+    }}
   ],
   "pricing_models": [
-    {
+    {{
       "model_type": "subscription/one-time/usage-based/etc",
       "description": "How the pricing works",
       "source_text": "Direct quote from content",
-      "confidence": "high/medium/low"
-    }
+      "confidence": "high/medium/low",
+      "volume_discounts": "Volume discount structure if available",
+      "rebate_programs": "Rebate program details if available",
+      "contract_requirements": "Contract requirements affecting pricing if available"
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "best_practices": """Extract factual information about BEST PRACTICES from this content about {query}.
 
 URL: {url}
 
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
 INSTRUCTIONS:
-1. ONLY extract VERIFIED best practices, methodologies, approaches, and success factors
-2. Format each best practice with:
-   - The practice description
-   - Direct quote from the content supporting it
+1. ONLY extract VERIFIED best practices, methodologies, and success factors
+2. Format each practice with:
+   - The specific practice or methodology
+   - Direct quote from the content supporting the fact
    - Confidence rating (high/medium/low)
 3. If no best practices are found, indicate this
 
@@ -268,25 +281,37 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_practices": [
-    {
-      "practice": "Description of best practice",
-      "benefit": "What benefit it provides",
+    {{
+      "practice": "Specific best practice or methodology",
+      "description": "Detailed description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "methodologies": [
-    {
-      "methodology": "Name of methodology or approach",
+    {{
+      "methodology": "Name of methodology",
       "description": "How it works",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every practice and methodology
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
 """,
 
     "implementation_factors": """Extract factual information about IMPLEMENTATION FACTORS from this content about {query}.
@@ -294,9 +319,9 @@ FORMAT YOUR RESPONSE AS JSON:
 URL: {url}
 
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about implementation considerations, requirements, challenges, and success factors
+1. ONLY extract VERIFIED facts about implementation challenges, success factors, and considerations
 2. Format each factor with:
-   - The implementation factor
+   - The specific implementation factor
    - Direct quote from the content supporting the fact
    - Confidence rating (high/medium/low)
 3. If no implementation information is found, indicate this
@@ -305,25 +330,25 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_factors": [
-    {
-      "factor": "Description of implementation factor",
-      "category": "resource/timeline/risk/organizational/technical",
+    {{
+      "factor": "Specific implementation factor",
+      "description": "Detailed description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "challenges": [
-    {
-      "challenge": "Description of implementation challenge",
-      "mitigation": "How to address it (if mentioned)",
+    {{
+      "challenge": "Specific implementation challenge",
+      "description": "What makes it challenging",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """
 }
 
@@ -333,13 +358,14 @@ SYNTHESIS_PROMPT: Final[str] = """Create a comprehensive synthesis of research f
 REQUIREMENTS:
 1. Structure your synthesis with these EXACT sections:
    - Domain Overview: Essential context and background
-   - Market Dynamics: Size, growth, trends, competition
-   - Provider Landscape: Key vendors and their positioning
-   - Technical Requirements: Specifications and standards
-   - Regulatory Landscape: Compliance and legal requirements
-   - Implementation Factors: Resources, process, challenges
-   - Cost Considerations: Pricing, ROI, financial factors
-   - Best Practices: Recommended approaches
+   - Market Dynamics: Size, growth, trends, competition, procurement patterns
+   - Provider Landscape: Key vendors, manufacturers, distributors, and their positioning
+   - Technical Requirements: Specifications, standards, and procurement requirements
+   - Regulatory Landscape: Compliance, legal requirements, and procurement regulations
+   - Implementation Factors: Resources, process, challenges, and procurement considerations
+   - Cost Analysis: Pricing, ROI, financial factors, volume discounts, and contract terms
+   - Best Practices: Recommended approaches for procurement and sourcing
+   - Contract & Procurement Strategy: Contract terms, negotiation strategies, and procurement processes
 
 2. For EACH section:
    - Synthesize insights from multiple sources when available
@@ -368,7 +394,8 @@ FORMAT RESPONSE AS JSON:
     "regulatory_landscape": {{ "content": "", "citations": [] }},
     "implementation_factors": {{ "content": "", "citations": [] }},
     "cost_considerations": {{ "content": "", "citations": [] }},
-    "best_practices": {{ "content": "", "citations": [] }}
+    "best_practices": {{ "content": "", "citations": [] }},
+    "contract_procurement_strategy": {{ "content": "", "citations": [] }}
   }},
   "confidence_assessment": {{
     "overall_score": 0.0-1.0,
@@ -380,7 +407,8 @@ FORMAT RESPONSE AS JSON:
       "regulatory_landscape": 0.0-1.0,
       "implementation_factors": 0.0-1.0,
       "cost_considerations": 0.0-1.0,
-      "best_practices": 0.0-1.0
+      "best_practices": 0.0-1.0,
+      "contract_procurement_strategy": 0.0-1.0
     }},
     "limitations": [],
     "knowledge_gaps": []
@@ -392,6 +420,7 @@ REMEMBER:
 - Only include claims that are supported by the research
 - Use clear, concise language focused on business impact
 - Highlight conflicting information when present
+- Pay special attention to procurement and sourcing-related insights
 """
 
 # Enhanced validation prompt with adaptive thresholds
@@ -496,6 +525,9 @@ REPORT_TEMPLATE: Final[str] = """
 ### Best Practices
 {best_practices}
 
+### Contract & Procurement Strategy
+{contract_procurement_strategy}
+
 ## Recommendations
 {recommendations}
 
@@ -575,14 +607,16 @@ SEARCH_QUALITY_THRESHOLDS: Dict[str, Dict[str, float]] = {
 def get_extraction_prompt(category: str, query: str, url: str, content: str) -> str:
     """Get the appropriate extraction prompt for a specific category."""
     if category in EXTRACTION_PROMPTS:
-        return EXTRACTION_PROMPTS[category].format(
+        prompt = EXTRACTION_PROMPTS[category]
+        return prompt.format(
             query=query,
             url=url,
             content=content
         )
     else:
         # Fallback to general extraction prompt
-        return EXTRACTION_PROMPTS["market_dynamics"].format(
+        prompt = EXTRACTION_PROMPTS["market_dynamics"]
+        return prompt.format(
             query=query,
             url=url,
             content=content
@@ -686,6 +720,53 @@ RESPONSE FORMAT:
     "specialized_areas": ["Area 1", "Area 2"]
 }"""
 
+# Add a function to provide default empty responses
+def get_default_extraction_result(category: str) -> Dict[str, Any]:
+    """Get a default empty extraction result when parsing fails."""
+    defaults = {
+        "market_dynamics": {
+            "extracted_facts": [],
+            "market_metrics": {
+                "market_size": None,
+                "growth_rate": None,
+                "forecast_period": None
+            },
+            "relevance_score": 0.0
+        },
+        "provider_landscape": {
+            "extracted_vendors": [],
+            "vendor_relationships": [],
+            "relevance_score": 0.0
+        },
+        "technical_requirements": {
+            "extracted_requirements": [],
+            "standards": [],
+            "relevance_score": 0.0
+        },
+        "regulatory_landscape": {
+            "extracted_regulations": [],
+            "compliance_requirements": [],
+            "relevance_score": 0.0
+        },
+        "cost_considerations": {
+            "extracted_costs": [],
+            "pricing_models": [],
+            "relevance_score": 0.0
+        },
+        "best_practices": {
+            "extracted_practices": [],
+            "methodologies": [],
+            "relevance_score": 0.0
+        },
+        "implementation_factors": {
+            "extracted_factors": [],
+            "challenges": [],
+            "relevance_score": 0.0
+        }
+    }
+    
+    return defaults.get(category, {"extracted_facts": [], "relevance_score": 0.0})
+
 # Export all prompts and utilities
 __all__ = [
     "STRUCTURED_OUTPUT_VALIDATION",
@@ -697,6 +778,7 @@ __all__ = [
     "CLARIFICATION_PROMPT",
     "SEARCH_QUALITY_THRESHOLDS",
     "get_extraction_prompt",
+    "get_default_extraction_result",
     "ADDITIONAL_TOPICS_PROMPT",
     "RESEARCH_BASE_PROMPT",
     "RESEARCH_AGENT_PROMPT",

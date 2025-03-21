@@ -231,7 +231,8 @@ from react_agent.prompts.research import (
     SYNTHESIS_PROMPT,
     VALIDATION_PROMPT,
     SEARCH_QUALITY_THRESHOLDS,
-    get_extraction_prompt
+    get_extraction_prompt,
+    get_default_extraction_result
 )
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight, log_step
 
@@ -599,6 +600,7 @@ async def extract_category_information(
         content = result.get("snippet", "")
         
         if not url or not content or not is_valid_url(url):
+            warning_highlight(f"Skipping invalid or empty result at index {idx}")
             continue
         
         info_highlight(f"Extracting from {url} for {category}")
@@ -612,16 +614,20 @@ async def extract_category_information(
                 content=content
             )
             
+            # Add more detailed logging
+            info_highlight(f"Using extraction prompt for {category}: {extraction_prompt[:100]}...")
+            
             # Call the model for extraction
             extraction_result = await call_model_json(
                 messages=[{"role": "human", "content": extraction_prompt}],
                 config=ensure_config(config)
             )
             
-            # Validate the extraction result minimally to ensure it has the expected structure
-            if not extraction_result:
-                warning_highlight(f"Empty extraction result for {url}")
-                continue
+            # Validate the extraction result
+            if not extraction_result or not isinstance(extraction_result, dict):
+                warning_highlight(f"Invalid extraction result format for {url}: {type(extraction_result)}")
+                # Use default empty structure
+                extraction_result = get_default_extraction_result(category)
                 
             # Get relevance score
             relevance_score = extraction_result.get("relevance_score", 0.0)
@@ -747,7 +753,13 @@ async def extract_category_information(
                 info_highlight(f"No relevant facts found in {url}")
                 
         except Exception as e:
-            warning_highlight(f"Error extracting from {url}: {str(e)}")
+            # Log more details about the exception
+            warning_highlight(f"Error extracting from {url}: {str(e)}\nException type: {type(e)}")
+            # Log a stack trace for debugging
+            import traceback
+            error_highlight(traceback.format_exc())
+            # Use default empty structure
+            extraction_result = get_default_extraction_result(category)
             continue
     
     # Update the category state
@@ -1955,22 +1967,22 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_facts": [
-    {
+    {{
       "fact": "Clear factual statement about market dynamics",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low",
       "data_type": "market_size/growth_rate/trend/forecast/competitive"
-    }
+    }}
   ],
-  "market_metrics": {
+  "market_metrics": {{
     "market_size": null,  // Include if available with units
     "growth_rate": null,  // Include if available with time period
     "forecast_period": null  // Include if available
-  },
+  }},
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "provider_landscape": """Extract factual information about PROVIDERS/VENDORS from this content about {query}.
@@ -1989,26 +2001,26 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_vendors": [
-    {
+    {{
       "vendor_name": "Name of vendor",
       "description": "What they provide",
       "market_position": "leader/challenger/niche",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "vendor_relationships": [
-    {
+    {{
       "relationship_type": "partnership/competition/acquisition",
       "entities": ["vendor1", "vendor2"],
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "technical_requirements": """Extract factual information about TECHNICAL REQUIREMENTS from this content about {query}.
@@ -2027,25 +2039,25 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_requirements": [
-    {
+    {{
       "requirement": "Specific technical requirement",
       "category": "hardware/software/compliance/integration/performance",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "standards": [
-    {
+    {{
       "standard_name": "Name of standard or protocol",
       "description": "Brief description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "regulatory_landscape": """Extract factual information about REGULATIONS & COMPLIANCE from this content about {query}.
@@ -2064,26 +2076,26 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_regulations": [
-    {
+    {{
       "regulation": "Name of regulation/law/standard",
       "jurisdiction": "Geographical or industry scope",
       "description": "Brief description of requirement",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "compliance_requirements": [
-    {
+    {{
       "requirement": "Specific compliance requirement",
       "description": "What must be done",
       "source_text": "Direct quote from content", 
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "cost_considerations": """Extract factual information about COSTS & PRICING from this content about {query}.
@@ -2102,37 +2114,39 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_costs": [
-    {
+    {{
       "cost_item": "Specific cost element",
       "amount": null,  // Include if available with currency
       "context": "Description of pricing context",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "pricing_models": [
-    {
+    {{
       "model_type": "subscription/one-time/usage-based/etc",
       "description": "How the pricing works",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """,
 
     "best_practices": """Extract factual information about BEST PRACTICES from this content about {query}.
 
 URL: {url}
 
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
 INSTRUCTIONS:
-1. ONLY extract VERIFIED best practices, methodologies, approaches, and success factors
-2. Format each best practice with:
-   - The practice description
-   - Direct quote from the content supporting it
+1. ONLY extract VERIFIED best practices, methodologies, and success factors
+2. Format each practice with:
+   - The specific practice or methodology
+   - Direct quote from the content supporting the fact
    - Confidence rating (high/medium/low)
 3. If no best practices are found, indicate this
 
@@ -2140,25 +2154,37 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_practices": [
-    {
-      "practice": "Description of best practice",
-      "benefit": "What benefit it provides",
+    {{
+      "practice": "Specific best practice or methodology",
+      "description": "Detailed description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "methodologies": [
-    {
-      "methodology": "Name of methodology or approach",
+    {{
+      "methodology": "Name of methodology",
       "description": "How it works",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every practice and methodology
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
 """,
 
     "implementation_factors": """Extract factual information about IMPLEMENTATION FACTORS from this content about {query}.
@@ -2166,9 +2192,9 @@ FORMAT YOUR RESPONSE AS JSON:
 URL: {url}
 
 INSTRUCTIONS:
-1. ONLY extract VERIFIED facts about implementation considerations, requirements, challenges, and success factors
+1. ONLY extract VERIFIED facts about implementation challenges, success factors, and considerations
 2. Format each factor with:
-   - The implementation factor
+   - The specific implementation factor
    - Direct quote from the content supporting the fact
    - Confidence rating (high/medium/low)
 3. If no implementation information is found, indicate this
@@ -2177,25 +2203,25 @@ CONTENT:
 {content}
 
 FORMAT YOUR RESPONSE AS JSON:
-{
+{{
   "extracted_factors": [
-    {
-      "factor": "Description of implementation factor",
-      "category": "resource/timeline/risk/organizational/technical",
+    {{
+      "factor": "Specific implementation factor",
+      "description": "Detailed description",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "challenges": [
-    {
-      "challenge": "Description of implementation challenge",
-      "mitigation": "How to address it (if mentioned)",
+    {{
+      "challenge": "Specific implementation challenge",
+      "description": "What makes it challenging",
       "source_text": "Direct quote from content",
       "confidence": "high/medium/low"
-    }
+    }}
   ],
   "relevance_score": 0.0-1.0
-}
+}}
 """
 }
 
@@ -2447,14 +2473,16 @@ SEARCH_QUALITY_THRESHOLDS: Dict[str, Dict[str, float]] = {
 def get_extraction_prompt(category: str, query: str, url: str, content: str) -> str:
     """Get the appropriate extraction prompt for a specific category."""
     if category in EXTRACTION_PROMPTS:
-        return EXTRACTION_PROMPTS[category].format(
+        prompt = EXTRACTION_PROMPTS[category]
+        return prompt.format(
             query=query,
             url=url,
             content=content
         )
     else:
         # Fallback to general extraction prompt
-        return EXTRACTION_PROMPTS["market_dynamics"].format(
+        prompt = EXTRACTION_PROMPTS["market_dynamics"]
+        return prompt.format(
             query=query,
             url=url,
             content=content
@@ -2558,6 +2586,53 @@ RESPONSE FORMAT:
     "specialized_areas": ["Area 1", "Area 2"]
 }"""
 
+# Add a function to provide default empty responses
+def get_default_extraction_result(category: str) -> Dict[str, Any]:
+    """Get a default empty extraction result when parsing fails."""
+    defaults = {
+        "market_dynamics": {
+            "extracted_facts": [],
+            "market_metrics": {
+                "market_size": None,
+                "growth_rate": None,
+                "forecast_period": None
+            },
+            "relevance_score": 0.0
+        },
+        "provider_landscape": {
+            "extracted_vendors": [],
+            "vendor_relationships": [],
+            "relevance_score": 0.0
+        },
+        "technical_requirements": {
+            "extracted_requirements": [],
+            "standards": [],
+            "relevance_score": 0.0
+        },
+        "regulatory_landscape": {
+            "extracted_regulations": [],
+            "compliance_requirements": [],
+            "relevance_score": 0.0
+        },
+        "cost_considerations": {
+            "extracted_costs": [],
+            "pricing_models": [],
+            "relevance_score": 0.0
+        },
+        "best_practices": {
+            "extracted_practices": [],
+            "methodologies": [],
+            "relevance_score": 0.0
+        },
+        "implementation_factors": {
+            "extracted_factors": [],
+            "challenges": [],
+            "relevance_score": 0.0
+        }
+    }
+    
+    return defaults.get(category, {"extracted_facts": [], "relevance_score": 0.0})
+
 # Export all prompts and utilities
 __all__ = [
     "STRUCTURED_OUTPUT_VALIDATION",
@@ -2569,6 +2644,7 @@ __all__ = [
     "CLARIFICATION_PROMPT",
     "SEARCH_QUALITY_THRESHOLDS",
     "get_extraction_prompt",
+    "get_default_extraction_result",
     "ADDITIONAL_TOPICS_PROMPT",
     "RESEARCH_BASE_PROMPT",
     "RESEARCH_AGENT_PROMPT",
@@ -3536,8 +3612,24 @@ TOOLS = [search]
 
 <file path="src/react_agent/utils/__init__.py">
 from react_agent.utils.validations import is_valid_url
+from react_agent.utils.logging import (
+    get_logger,
+    log_dict,
+    info_highlight,
+    warning_highlight,
+    error_highlight,
+    log_step
+)
 
-__all__ = ["is_valid_url"]
+__all__ = [
+    "is_valid_url",
+    "get_logger",
+    "log_dict",
+    "info_highlight",
+    "warning_highlight",
+    "error_highlight",
+    "log_step"
+]
 </file>
 
 <file path="src/react_agent/utils/llm.py">
@@ -3557,6 +3649,14 @@ from langchain_core.runnables.base import Runnable
 from react_agent.configuration import Configuration
 from react_agent.state import State
 from react_agent.tools.tavily import TOOLS
+from react_agent.utils import (
+    get_logger,
+    log_dict,
+    info_highlight,
+    warning_highlight,
+    error_highlight,
+    log_step
+)
 
 
 def get_message_text(msg: BaseMessage) -> str:
@@ -3634,8 +3734,29 @@ async def call_model_json(
     # Add system message to enforce JSON response
     system_message = {
         "role": "system",
-        "content": "You are a helpful assistant that always responds with a single, valid JSON object. Do not include any explanations, markdown formatting, or text outside the JSON object."
+        "content": """You are a helpful assistant that always responds with a single, valid JSON object. 
+        CRITICAL REQUIREMENTS:
+        1. Response must be a valid JSON object starting with '{' and ending with '}'
+        2. Do not include any explanations, markdown formatting, or text outside the JSON object
+        3. Use proper data types (strings, numbers, arrays, objects)
+        4. Never return null values - use empty strings or arrays instead
+        5. Include all required fields from the schema
+        6. Maintain proper JSON syntax
+        7. Do not include comments or trailing commas"""
     }
+
+    # Check content length and truncate if necessary
+    MAX_CONTENT_LENGTH = 1000000  # Leave some buffer below the 1MB limit
+    for msg in messages:
+        if msg["role"] == "human" and len(msg["content"]) > MAX_CONTENT_LENGTH:
+            warning_highlight(f"Content too long ({len(msg['content'])} chars), truncating to {MAX_CONTENT_LENGTH} chars")
+            # Try to truncate at a sentence boundary
+            truncated = msg["content"][:MAX_CONTENT_LENGTH]
+            last_period = truncated.rfind('.')
+            if last_period > MAX_CONTENT_LENGTH * 0.8:  # Only use period if it's not too far from the end
+                truncated = truncated[:last_period + 1]
+            msg["content"] = truncated + "\n[Content truncated due to length]"
+    
     all_messages = [system_message] + messages
     
     response = await model.ainvoke(
@@ -3655,34 +3776,48 @@ async def call_model_json(
         # Remove any markdown code block syntax
         content = re.sub(r'```(?:json)?\s*|\s*```', '', content)
         
-        # Find the outermost JSON object
-        start = content.find('{')
-        if start == -1:
-            raise ValueError("No JSON object found in response")
-            
-        # Track brace depth to find matching end brace
-        depth = 1
-        pos = start + 1
+        # Ensure content starts with opening brace
+        content = content.lstrip()
+        if not content.startswith('{'):
+            # If it doesn't start with a brace, but has one later, remove everything before it
+            start = content.find('{')
+            if start != -1:
+                content = content[start:]
+            else:
+                # If no opening brace, try to add one
+                content = '{' + content
         
-        while depth > 0 and pos < len(content):
-            if content[pos] == '{':
-                depth += 1
-            elif content[pos] == '}':
-                depth -= 1
-            pos += 1
-            
-        if depth > 0:
-            raise ValueError("Unclosed JSON object in response")
-            
-        json_str = content[start:pos].strip()
+        # Ensure content ends with closing brace
+        if not content.rstrip().endswith('}'):
+            # If it doesn't end with a brace, but has one earlier, remove everything after it
+            end = content.rfind('}')
+            if end != -1:
+                content = content[:end+1]
+            else:
+                # If no closing brace, try to add one
+                content = content + '}'
+        
+        # Clean up the content
+        content = re.sub(r'\s+', ' ', content)  # Normalize whitespace
+        content = re.sub(r'[^\x20-\x7E]', '', content)  # Remove non-printable chars
+        content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
+        content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
         
         try:
-            return json.loads(json_str)
+            return json.loads(content)
         except json.JSONDecodeError as e:
-            # If still failing, try more aggressive cleaning
-            clean_json = re.sub(r'\s+', ' ', json_str)  # Normalize whitespace
-            clean_json = re.sub(r'[^\x20-\x7E]', '', clean_json)  # Remove non-printable chars
-            return json.loads(clean_json)
+            # If still failing, try to fix common JSON issues
+            content = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', content)  # Quote unquoted keys
+            content = re.sub(r':\s*\'([^\']*)\'', r':"\1"', content)  # Replace single quotes with double
+            content = re.sub(r'\\', '\\\\', content)  # Escape backslashes
+            content = re.sub(r'([^\\])"', r'\1\\"', content)  # Escape unescaped quotes
+            
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                # If all else fails, return a default empty structure
+                warning_highlight(f"Failed to parse JSON response: {str(e)}")
+                return {"error": "Failed to parse JSON response", "raw_content": content[:100]}
 </file>
 
 <file path="src/react_agent/utils/logging.py">

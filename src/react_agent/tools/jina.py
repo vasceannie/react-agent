@@ -11,7 +11,7 @@ import time
 import aiohttp
 import asyncio
 import contextlib
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, urlparse
 import random
 from datetime import datetime
 
@@ -287,21 +287,19 @@ class JinaSearchClient:
                             for nested_key in ['results', 'data', 'items', 'hits', 'matches']:
                                 if nested_key in data[key] and isinstance(data[key][nested_key], list):
                                     return data[key][nested_key]
-                
+
                 # If no list found, try to extract single result
                 if 'result' in data:
                     return [data['result']]
-                
+
                 # If still no results, try to extract from nested structure
                 for value in data.values():
                     if isinstance(value, list):
                         return value
                     elif isinstance(value, dict):
-                        # Recursively try to extract from nested dictionaries
-                        nested_results = self._extract_results_list(value)
-                        if nested_results:
+                        if nested_results := self._extract_results_list(value):
                             return nested_results
-                
+
                 # If still no results, return empty list
                 return []
             return []
@@ -309,83 +307,63 @@ class JinaSearchClient:
             error_highlight(f"Error extracting results list: {str(e)}")
             return []
 
+    def _extract_content(self, result: Dict) -> Optional[str]:
+        """Extract content from result with fallbacks."""
+        content_fields = ['snippet', 'content', 'text', 'description', 'summary', 'body', 'raw']
+        for field in content_fields:
+            if content := result.get(field):
+                return content.strip().strip('```json').strip('```')
+        return None
+
+    def _build_metadata(self, result: Dict, content: str) -> Dict:
+        """Build metadata dictionary from result."""
+        field_mapping = {
+            'url': ['url', 'link', 'href', 'source_url', 'web_url'],
+            'title': ['title', 'name', 'heading', 'subject', 'headline'],
+            'source': ['source', 'domain', 'site', 'provider', 'publisher'],
+            'published_date': ['published_date', 'date', 'timestamp', 'published', 'created_at', 'publication_date']
+        }
+        
+        metadata = {
+            'quality_score': self._calculate_quality_score(result, content),
+            'extraction_status': 'success',
+            'extraction_timestamp': datetime.now().isoformat(),
+            'original_result': result
+        }
+        
+        for field_type, fields in field_mapping.items():
+            for field in fields:
+                if value := result.get(field):
+                    metadata[field_type] = value
+                    break
+        
+        if url := metadata.get('url'):
+            try:
+                metadata['domain'] = urlparse(url).netloc
+            except Exception:
+                metadata['domain'] = ""
+                
+        return metadata
+
     def _convert_to_documents(self, results: List[Dict]) -> List[Document]:
         """Convert search results to Document objects with improved metadata."""
         documents = []
-        
-        for idx, result in enumerate(results):
-            try:
-                if not isinstance(result, dict):
-                    continue
-                    
-                # Extract content with fallbacks
-                content = None
-                for field in ['snippet', 'content', 'text', 'description', 'summary', 'body', 'raw']:
-                    if field in result and result[field]:
-                        content = result[field]
-                        if content:
-                            info_highlight(f"Found content in field '{field}' for result {idx + 1}")
-                            break
-                
-                if not content:
-                    warning_highlight(f"No content found for result {idx + 1}")
-                    continue
-                    
-                # Build metadata with comprehensive information
-                metadata = {}
-                
-                # Process field types with logging
-                field_mapping = {
-                    'url': ['url', 'link', 'href', 'source_url', 'web_url'],
-                    'title': ['title', 'name', 'heading', 'subject', 'headline'],
-                    'source': ['source', 'domain', 'site', 'provider', 'publisher'],
-                    'published_date': ['published_date', 'date', 'timestamp', 'published', 'created_at', 'publication_date']
-                }
-                
-                for field_type, fields in field_mapping.items():
-                    for field in fields:
-                        if field in result and result[field]:
-                            metadata[field_type] = result[field]
-                            info_highlight(f"Found {field_type} in field '{field}' for result {idx + 1}")
-                            break
-                
-                # Add content quality estimate
-                metadata['quality_score'] = self._calculate_quality_score(result, content)
-                
-                # Extract domain from URL for filtering
-                if 'url' in metadata and metadata['url']:
-                    from urllib.parse import urlparse
-                    try:
-                        parsed_url = urlparse(metadata['url'])
-                        metadata['domain'] = parsed_url.netloc
-                    except Exception:
-                        metadata['domain'] = ""
-                    
-                # Add original result for debugging
-                metadata['original_result'] = result
-                
-                # Add extraction metadata
-                metadata['extraction_status'] = 'success'
-                metadata['extraction_timestamp'] = datetime.now().isoformat()
-                
-                # Clean content if needed
-                if isinstance(content, str):
-                    content = content.strip()
-                    if content.startswith('```json'):
-                        content = content[7:]
-                    if content.endswith('```'):
-                        content = content[:-3]
-                
-                doc = Document(
-                    page_content=content,
-                    metadata=metadata
-                )
-                documents.append(doc)
-                info_highlight(f"Successfully converted result {idx + 1} to Document")
-            except Exception as e:
-                warning_highlight(f"Error converting result {idx + 1} to Document: {str(e)}")
+        for idx, result in enumerate(results, 1):
+            if not isinstance(result, dict):
                 continue
-
+                
+            if not (content := self._extract_content(result)):
+                warning_highlight(f"No content found for result {idx}")
+                continue
+                
+            try:
+                metadata = self._build_metadata(result, content)
+                documents.append(Document(page_content=content, metadata=metadata))
+                info_highlight(f"Successfully converted result {idx} to Document")
+            except Exception as e:
+                warning_highlight(f"Error converting result {idx} to Document: {str(e)}")
+                continue
+                
         return documents
 
     def _calculate_quality_score(self, result: Dict[str, Any], content: str) -> float:
@@ -503,13 +481,13 @@ def optimize_query(original_query: str, category: str, is_higher_ed: bool = True
     
     # Define shorter, more focused query templates
     query_templates = {
-        "market_dynamics": "{query} market trends analysis",
-        "provider_landscape": "{query} vendors suppliers",
-        "technical_requirements": "{query} technical specifications",
-        "cost_considerations": "{query} pricing cost budget",
-        "best_practices": "{query} best practices case studies",
-        "regulatory_landscape": "{query} regulations compliance",
-        "implementation_factors": "{query} implementation factors"
+        "market_dynamics": "{query} market trends analysis sourcing procurement RFPs contracts contract terms negotiation strategies",
+        "provider_landscape": "{query} vendors suppliers manufacturers distributors providers request for proposal request for quote request for information",
+        "technical_requirements": "{query} technical specifications procurement requirements RFPs bids pricing worksheets",
+        "cost_considerations": "{query} pricing cost budget volume discounts rebates bulk discounts purchase orders invoicing",
+        "best_practices": "{query} best practices case studies procurement sourcing category strategy risk management",
+        "regulatory_landscape": "{query} regulations compliance procurement sourcing contracts agreements qualifications",
+        "implementation_factors": "{query} implementation factors procurement sourcing RFPs contracts auction buying"
     }
     
     if category in query_templates:

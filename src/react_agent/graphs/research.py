@@ -31,9 +31,18 @@ from react_agent.prompts.research import (
     SYNTHESIS_PROMPT,
     VALIDATION_PROMPT,
     SEARCH_QUALITY_THRESHOLDS,
-    get_extraction_prompt
+    get_extraction_prompt,
+    get_default_extraction_result
 )
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight, log_step
+from react_agent.utils.content import (
+    preprocess_content,
+    should_skip_content,
+    chunk_text,
+    merge_chunk_results,
+    validate_content,
+    detect_content_type
+)
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -340,16 +349,33 @@ async def execute_category_search(
             category_state["status"] = "search_failed"
             return {"categories": categories}
         
-        # Convert to the expected format
+        # Convert to the expected format and filter problematic content
         formatted_results = []
         for doc in search_results:
+            url = doc.metadata.get("url", "")
+            
+            # Skip problematic content types
+            if should_skip_content(url):
+                info_highlight(f"Skipping problematic content type: {url}")
+                continue
+                
+            # Validate and detect content type
+            content = doc.page_content
+            if not validate_content(content):
+                info_highlight(f"Invalid content from {url}, skipping")
+                continue
+                
+            content_type = detect_content_type(url, content)
+            info_highlight(f"Detected content type: {content_type} for {url}")
+            
             result = {
-                "url": doc.metadata.get("url", ""),
+                "url": url,
                 "title": doc.metadata.get("title", ""),
-                "snippet": doc.page_content,
+                "snippet": content,
                 "source": doc.metadata.get("source", ""),
                 "quality_score": doc.metadata.get("quality_score", 0.5),
-                "published_date": doc.metadata.get("published_date")
+                "published_date": doc.metadata.get("published_date"),
+                "content_type": content_type
             }
             formatted_results.append(result)
         
@@ -399,11 +425,15 @@ async def extract_category_information(
         content = result.get("snippet", "")
         
         if not url or not content or not is_valid_url(url):
+            warning_highlight(f"Skipping invalid or empty result at index {idx}")
             continue
         
         info_highlight(f"Extracting from {url} for {category}")
         
         try:
+            # Preprocess content to reduce size
+            content = preprocess_content(content, url)
+            
             # Get the appropriate extraction prompt for this category
             extraction_prompt = get_extraction_prompt(
                 category=category,
@@ -412,16 +442,48 @@ async def extract_category_information(
                 content=content
             )
             
-            # Call the model for extraction
-            extraction_result = await call_model_json(
-                messages=[{"role": "human", "content": extraction_prompt}],
-                config=ensure_config(config)
-            )
+            # Add more detailed logging
+            info_highlight(f"Using extraction prompt for {category}: {extraction_prompt[:100]}...")
             
-            # Validate the extraction result minimally to ensure it has the expected structure
-            if not extraction_result:
-                warning_highlight(f"Empty extraction result for {url}")
-                continue
+            # If content is too large, chunk it and process each chunk
+            if len(content) > 40000:  # Threshold for chunking
+                info_highlight(f"Content too large ({len(content)} chars), chunking...")
+                chunks = chunk_text(content)
+                chunk_results = []
+                
+                for chunk_idx, chunk in enumerate(chunks):
+                    info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
+                    chunk_prompt = get_extraction_prompt(
+                        category=category,
+                        query=original_query,
+                        url=url,
+                        content=chunk
+                    )
+                    
+                    chunk_result = await call_model_json(
+                        messages=[{"role": "human", "content": chunk_prompt}],
+                        config=ensure_config(config),
+                        max_tokens=100000
+                    )
+                    
+                    if chunk_result and isinstance(chunk_result, dict):
+                        chunk_results.append(chunk_result)
+                
+                # Merge results from all chunks
+                extraction_result = merge_chunk_results(chunk_results, category)
+            else:
+                # Process single chunk
+                extraction_result = await call_model_json(
+                    messages=[{"role": "human", "content": extraction_prompt}],
+                    config=ensure_config(config),
+                    max_tokens=100000
+                )
+            
+            # Validate the extraction result
+            if not extraction_result or not isinstance(extraction_result, dict):
+                warning_highlight(f"Invalid extraction result format for {url}: {type(extraction_result)}")
+                # Use default empty structure
+                extraction_result = get_default_extraction_result(category)
                 
             # Get relevance score
             relevance_score = extraction_result.get("relevance_score", 0.0)
@@ -538,7 +600,8 @@ async def extract_category_information(
                     "published_date": result.get("published_date"),
                     "fact_count": len(facts),
                     "relevance_score": relevance_score,
-                    "quality_score": result.get("quality_score", 0.5)
+                    "quality_score": result.get("quality_score", 0.5),
+                    "content_type": result.get("content_type", "unknown")
                 }
                 sources.append(source)
                 
@@ -547,7 +610,13 @@ async def extract_category_information(
                 info_highlight(f"No relevant facts found in {url}")
                 
         except Exception as e:
-            warning_highlight(f"Error extracting from {url}: {str(e)}")
+            # Log more details about the exception
+            warning_highlight(f"Error extracting from {url}: {str(e)}\nException type: {type(e)}")
+            # Log a stack trace for debugging
+            import traceback
+            error_highlight(traceback.format_exc())
+            # Use default empty structure
+            extraction_result = get_default_extraction_result(category)
             continue
     
     # Update the category state
@@ -924,59 +993,43 @@ def handle_error_or_continue(state: ResearchState) -> Hashable:
 
 async def handle_error(state: ResearchState) -> Dict[str, Any]:
     """Handle errors gracefully and return a helpful message."""
-    error = state.get("error", {})
-    phase = error.get("phase", "unknown") if error else "unknown"
-    message = error.get("message", "An unknown error occurred") if error else "An unknown error occurred"
+    error = state.get("error") or {}
+    phase = error.get("phase", "unknown")
+    message = error.get("message", "An unknown error occurred")
 
     error_highlight(f"Handling error in phase {phase}: {message}")
 
-    # Create a helpful error message
-    error_response = f"I encountered an issue while researching your query: {message}"
-    error_response += "\n\nHere's what I was able to find before the error occurred:"
+    # Build error response with partial results
+    error_response = [f"I encountered an issue while researching your query: {message}",
+                     "\nHere's what I was able to find before the error occurred:"]
 
-    # Include any partial results we have
+    # Add completed categories and their facts
     categories = state.get("categories", {})
-    if complete_categories := [
-        category
-        for category, category_state in categories.items()
-        if category_state.get("complete", False)
-    ]:
-        error_response += f"\n\nI completed research on: {', '.join(complete_categories)}"
-
-        # Include facts from complete categories
+    complete_categories = [cat for cat, state in categories.items() if state.get("complete", False)]
+    
+    if complete_categories:
+        error_response.append(f"\n\nI completed research on: {', '.join(complete_categories)}")
+        
         for category in complete_categories:
-            category_state = categories[category]
-            facts = category_state.get("extracted_facts", [])
+            facts = categories[category].get("extracted_facts", [])
             if facts:
-                error_response += f"\n\n## {category.replace('_', ' ').title()}\n"
-                for i, fact in enumerate(facts[:3]):  # Show up to 3 facts
+                error_response.append(f"\n\n## {category.replace('_', ' ').title()}")
+                for fact in facts[:3]:  # Show up to 3 facts
                     if isinstance(fact, dict):
-                        if "data" in fact and isinstance(fact["data"], dict):
-                            # Handle structured facts
-                            if "fact" in fact["data"]:
-                                error_response += f"\n- {fact['data']['fact']}"
-                            elif "requirement" in fact["data"]:
-                                error_response += f"\n- {fact['data']['requirement']}"
-                            elif "vendor_name" in fact["data"]:
-                                error_response += f"\n- {fact['data']['vendor_name']}: {fact['data'].get('description', '')}"
-                            else:
-                                # Just get the first string value we can find
-                                for k, v in fact["data"].items():
-                                    if isinstance(v, str) and v:
-                                        error_response += f"\n- {v}"
-                                        break
-                        elif "fact" in fact:
-                            error_response += f"\n- {fact['fact']}"
+                        data = fact.get("data", {})
+                        fact_text = (data.get("fact") or 
+                                   data.get("requirement") or
+                                   next((v for v in data.values() if isinstance(v, str) and v), None) or
+                                   fact.get("fact"))
+                        if fact_text:
+                            error_response.append(f"\n- {fact_text}")
     else:
-        error_response += "\n\nUnfortunately, I wasn't able to complete any research categories before the error occurred."
+        error_response.append("\n\nUnfortunately, I wasn't able to complete any research categories before the error occurred.")
 
-    error_response += "\n\nWould you like me to try again with a more specific query?"
-
-    # Create the error message
-    error_message = AIMessage(content=error_response)
-
+    error_response.append("\n\nWould you like me to try again with a more specific query?")
+    
     return {
-        "messages": [error_message],
+        "messages": [AIMessage(content="".join(error_response))],
         "status": "error",
         "complete": True
     }

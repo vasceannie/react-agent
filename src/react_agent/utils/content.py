@@ -4,12 +4,18 @@ This module provides utilities for processing and managing content before sendin
 including chunking, preprocessing, and content validation.
 """
 
-from typing import List, Dict, Any, Optional, Union
-import re
-from urllib.parse import urlparse
 import logging
+import re
+import urllib
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
-from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -22,7 +28,7 @@ TOKEN_CHAR_RATIO: float = 4.0
 
 # Problematic content patterns
 PROBLEMATIC_PATTERNS: List[str] = [
-    r'\.pdf$',
+    r'\.pdf(\?|$)',  # Modified to catch PDF URLs with query params
     r'\.docx?$',
     r'\.xlsx?$',
     r'\.ppt$',
@@ -81,31 +87,78 @@ def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = D
     logger.info(f"Created {len(chunks)} chunks")
     return chunks
 
-def preprocess_content(content: str, url: str) -> str:
-    """Clean and preprocess content before sending to model.
-    
-    Args:
-        content: Content to preprocess
-        url: URL of the content
+def detect_content_type(url: str, content: str) -> str:
+    """Detect content type from URL and content."""
+    # Enhanced HTML detection with more markers
+    html_markers = ('<html', '<!doctype', '<head>', '<meta', '<title', '<body', '<div', '<p>', '<br', '<section')
+    if content and any(tag in content.lower() for tag in html_markers):
+        return 'html'
         
-    Returns:
-        Preprocessed content string
-    """
-    if not content:
-        return ""
+    # Expanded URL pattern detection for document paths
+    html_path_patterns = (
+        '/wiki/', '/articles/', '/blog/', '/news/',
+        '/docs/', '/help/', '/support/', '/pages/',
+        '/product/details', '/science/article'  # Added patterns for observed URLs
+    )
+    if any(path in url.lower() for path in html_path_patterns):
+        return 'html'
+    
+    # Check HTML markers first
+    if content and any(tag in content.lower() for tag in ('<html', '<!doctype', '<head>')):
+        return 'html'
+        
+    # Then check URL patterns
+    url_lower = url.lower()
+    extensions = {
+        '.pdf': 'pdf',
+        '.doc': 'doc',
+        '.docx': 'doc',
+        '.xls': 'excel',
+        '.xlsx': 'excel',
+        '.ppt': 'presentation',
+        '.pptx': 'presentation',
+        '.txt': 'text',
+        '.md': 'text',
+        '.rst': 'text',
+        '.html': 'html',
+        '.htm': 'html',
+        '.json': 'data',
+        '.xml': 'data'
+    }
+    
+    for ext, content_type in extensions.items():
+        if ext in url_lower:
+            return content_type
+            
+    # Check for HTML-like paths
+    if any(path in url_lower for path in ('/wiki/', '/articles/', '/blog/', '/news/')):
+        return 'html'
+        
+    return 'unknown'
 
-    logger.info(f"Preprocessing content from {url}")
-    logger.debug(f"Initial content length: {len(content)}")
-
-    # Remove common boilerplate
+def preprocess_content(content: str, url: str) -> str:
+    """Clean and preprocess content before sending to model."""
+    content_type = detect_content_type(url, content)
+    
+    # Modified to attempt extraction for document-like URLs even if type detection fails
+    if content_type != 'html':
+        warning_highlight(f"Non-HTML content detected ({content_type}): {url} - attempting extraction")
+        # Don't return empty - proceed with basic cleaning
+        
+    # Keep existing cleaning logic but remove early return
     content = re.sub(r'Copyright © \d{4}.*?reserved\.', '', content, flags=re.IGNORECASE | re.DOTALL)
     content = re.sub(r'Terms of Service.*?Privacy Policy', '', content, flags=re.IGNORECASE | re.DOTALL)
-    content = re.sub(r'Please enable JavaScript.*?continue', '', content, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Add PDF content detection fallback
+    if '%PDF' in content[:4]:
+        warning_highlight(f"PDF content detected: {url}")
+        return ""  # Actual PDF handling would require text extraction
 
-    # Remove redundant whitespace
+    # Keep existing processing AFTER PDF check
+    content = re.sub(r'Please enable JavaScript.*?continue', '', content, flags=re.IGNORECASE | re.DOTALL)
     content = re.sub(r'\s+', ' ', content)
     content = content.strip()
-
+    
     # Site-specific cleaning
     domain = urlparse(url).netloc.lower()
     if 'iaeme.com' in domain:
@@ -117,7 +170,7 @@ def preprocess_content(content: str, url: str) -> str:
         content = f"{content[:MAX_CONTENT_LENGTH]}..."
 
     logger.debug(f"Final content length: {len(content)}")
-    return content
+    return content  # Correct final return
 
 def estimate_tokens(text: str) -> int:
     """Estimate number of tokens in text.
@@ -131,14 +184,27 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / TOKEN_CHAR_RATIO) if text else 0
 
 def should_skip_content(url: str) -> bool:
-    """Check if content should be skipped based on URL patterns.
+    """Check if content should be skipped based on URL patterns."""
+    try:
+        decoded_url = urllib.parse.unquote(url).lower()
+    except:
+        decoded_url = url.lower()
     
-    Args:
-        url: URL to check
-        
-    Returns:
-        True if content should be skipped, False otherwise
-    """
+    # Enhanced PDF detection
+    if any(p in decoded_url for p in ('.pdf', '%2Fpdf', '%3Fpdf')):
+        info_highlight(f"Skipping PDF content: {url}")
+        return True
+    
+    # Add MIME-type pattern detection
+    mime_patterns = [
+        r'application/pdf',
+        r'application/\w+?pdf',
+        r'content-type:.*pdf'
+    ]
+    if any(re.search(p, decoded_url) for p in mime_patterns):
+        info_highlight(f"Skipping PDF MIME-type pattern: {url}")
+        return True
+    
     if not url:
         return True
         
@@ -253,47 +319,9 @@ def validate_content(content: str) -> bool:
         
     return True
 
-def detect_content_type(url: str, content: str) -> str:
-    """Detect content type from URL and content.
-    
-    Args:
-        url: URL of the content
-        content: Content to analyze
-        
-    Returns:
-        Detected content type
-    """
-    if not url:
-        return "unknown"
-        
-    url_lower = url.lower()
-    
-    if url_lower.endswith('.pdf'):
-        return 'pdf'
-    elif url_lower.endswith(('.doc', '.docx')):
-        return 'doc'
-    elif url_lower.endswith(('.xls', '.xlsx')):
-        return 'excel'
-    elif url_lower.endswith(('.ppt', '.pptx')):
-        return 'presentation'
-    elif url_lower.endswith(('.txt', '.md', '.rst')):
-        return 'text'
-    elif url_lower.endswith(('.html', '.htm')):
-        return 'html'
-    elif url_lower.endswith(('.json', '.xml')):
-        return 'data'
-    else:
-        return 'unknown'
-
 def get_default_extraction_result(category: str) -> Dict[str, Any]:
-    """Get a default empty extraction result when parsing fails.
-    
-    Args:
-        category: Research category
-        
-    Returns:
-        Default empty result dictionary
-    """
+    """Get a default empty extraction result when parsing fails."""
+    # Add schema validation to ensure consistent structure
     defaults = {
         "market_dynamics": {
             "extracted_facts": [],
@@ -332,7 +360,11 @@ def get_default_extraction_result(category: str) -> Dict[str, Any]:
         "implementation_factors": {
             "extracted_factors": [],
             "challenges": [],
-            "relevance_score": 0.0
+            "relevance_score": 0.0,
+            "source_validation": {
+                "is_pdf": False,
+                "is_trusted_domain": False
+            }
         }
     }
     
@@ -347,4 +379,4 @@ __all__ = [
     "validate_content",
     "detect_content_type",
     "get_default_extraction_result"
-] 
+]

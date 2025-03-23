@@ -4,28 +4,34 @@ This module provides utilities for interacting with language models,
 including content length management and error handling.
 """
 
-from typing import List, Dict, Any, Optional, Union, cast
 import json
 import logging
-from datetime import datetime, timezone
 import os
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union, cast
 
+from anthropic import AsyncAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
 from openai import AsyncClient
 from openai.types.chat import ChatCompletionMessageParam
-from anthropic import AsyncAnthropic
 
-from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+from react_agent.configuration import Configuration
 from react_agent.utils.content import (
     chunk_text,
-    preprocess_content,
-    estimate_tokens,
-    validate_content,
     detect_content_type,
-    merge_chunk_results
+    estimate_tokens,
+    merge_chunk_results,
+    preprocess_content,
+    validate_content,
 )
-from react_agent.configuration import Configuration
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -123,15 +129,30 @@ async def call_model(
             formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
             return await _call_openai_api(model, formatted_messages)
         elif provider == "anthropic":
-            formatted_messages = [
-                {"role": "user", "content": configuration.system_prompt} if messages[0]["role"] != "system" else None,
-                *[{"role": "user" if msg["role"] == "system" else msg["role"], "content": msg["content"]} for msg in messages]
-            ]
+            # Handle system prompt properly
+            has_system_message = any(msg["role"] == "system" for msg in messages)
+            
+            formatted_messages = []
+            # Add system message if not already present in messages
+            if not has_system_message:
+                formatted_messages.append({"role": "system", "content": configuration.system_prompt})
+                
+            # Process all messages, preserving their roles correctly
+            for msg in messages:
+                if msg["role"] in ["user", "assistant", "system"]:
+                    formatted_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    } if msg["role"] == "system" else {
+                        "role": "user" if msg["role"] == "user" else "assistant",
+                        "content": msg["content"]
+                    })
+                    
             formatted_messages = [msg for msg in formatted_messages if msg is not None]
             
             response = await anthropic_client.messages.create(
                 model=model,
-                messages=formatted_messages,
+                messages=[{"role": msg["role"], "content": msg["content"]} for msg in formatted_messages],
                 max_tokens=MAX_TOKENS,
                 temperature=0.7
             )
@@ -214,7 +235,21 @@ async def _process_chunked_content(
         error_highlight("No valid results from chunks")
         return {}
         
-    return merge_chunk_results(chunk_results, "general")
+    # Parse each chunk result to ensure they are dictionaries before merging
+    parsed_results = []
+    for result in chunk_results:
+        if isinstance(result, str):
+            try:
+                parsed_result = _parse_json_response(result)
+                if parsed_result:
+                    parsed_results.append(parsed_result)
+            except Exception as e:
+                error_highlight(f"Failed to parse chunk result: {str(e)}")
+                continue
+        elif isinstance(result, dict):
+            parsed_results.append(result)
+    
+    return merge_chunk_results(parsed_results, "general")
 
 def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Parse and clean JSON response from model."""
@@ -236,13 +271,38 @@ def _clean_and_parse_json(response_str: str) -> Dict[str, Any]:
         return {}
         
     try:
+        # Extract JSON content between first { and last }  
         start_idx = response_str.find("{")
         end_idx = response_str.rfind("}") + 1
         cleaned = response_str[start_idx:end_idx]
-        cleaned = cleaned.replace("'", '"').replace(",\n}", "\n}").replace(",\n]", "\n]")
+        
+        # Handle single quotes in JSON keys and values
+        cleaned = re.sub(r"([\{\[,]\s*)'([^']+)'(\s*:)", r'\1"\2"\3', cleaned)  # Replace single quotes in keys
+        cleaned = re.sub(r"(:\s*)'([^']+)'([,\}\]])", r'\1"\2"\3', cleaned)  # Replace single quotes in values
+        
+        # Handle trailing commas and other common issues
+        cleaned = cleaned.replace("'", '"')  # Replace any remaining single quotes
+        cleaned = cleaned.replace(",\n}", "\n}").replace(",\n]", "\n]")
+        cleaned = re.sub(r",\s*([\}\]])", r"\1", cleaned)  # Remove trailing commas
+        
+        # Handle unquoted keys
+        cleaned = re.sub(r"([{,])\s*(\w+)\s*:", r'\1"\2":', cleaned)
+        
         return json.loads(cleaned)
     except Exception as e:
         error_highlight(f"Failed to clean and parse JSON: {str(e)}")
-        return {}
+        # Try a more aggressive approach if the first attempt fails
+        try:
+            # Remove all whitespace outside of quoted strings to normalize the JSON
+            in_string = False
+            normalized = ""
+            for char in cleaned:
+                if char == '"' and (not normalized or normalized[-1] != '\\'):
+                    in_string = not in_string
+                if in_string or not char.isspace():
+                    normalized += char
+            return json.loads(normalized)
+        except Exception:
+            return {}
 
 __all__ = ["call_model_json", "call_model"]

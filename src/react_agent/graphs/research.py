@@ -52,8 +52,7 @@ from react_agent.utils.logging import (
     warning_highlight,
 )
 from react_agent.utils.statistics import (
-    assess_synthesis_quality,
-    calculate_category_quality_score,
+    calculate_enhanced_category_quality_score as calculate_category_quality_score,
     calculate_overall_confidence,
 )
 
@@ -607,7 +606,6 @@ async def extract_category_information(
 
     return {"categories": categories}
 
-
 async def execute_research_for_categories(
         state: ResearchState,
         config: Optional[RunnableConfig] = None
@@ -924,7 +922,7 @@ def check_retry_or_continue(state: ResearchState) -> Hashable:
     categories = state["categories"]
 
     # Check if any categories need retry
-    categories_to_retry = []
+    categories_to_retry: List[str] = []
     categories_to_retry.extend(
         category
         for category, category_state in categories.items()

@@ -71,7 +71,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, TypedDict, Union, cast, Literal
+from typing import Any, Dict, List, Literal, Optional, Union, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -243,83 +243,72 @@ async def _format_openai_messages(
             formatted_messages.append({"role": "user", "content": content})
     return formatted_messages
 
-async def _call_openai_api(
-    model: str,
-    messages: List[ChatCompletionMessageParam]
-) -> Dict[str, Any]:
-    """Make an OpenAI API call and return a standardized response.
+async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Optional[str]:
+    """Call OpenAI API with formatted messages."""
+    response = await openai_client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=0.7
+    )
+    return response.choices[0].message.content
 
-    Args:
-        model: OpenAI model name.
-        messages: Formatted messages.
+async def call_model(
+    messages: List[Dict[str, str]],
+    config: Optional[RunnableConfig] = None
+) -> Optional[Union[str, Dict[str, Any]]]:
+    """Call the language model with the given messages."""
+    if not messages:
+        error_highlight("No messages provided to call_model")
+        return None
 
-    Returns:
-        A dictionary with 'content' and optional metadata.
-
-    Examples:
-        >>> await _call_openai_api(
-        ...     "gpt-4",
-        ...     [{"role": "user", "content": "Hello"}]
-        ... )
-        {'content': 'Hello! How can I help?'}
-    """
     try:
-        response = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7
-        )
-        content: Union[str, None] = response.choices[0].message.content
-        return {"content": content} if content is not None else {}
-    except Exception as e:
-        error_highlight("Error in _call_openai_api: %s", str(e))
-        return {}
+        config = config or {}
+        configurable = config.get("configurable", {})
+        configurable["timestamp"] = datetime.now(timezone.utc).isoformat()
+        config = {**config, "configurable": configurable}
 
-async def _call_anthropic_api(
-    model: str,
-    messages: List[Message]
-) -> Dict[str, Any]:
-    """Make an Anthropic API call and return a standardized response.
+        configuration = Configuration.from_runnable_config(config)
+        logger.info(f"Calling model with {len(messages)} messages")
+        logger.debug(f"Config: {config}")
 
-    Args:
-        model: Anthropic model name.
-        messages: Conversation messages.
+        provider, model = configuration.model.split("/", 1)
 
-    Returns:
-        A dictionary with 'content' and optional metadata.
-
-    Examples:
-        >>> await _call_anthropic_api(
-        ...     "claude-2",
-        ...     [{"role": "user", "content": "Hi Claude"}]
-        ... )
-        {'content': 'Hello! I am Claude.'}
-    """
-    anthropic_messages: List[Dict[str, str]] = []
-    for msg in messages:
-        if msg["role"] == "system":
-            anthropic_messages.append({
-                "role": "user",
-                "content": f"System instruction: {msg['content']}",
-            })
-        else:
-            anthropic_messages.append({"role": msg["role"], "content": msg["content"]})
-    try:
-        typed_messages: Iterable[MessageParam] = cast(Iterable[MessageParam], anthropic_messages)
-        response = await anthropic_client.messages.create(
-            model=model,
-            messages=typed_messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7,
-        )
-        if not response.content:
-            return {}
-        content_block = response.content[0]
-        if isinstance(content_block, dict) and "text" in content_block:
-            return {"content": content_block["text"]}
-        elif isinstance(content_block, str):
-            return {"content": content_block}
+        if provider == "openai":
+            formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
+            return await _call_openai_api(model, formatted_messages)
+        elif provider == "anthropic":
+            # Handle system prompt properly
+            has_system_message = any(msg["role"] == "system" for msg in messages)
+            
+            formatted_messages = []
+            # Add system message if not already present in messages
+            if not has_system_message:
+                formatted_messages.append(cast(ChatCompletionMessageParam, {"role": "system", "content": configuration.system_prompt}))
+                
+            # Process all messages, preserving their roles correctly
+            for msg in messages:
+                if msg["role"] in ["user", "assistant", "system"]:
+                    formatted_messages.append(cast(ChatCompletionMessageParam, {
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    } if msg["role"] == "system" else {
+                        "role": "user" if msg["role"] == "user" else "assistant",
+                        "content": msg["content"]
+                    }))
+                    
+            formatted_messages = [msg for msg in formatted_messages if msg is not None]
+            
+            response = await anthropic_client.messages.create(
+                model=model,
+                messages=[{
+                    "role": cast(Literal["user", "assistant"], "user" if msg["role"] not in ["user", "assistant"] else msg["role"]),
+                    "content": cast(str, msg["content"])
+                } for msg in formatted_messages],
+                max_tokens=MAX_TOKENS,
+                temperature=0.7
+            )
+            return str(response.content[0])
         else:
             return {"content": str(content_block)}
     except Exception as e:

@@ -9,3 +9,7 @@ src/react_agent/graphs/error.py
 src/react_agent/graphs/graph.py
 src/react_agent/graphs/analysis.py
 tests/cassettes/**
+repomix-output.*
+repomix.config.json
+tests/**
+static/**

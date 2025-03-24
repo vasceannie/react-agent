@@ -1,11 +1,11 @@
 import re
 import urllib
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 def is_valid_url(url: str) -> bool:
     """Validate if a URL is properly formatted."""
     # Add PDF detection to URL validation
-    decoded_url = urllib.parse.unquote(url).lower()
+    decoded_url = unquote(url).lower()
     if '.pdf' in decoded_url:
         return False
     

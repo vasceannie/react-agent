@@ -2,6 +2,39 @@
 
 This module provides utilities for interacting with language models,
 including content length management and error handling.
+
+Examples:
+    Basic usage of call_model:
+    
+    ```python
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"}
+    ]
+    response = await call_model(messages)
+    # Returns: {"content": "The capital of France is Paris."}
+    ```
+
+    Using call_model_json with chunking:
+    
+    ```python
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Analyze this long text: " + large_document}
+    ]
+    config = {"configurable": {"model": "openai/gpt-4"}}
+    response = await call_model_json(
+        messages, 
+        config=config,
+        chunk_size=1000,  # Process in 1000-token chunks
+        overlap=100       # 100-token overlap between chunks
+    )
+    # Returns: {
+    #     "analysis": "Key points from the document...",
+    #     "summary": "Overall summary...",
+    #     "topics": ["topic1", "topic2", ...]
+    # }
+    ```
 """
 
 import json
@@ -11,6 +44,7 @@ import re
 from datetime import datetime, timezone
 import os
 import asyncio
+from typing import Any, Dict, List, Optional, Union, cast
 
 from anthropic import AsyncAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -30,6 +64,12 @@ from react_agent.utils.content import (
 from react_agent.configuration import Configuration
 from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.defaults import ChunkConfig
+from react_agent.utils.logging import (
+    get_logger,
+    error_highlight,
+    info_highlight,
+    warning_highlight
+)
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -127,7 +167,38 @@ async def call_model(
     messages: List[Dict[str, str]],
     config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
-    """Call the language model with the given messages."""
+    """Call the language model with the given messages.
+    
+    Args:
+        messages: List of message dictionaries. Each message should have 'role' 
+                 (system/user/assistant) and 'content' keys.
+        config: Optional configuration for the model call. Can include model selection,
+               temperature, and other parameters.
+
+    Returns:
+        Dict containing the model's response. The response will always have a 'content'
+        key with the model's output.
+
+    Examples:
+        ```python
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What is 2+2?"}
+        ]
+        
+        response = await call_model(messages)
+        # Returns: {"content": "2 + 2 = 4"}
+        
+        # With custom configuration
+        config = {
+            "configurable": {
+                "model": "anthropic/claude-3",
+                "temperature": 0.7
+            }
+        }
+        response = await call_model(messages, config)
+        ```
+    """
     if not messages:
         error_highlight("No messages provided to call_model")
         return {}
@@ -150,25 +221,29 @@ async def call_model(
         elif provider == "anthropic":
             # Handle system prompt properly
             has_system_message = any(msg["role"] == "system" for msg in messages)
-            
+
             formatted_messages = []
             # Add system message if not already present in messages
             if not has_system_message:
                 formatted_messages.append({"role": "system", "content": configuration.system_prompt})
-                
+
             # Process all messages, preserving their roles correctly
-            for msg in messages:
-                if msg["role"] in ["user", "assistant", "system"]:
-                    formatted_messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    } if msg["role"] == "system" else {
-                        "role": "user" if msg["role"] == "user" else "assistant",
-                        "content": msg["content"]
-                    })
-                    
+            formatted_messages.extend(
+                (
+                    {"role": msg["role"], "content": msg["content"]}
+                    if msg["role"] == "system"
+                    else {
+                        "role": (
+                            "user" if msg["role"] == "user" else "assistant"
+                        ),
+                        "content": msg["content"],
+                    }
+                )
+                for msg in messages
+                if msg["role"] in ["user", "assistant", "system"]
+            )
             formatted_messages = [msg for msg in formatted_messages if msg is not None]
-            
+
             response = await anthropic_client.messages.create(
                 model=model,
                 messages=[{"role": msg["role"], "content": msg["content"]} for msg in formatted_messages],
@@ -221,7 +296,7 @@ async def _process_chunk(
                     
                 # Parse JSON response with enhanced error handling
                 parsed = safe_json_parse(response["content"], "model_response")
-                return parsed if parsed else {}
+                return parsed or {}
                 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -245,52 +320,86 @@ async def call_model_json(
 ) -> Dict[str, Any]:
     """Call the model with JSON output format and enhanced chunking.
     
+    This function handles large inputs by automatically chunking them and
+    merging the results. It expects and returns JSON-formatted data.
+    
     Args:
-        messages: List of message dictionaries
-        config: Optional configuration
-        chunk_size: Optional custom chunk size
-        overlap: Optional custom overlap size
-        
+        messages: List of message dictionaries. Each message should have 'role'
+                 and 'content' keys.
+        config: Optional configuration for the model call.
+        chunk_size: Optional custom chunk size in tokens. If not provided,
+                   uses default chunking configuration.
+        overlap: Optional overlap size between chunks in tokens.
+
     Returns:
-        JSON response from the model
+        Dict containing the merged JSON response from all chunks.
+
+    Examples:
+        ```python
+        # Simple query expecting JSON response
+        messages = [
+            {"role": "user", "content": "List 3 capitals in JSON format"}
+        ]
+        response = await call_model_json(messages)
+        # Returns: {
+        #     "capitals": [
+        #         {"city": "Paris", "country": "France"},
+        #         {"city": "Tokyo", "country": "Japan"},
+        #         {"city": "Rome", "country": "Italy"}
+        #     ]
+        # }
+
+        # Processing a large document with custom chunking
+        messages = [
+            {"role": "user", "content": "Analyze this document: " + large_text}
+        ]
+        response = await call_model_json(
+            messages,
+            chunk_size=2000,  # Process in 2000-token chunks
+            overlap=200       # 200-token overlap between chunks
+        )
+        # Returns merged analysis from all chunks:
+        # {
+        #     "main_topics": ["topic1", "topic2", ...],
+        #     "key_points": ["point1", "point2", ...],
+        #     "summary": "Overall summary of the document..."
+        # }
+        ```
     """
     try:
         if not messages:
             error_highlight("No messages provided to call_model_json")
             return {}
-            
+
         # Process content in chunks if needed
         content = messages[-1]["content"]
-        
-        # Check if content needs chunking
-        if estimate_tokens(content) > MAX_TOKENS:
-            info_highlight(f"Content too large ({estimate_tokens(content)} tokens), chunking...")
-            chunks = chunk_text(
-                content,
-                chunk_size=chunk_size,
-                overlap=overlap,
-                use_large_chunks=True
-            )
-            
-            if len(chunks) > 1:
-                # Process chunks in parallel with rate limiting
-                chunk_results = []
-                for chunk in chunks:
-                    result = await _process_chunk(chunk, messages[:-1], config)
-                    if result:
-                        chunk_results.append(result)
-                        
-                if not chunk_results:
-                    error_highlight("No valid results from chunks")
-                    return {}
-                    
-                # Merge results with enhanced merging
-                return merge_chunk_results(chunk_results, "model_response")
-            else:
-                return await _process_chunk(content, messages[:-1], config)
-        else:
+
+        if estimate_tokens(content) <= MAX_TOKENS:
             return await _process_chunk(content, messages[:-1], config)
-            
+
+        info_highlight(f"Content too large ({estimate_tokens(content)} tokens), chunking...")
+        chunks = chunk_text(
+            content,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            use_large_chunks=True
+        )
+
+        if len(chunks) <= 1:
+            return await _process_chunk(content, messages[:-1], config)
+        # Process chunks in parallel with rate limiting
+        chunk_results = []
+        for chunk in chunks:
+            result = await _process_chunk(chunk, messages[:-1], config)
+            if result:
+                chunk_results.append(result)
+
+        if not chunk_results:
+            error_highlight("No valid results from chunks")
+            return {}
+
+        # Merge results with enhanced merging
+        return merge_chunk_results(chunk_results, "model_response")
     except Exception as e:
         error_highlight(f"Error in call_model_json: {str(e)}")
         return {}

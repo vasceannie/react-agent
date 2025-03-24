@@ -26,12 +26,14 @@ from langchain.tools import BaseTool
 from langchain_core.tools import ToolException
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 
 from react_agent.configuration import Configuration
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.validations import is_valid_url
 from react_agent.prompts.query import optimize_query, detect_vertical, expand_acronyms
 from react_agent.utils.extraction import safe_json_parse
+from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result, ProcessorCache
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -40,7 +42,7 @@ logger = get_logger(__name__)
 SearchType = Literal["general", "authoritative", "recent", "comprehensive", "technical"]
 
 # Initialize memory saver for caching
-memory_saver = MemorySaver()
+processor_cache = ProcessorCache(thread_id="jina-search")
 
 # Add at module level after imports
 _query_cache: Dict[str, Tuple[List[Document], datetime]] = {}
@@ -53,8 +55,7 @@ class RetryConfig(BaseModel):
     
     def get_delay(self, attempt: int) -> float:
         """Calculate delay with exponential backoff."""
-        delay = min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
-        return delay
+        return min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
 
 class SearchParams(BaseModel):
     """Parameters for search operations."""
@@ -350,6 +351,7 @@ class JinaSearchClient:
                 
         return documents
 
+    @cache_result(ttl=3600)
     def _calculate_quality_score(self, result: Dict[str, Any], content: str) -> float:
         """Calculate quality score for a search result."""
         score = 0.5  # Base score
@@ -388,6 +390,7 @@ class JinaSearchClient:
                     score += 0.05
         return min(1.0, score)  # Cap at 1.0
 
+    @cache_result(ttl=3600)
     def _filter_documents(self, documents: List[Document], min_score: float) -> List[Document]:
         """Filter documents based on quality score."""
         return [
@@ -426,95 +429,102 @@ class JinaSearchTool(BaseTool):
         category: Optional[str] = None
     ) -> List[Document]:
         """Execute search with caching and parallel processing."""
-        # Generate cache key
-        cache_key = f"jina_search_{query}_{search_type}_{max_results}_{min_quality_score}_{recency_days}_{domains}_{category}"
+        config = RunnableConfig(configurable={"jina_api_key": self.config.jina_api_key})
+        return await search(
+            query=query,
+            search_type=search_type,
+            max_results=max_results,
+            min_quality=min_quality_score,
+            recency_days=recency_days,
+            domains=domains,
+            category=category,
+            config=config
+        )
+
+async def _execute_search_strategy(
+    client: JinaSearchClient,
+    params: SearchParams,
+    category: Optional[str] = None
+) -> List[List[Document]]:
+    """Execute search with optional category-specific search."""
+    search_tasks = [client.search(params)]
+
+    if not category:
+        if vertical := detect_vertical(params.query):
+            category_params = SearchParams(**params.model_dump())
+            category_params.category = vertical
+            search_tasks.append(client.search(category_params))
+
+    return await asyncio.gather(*search_tasks)
+
+@cache_result(ttl=3600)
+def _merge_and_filter_results(
+    results_list: List[List[Document]],
+    min_quality: float
+) -> List[Document]:
+    """Merge, deduplicate and filter search results."""
+    seen_urls = set()
+    all_results = []
+    
+    for results in results_list:
+        for doc in results:
+            url = doc.metadata.get("url", "")
+            if url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append(doc)
+    
+    all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
+    return [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_quality]
+
+async def _load_cached_results(cache_key: str) -> Optional[List[Document]]:
+    """Load and validate cached search results."""
+    try:
+        if cached := load_checkpoint(cache_key):
+            if not isinstance(cached, dict) or "results" not in cached or "timestamp" not in cached:
+                return None
+                
+            if (datetime.now() - datetime.fromisoformat(cached["timestamp"])).total_seconds() >= 86400:
+                return None
+                
+            results = cached["results"]
+            if not isinstance(results, list) or not all(isinstance(doc, Document) for doc in results):
+                return None
+                
+            info_highlight(f"Retrieved {len(results)} results from cache")
+            return results
+    except Exception as e:
+        warning_highlight(f"Error loading from cache: {str(e)}")
+    return None
+
+async def _perform_search(
+    configuration: Configuration,
+    params: SearchParams,
+    cache_key: str
+) -> List[Document]:
+    """Execute search and cache results."""
+    async with JinaSearchClient(
+        api_key=configuration.jina_api_key or "",
+        base_url=configuration.jina_url,
+        retry_config=RetryConfig()
+    ) as client:
+        results_list = await _execute_search_strategy(client, params, params.category)
+        all_results = _merge_and_filter_results(results_list, params.min_quality_score or 0.5)
         
-        # Check checkpoint with TTL
-        if cached_state := memory_saver.load(cache_key):
-            cached_results = cached_state.get("results", [])
-            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
-                return cached_results
-                
         try:
-            # Create search parameters
-            params = SearchParams(
-                query=query,
-                search_type=search_type or "general",
-                max_results=max_results or self.config.max_search_results,
-                min_quality_score=min_quality_score or 0.5,
-                recency_days=recency_days,
-                domains=domains,
-                category=category
+            create_checkpoint(
+                cache_key,
+                {
+                    "results": all_results,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "params": params.to_dict()
+                },
+                ttl=86400
             )
-            
-            retry_config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0)
-            async with JinaSearchClient(
-                api_key=str(self.config.jina_api_key),
-                base_url=self.config.jina_url,
-                retry_config=retry_config
-            ) as client:
-                # Create tasks for different search strategies
-                search_tasks = []
-                
-                # Main search task
-                search_tasks.append(client.search(params))
-                
-                # If no category specified, try category-specific search
-                if not params.category:
-                    # Detect vertical from query
-                    vertical = detect_vertical(params.query)
-                    if vertical:
-                        category_params = SearchParams(
-                            query=params.query,
-                            search_type=params.search_type,
-                            max_results=params.max_results or self.config.max_search_results,
-                            min_quality_score=params.min_quality_score or 0.5,
-                            recency_days=params.recency_days,
-                            domains=params.domains,
-                            category=vertical
-                        )
-                        search_tasks.append(client.search(category_params))
-                
-                # Execute all search tasks in parallel
-                results_list = await asyncio.gather(*search_tasks)
-                
-                # Merge and deduplicate results
-                all_results = []
-                seen_urls = set()
-                
-                for results in results_list:
-                    for doc in results:
-                        url = doc.metadata.get("url", "")
-                        if url not in seen_urls:
-                            seen_urls.add(url)
-                            all_results.append(doc)
-                
-                # Sort by quality score
-                all_results.sort(
-                    key=lambda x: x.metadata.get("quality_score", 0),
-                    reverse=True
-                )
-                
-                # Filter by minimum quality score
-                min_score = min_quality_score or 0.5
-                all_results = [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_score]
-                
-                # Save to checkpoint with TTL
-                memory_saver.save(
-                    cache_key,
-                    {
-                        "results": all_results,
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    },
-                    ttl=3600  # 1 hour TTL
-                )
-                
-                return all_results
-                
+            info_highlight(f"Cached {len(all_results)} results")
         except Exception as e:
-            error_highlight(f"Error in Jina search: {str(e)}")
-            raise ToolException(f"Failed to execute Jina search: {str(e)}")
+            warning_highlight(f"Error caching results: {str(e)}")
+        
+        return all_results
 
 async def search(
     query: str,
@@ -533,101 +543,27 @@ async def search(
         error_highlight("Jina API key is required")
         return []
 
-    # Set environment variables for Jina (used by some libraries)
     os.environ["JINA_API_KEY"] = configuration.jina_api_key
     if configuration.jina_url:
         os.environ["JINA_URL"] = configuration.jina_url
 
-    # Use provided params or defaults
     params = SearchParams(
         query=query,
         search_type=search_type or "general",
         max_results=max_results or configuration.max_search_results,
         min_quality_score=min_quality or 0.5,
         recency_days=recency_days,
-        domains=domains,
+        domains=domains or (['.edu', '.gov', '.org'] if search_type in ["authoritative", None] else None),
         category=category
     )
 
-    # Generate cache key from search parameters
     cache_key = f"jina_search_{params.query}_{params.search_type}_{params.max_results}"
-
-    # Check checkpoint with TTL
-    if cached_state := memory_saver.load(cache_key):
-        cached_results = cached_state.get("results", [])
-        timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-        if (datetime.now() - timestamp).total_seconds() < 86400:  # 24 hour TTL
-            info_highlight("Using cached search results")
-            return cached_results
-        else:
-            info_highlight("Cache expired, performing fresh search")
-
-    # Add default domains for educational/authoritative content if not provided
-    if not domains and search_type in ["authoritative", None]:
-        params.domains = ['.edu', '.gov', '.org']
+    
+    if cached_results := await _load_cached_results(cache_key):
+        return cached_results
 
     try:
-        retry_config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0)
-        async with JinaSearchClient(
-            api_key=configuration.jina_api_key,
-            base_url=configuration.jina_url,
-            retry_config=retry_config
-        ) as client:
-            # Create tasks for different search strategies
-            search_tasks = []
-            
-            # Main search task
-            search_tasks.append(client.search(params))
-            
-            # If no category specified, try category-specific search
-            if not category:
-                # Detect vertical from query
-                vertical = detect_vertical(query)
-                if vertical:
-                    category_params = SearchParams(
-                        query=query,
-                        search_type=search_type or "general",
-                        max_results=max_results or configuration.max_search_results,
-                        min_quality_score=min_quality or 0.5,
-                        recency_days=recency_days,
-                        domains=domains,
-                        category=vertical
-                    )
-                    search_tasks.append(client.search(category_params))
-            
-            # Execute all search tasks in parallel
-            results_list = await asyncio.gather(*search_tasks)
-            
-            # Merge and deduplicate results
-            all_results = []
-            seen_urls = set()
-            
-            for results in results_list:
-                for doc in results:
-                    url = doc.metadata.get("url", "")
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        all_results.append(doc)
-            
-            # Sort by quality score
-            all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
-            
-            # Filter by minimum quality score
-            min_score = min_quality or 0.5
-            all_results = [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_score]
-            
-            # Save to checkpoint with TTL
-            memory_saver.save(
-                cache_key,
-                {
-                    "results": all_results,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                },
-                ttl=86400  # 24 hour TTL
-            )
-            
-            return all_results
-            
+        return await _perform_search(configuration, params, cache_key)
     except Exception as e:
         error_highlight(f"Error in Jina search: {str(e)}")
         return []

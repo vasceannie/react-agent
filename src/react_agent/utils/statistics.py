@@ -34,7 +34,7 @@ COMPILED_AUTHORITY_PATTERNS = [re.compile(pattern) for pattern in AUTHORITY_DOMA
 
 # High-credibility source terms
 HIGH_CREDIBILITY_TERMS = [
-    'study', 'research', 'survey', 'report', 'analysis', 
+    'study', 'research', 'survey', 'report', 'analysis',
     'journal', 'publication', 'paper', 'review', 'assessment',
     'statistics', 'data', 'findings', 'results', 'evidence'
 ]
@@ -74,7 +74,7 @@ def calculate_category_quality_score(
     elif len(extracted_facts) >= min_facts:  # Good quantity
         score += 0.08
     else:  # Below threshold
-        fact_ratio = len(extracted_facts) / min_facts
+        fact_ratio = len(extracted_facts) / min_facts if min_facts else 0
         score += fact_ratio * 0.06
     
     # Add points for number of sources (reward diversity)
@@ -85,15 +85,15 @@ def calculate_category_quality_score(
     elif len(sources) >= min_sources:  # Good source diversity
         score += 0.05
     else:  # Below threshold
-        source_ratio = len(sources) / min_sources
+        source_ratio = len(sources) / min_sources if min_sources else 0
         score += source_ratio * 0.03
     
     # 2. STATISTICAL CONTENT (0.20 max)
     # Reward statistical content
     stat_facts = [
-        f for f in extracted_facts 
-        if "statistics" in f or 
-        (isinstance(f.get("source_text"), str) and 
+        f for f in extracted_facts
+        if "statistics" in f or
+        (isinstance(f.get("source_text"), str) and
          re.search(r'\d+', f.get("source_text", "")) is not None)
     ]
     
@@ -143,9 +143,17 @@ def calculate_category_quality_score(
             score += 0.02
     
     # 5. CONSISTENCY AND CROSS-VALIDATION (0.15 max)
-    # Assess fact consistency and cross-validation
+    # Existing consistency assessment
     consistency_score = assess_fact_consistency(extracted_facts)
-    score += consistency_score * 0.15
+    
+    # New statistical validation to check numeric data consistency among facts
+    stat_validation_score = perform_statistical_validation(extracted_facts)
+    
+    # We keep the total weighting for this section at 0.15,
+    # distributing it between consistency and validation.
+    # For example, 0.10 for consistency and 0.05 for statistical validation:
+    combined_cross_val_score = (consistency_score * 0.10) + (stat_validation_score * 0.05)
+    score += combined_cross_val_score
     
     # Log detailed scoring breakdown
     info_highlight(f"Category {category} quality score breakdown:")
@@ -155,7 +163,8 @@ def calculate_category_quality_score(
     info_highlight(f"  - Authoritative sources: {len(authoritative_sources)}/{len(sources)} sources")
     info_highlight(f"  - Recent sources: {recent_sources}/{len(sources)} sources")
     info_highlight(f"  - Consistency score: {consistency_score:.2f}")
-    info_highlight(f"  - Final score: {min(1.0, score):.2f}")
+    info_highlight(f"  - Statistical validation score: {stat_validation_score:.2f}")
+    info_highlight(f"  - Final category score: {min(1.0, score):.2f}")
     
     return min(1.0, score)
 
@@ -174,17 +183,17 @@ def assess_authoritative_sources(sources: List[Dict[str, Any]]) -> List[Dict[str
         
         # Check title and source for credibility terms
         title = source.get("title", "").lower()
-        source_name = source.get("source", "").lower() 
+        source_name = source.get("source", "").lower()
         
         credibility_term_count = sum(
-            1 for term in HIGH_CREDIBILITY_TERMS 
+            1 for term in HIGH_CREDIBILITY_TERMS
             if term in title or term in source_name
         )
         
         # Consider authoritative if domain matches or high quality score or credibility terms
         if (
-            is_authoritative_domain or 
-            quality_score >= 0.8 or 
+            is_authoritative_domain or
+            quality_score >= 0.8 or
             credibility_term_count >= 2
         ):
             authoritative_sources.append(source)
@@ -210,9 +219,8 @@ def count_recent_sources(sources: List[Dict[str, Any]], recency_threshold: int) 
                 from dateutil import parser
                 date = parser.parse(published_date)
                 
-            # Calculate days difference
+            # Make naive datetime timezone-aware if needed
             if hasattr(date, 'tzinfo') and date.tzinfo is None:
-                # Make naive datetime timezone-aware
                 date = date.replace(tzinfo=timezone.utc)
                 
             days_old = (current_time - date).days
@@ -308,6 +316,77 @@ def extract_noun_phrases(text: str, topics: Set[str]) -> None:
     for match in re.finditer(r'\b([A-Z]{2,})\b', text):
         topics.add(match.group(1).lower())
 
+def perform_statistical_validation(facts: List[Dict[str, Any]]) -> float:
+    """
+    Check for numeric data in the extracted facts and evaluate how consistent
+    or valid those values are. Returns a score in the range [0.0 - 1.0].
+    
+    This function:
+      - Extracts numeric values from each fact (either from `source_text` or 
+        from known numeric fields in `data`).
+      - Calculates the mean and standard deviation of these values.
+      - If the standard deviation is low relative to the mean (and enough data
+        points exist), it indicates higher consistency among facts.
+      - Rewards having multiple consistent numeric references.
+    """
+    # Gather numeric values
+    numeric_values = []
+    pattern = re.compile(r"\b\d+(?:\.\d+)?\b")
+    
+    for fact in facts:
+        # Check source_text for numeric values
+        source_text = fact.get("source_text", "")
+        if isinstance(source_text, str):
+            found_numbers = pattern.findall(source_text)
+            numeric_values.extend(float(n) for n in found_numbers)
+        
+        # Check fact["data"] if it contains numeric fields
+        if "data" in fact and isinstance(fact["data"], dict):
+            for key, val in fact["data"].items():
+                if isinstance(val, (int, float)):
+                    numeric_values.append(float(val))
+                elif isinstance(val, str):
+                    # Attempt to parse if it's a numeric string
+                    match = pattern.search(val)
+                    if match:
+                        numeric_values.append(float(match.group(0)))
+    
+    # If fewer than 3 numeric values, not enough to judge consistency well
+    if len(numeric_values) < 3:
+        return 0.5  # Neutral score
+    
+    import statistics
+    
+    try:
+        mean_val = statistics.mean(numeric_values)
+        stdev_val = statistics.pstdev(numeric_values)  # population stdev
+        
+        # If mean is ~0, skip ratio-based check to avoid division by zero
+        if abs(mean_val) < 1e-9:
+            # If everything is zero or near zero
+            if all(abs(x) < 1e-9 for x in numeric_values):
+                return 1.0  # Perfectly consistent, all zero
+            return 0.5
+        
+        # Relative stdev: smaller means more consistent
+        rel_stdev = stdev_val / abs(mean_val)
+        
+        # Score logic:
+        # - If rel_stdev is very low (< 0.1), very high consistency
+        # - If rel_stdev is moderate (< 0.3), good consistency
+        # - If rel_stdev is high, penalize
+        if rel_stdev < 0.1:
+            return 1.0
+        elif rel_stdev < 0.3:
+            return 0.8
+        elif rel_stdev < 0.6:
+            return 0.6
+        else:
+            return 0.4
+    except statistics.StatisticsError:
+        # Fallback if something goes wrong
+        return 0.5
+
 def calculate_overall_confidence(
     category_scores: Dict[str, float],
     synthesis_quality: float,
@@ -333,8 +412,8 @@ def calculate_overall_confidence(
     # Base confidence on weighted components
     base_score = (
         avg_category_score * 0.5 +  # Category quality is 50% of score
-        synthesis_quality * 0.3 +    # Synthesis quality is 30% of score
-        validation_score * 0.2       # Validation score is 20% of score
+        synthesis_quality * 0.3 +   # Synthesis quality is 30% of score
+        validation_score * 0.2      # Validation score is 20% of score
     )
     
     # Apply modifiers based on coverage
@@ -343,12 +422,14 @@ def calculate_overall_confidence(
         base_score += 0.1
     
     # Strong statistical content gets a boost
-    stats_categories = sum(1 for cat, score in category_scores.items() 
-                         if cat in ['market_dynamics', 'cost_considerations'] and score >= 0.7)
+    stats_categories = sum(
+        1
+        for cat, score in category_scores.items()
+        if cat in ['market_dynamics', 'cost_considerations'] and score >= 0.7
+    )
     if stats_categories >= 2:
         base_score += 0.05
     
-    # Ensure cap at 1.0
     return min(1.0, base_score)
 
 def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
@@ -374,8 +455,8 @@ def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
     # Count sections with content
     sections_with_content = sum(
         1 for section in synthesis_content.values()
-        if isinstance(section, dict) and 
-        section.get("content") and 
+        if isinstance(section, dict) and
+        section.get("content") and
         len(section.get("content", "")) > 50
     )
     
@@ -386,7 +467,7 @@ def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
     # Count sections with citations
     sections_with_citations = sum(
         1 for section in synthesis_content.values()
-        if isinstance(section, dict) and 
+        if isinstance(section, dict) and
         section.get("citations") and
         len(section.get("citations", [])) > 0
     )
@@ -398,7 +479,7 @@ def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
     # Count sections with statistics
     sections_with_stats = sum(
         1 for section in synthesis_content.values()
-        if isinstance(section, dict) and 
+        if isinstance(section, dict) and
         section.get("statistics") and
         len(section.get("statistics", [])) > 0
     )

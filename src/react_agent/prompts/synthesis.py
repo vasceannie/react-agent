@@ -17,11 +17,15 @@ from react_agent.utils.logging import get_logger, info_highlight, warning_highli
 from react_agent.utils.llm import call_model_json
 from react_agent.utils.extraction import extract_statistics
 from react_agent.utils.defaults import get_default_extraction_result
+from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
 # Initialize logger
 logger = get_logger(__name__)
+
+# Initialize processor cache for synthesis
+synthesis_cache = ProcessorCache(thread_id="synthesis")
 
 # Initialize memory saver for caching
 memory_saver = MemorySaver()
@@ -272,13 +276,11 @@ async def synthesize_research(
     info_highlight("Synthesizing research results with enhanced statistics focus")
     
     try:
-        # Check checkpoint with TTL
+        # Check cache with TTL
         cache_key = f"synthesize_research_{hash(str(state))}"
-        if cached_state := memory_saver.get_checkpoint(cache_key):
-            cached_result = cached_state.get("result")
-            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
-                return cached_result
+        if cached_state := synthesis_cache.get(cache_key):
+            if cached_state.get("data"):
+                return cached_state["data"]
         
         categories = state["categories"]
         original_query = state["original_query"]
@@ -328,11 +330,11 @@ async def synthesize_research(
             "status": "synthesized"
         }
         
-        # Save to checkpoint with TTL
-        memory_saver.save_checkpoint(
+        # Cache result with TTL
+        synthesis_cache.put(
             cache_key,
             {
-                "result": result,
+                "data": result,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             },
             ttl=3600  # 1 hour TTL

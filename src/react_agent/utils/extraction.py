@@ -2,6 +2,163 @@
 
 This module improves the extraction of facts and statistics from search results,
 with a particular emphasis on numerical data, trends, and statistical information.
+
+Examples:
+    Input text example:
+        >>> text = '''
+        According to a recent survey by TechCorp, 75% of enterprises adopted cloud 
+        computing in 2023, up from 60% in 2022. The global cloud market reached 
+        $483.3 billion in revenue, with AWS maintaining a 32% market share. 
+        A separate study by MarketWatch revealed that cybersecurity spending 
+        increased by 15% year-over-year.
+        '''
+
+    Extracting citations:
+        >>> citations = extract_citations(text)
+        >>> citations
+        [
+            {
+                "source": "TechCorp",
+                "context": "According to a recent survey by TechCorp, 75% of enterprises"
+            },
+            {
+                "source": "MarketWatch",
+                "context": "A separate study by MarketWatch revealed that cybersecurity"
+            }
+        ]
+
+    Extracting statistics:
+        >>> stats = extract_statistics(text)
+        >>> stats
+        [
+            {
+                "text": "75% of enterprises adopted cloud computing in 2023",
+                "type": "percentage",
+                "citations": [{"source": "TechCorp", "context": "...survey by TechCorp, 75% of enterprises..."}],
+                "quality_score": 0.95,
+                "year_mentioned": 2023
+            },
+            {
+                "text": "global cloud market reached $483.3 billion in revenue",
+                "type": "financial",
+                "citations": [],
+                "quality_score": 0.85,
+                "year_mentioned": None
+            },
+            {
+                "text": "AWS maintaining a 32% market share",
+                "type": "market",
+                "citations": [],
+                "quality_score": 0.75,
+                "year_mentioned": None
+            }
+        ]
+
+    Rating statistic quality:
+        >>> stat_text = "According to Gartner's 2023 survey, 78.5% of Fortune 500 companies..."
+        >>> quality = rate_statistic_quality(stat_text)
+        >>> quality
+        0.95  # High score due to specific percentage, citation, and year
+
+    Inferring statistic type:
+        >>> text1 = "Market share increased to 45%"
+        >>> infer_statistic_type(text1)
+        'percentage'
+        >>> text2 = "$50 million in revenue"
+        >>> infer_statistic_type(text2)
+        'financial'
+
+    Extracting year:
+        >>> text_with_year = "In 2023, cloud adoption grew by 25%"
+        >>> extract_year(text_with_year)
+        2023
+
+    Finding JSON objects:
+        >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
+        >>> json_obj = find_json_object(text_with_json)
+        >>> json_obj
+        '{"key": "value", "nested": {"data": 123}}'
+
+    Enriching extracted facts:
+        >>> fact = {
+        ...     "text": "Cloud adoption grew by 25% in 2023",
+        ...     "confidence": 0.8,
+        ...     "source_text": "According to AWS, cloud adoption grew by 25% in 2023"
+        ... }
+        >>> enriched = enrich_extracted_fact(
+        ...     fact,
+        ...     url="https://example.com/report",
+        ...     source_title="Cloud Market Report"
+        ... )
+        >>> enriched
+        {
+            "text": "Cloud adoption grew by 25% in 2023",
+            "confidence": 0.8,
+            "source_text": "According to AWS, cloud adoption grew by 25% in 2023",
+            "source_url": "https://example.com/report",
+            "source_title": "Cloud Market Report",
+            "source_domain": "example.com",
+            "extraction_timestamp": "2024-03-14T10:30:00",
+            "statistics": [...],
+            "additional_citations": [...],
+            "confidence_score": 0.9  # Adjusted based on statistics and citations
+        }
+
+    Full category information extraction:
+        >>> facts, relevance = await extract_category_information(
+        ...     content=text,
+        ...     url="https://example.com/cloud-report",
+        ...     title="Cloud Computing Trends 2023",
+        ...     category="market_dynamics",
+        ...     original_query="cloud computing adoption trends",
+        ...     prompt_template="...",
+        ...     extraction_model=model
+        ... )
+        >>> facts
+        [
+            {
+                "type": "fact",
+                "data": {
+                    "text": "Enterprise cloud adoption increased to 75% in 2023",
+                    "source_url": "https://example.com/cloud-report",
+                    "source_title": "Cloud Computing Trends 2023",
+                    "source_domain": "example.com",
+                    "extraction_timestamp": "2024-03-14T10:30:00",
+                    "confidence_score": 0.9,
+                    "statistics": [...],
+                    "additional_citations": [...]
+                }
+            }
+        ]
+        >>> relevance
+        0.95
+
+Functions:
+    extract_citations(text: str) -> List[Dict[str, str]]
+        Extract citation information from text.
+
+    extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]
+        Extract statistics and numerical data from text.
+
+    rate_statistic_quality(stat_text: str) -> float
+        Rate the quality of a statistic on a scale of 0.0 to 1.0.
+
+    extract_year(text: str) -> Optional[int]
+        Extract year mentioned in text, if any.
+
+    infer_statistic_type(text: str) -> str
+        Infer the type of statistic mentioned.
+
+    enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> Dict[str, Any]
+        Enrich an extracted fact with additional context and metadata.
+
+    find_json_object(text: str) -> Optional[str]
+        Find a JSON object in text using balanced brace matching.
+
+    extract_category_information(content: str, url: str, title: str, category: str,
+                               original_query: str, prompt_template: str,
+                               extraction_model: Any) -> Tuple[List[Dict[str, Any]], float]
+        Extract information from content for a specific category with enhanced statistics focus.
 """
 
 
@@ -19,14 +176,19 @@ from react_agent.utils.logging import get_logger, info_highlight, warning_highli
 from react_agent.utils.validations import is_valid_url
 from react_agent.utils.content import chunk_text, preprocess_content, merge_chunk_results
 from react_agent.utils.defaults import get_default_extraction_result
+from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint, cache_result
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from react_agent.utils.statistics import (
+    calculate_category_quality_score,
+    assess_authoritative_sources,
+    HIGH_CREDIBILITY_TERMS
+)
 
-# Initialize logger
+# Initialize logger and cache
 logger = get_logger(__name__)
-
-# Initialize memory saver for caching
-memory_saver = MemorySaver()
+json_cache = ProcessorCache(thread_id="json_parser")
 
 # Regular expressions for identifying statistical content
 STAT_PATTERNS = [
@@ -70,8 +232,21 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
     
     return citations
 
-def extract_statistics(text: str) -> List[Dict[str, Any]]:
-    """Extract statistics and numerical data from text."""
+def extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
+    """Extract statistics and numerical data from text.
+    
+    This function identifies and extracts statistical information from text,
+    including percentages, currency amounts, numerical data, and their context.
+    It also assesses the quality of each statistic based on various factors.
+    
+    Args:
+        text: The input text to extract statistics from
+        url: Optional URL source of the statistics
+        source_title: Optional title of the source document
+        
+    Returns:
+        List of dictionaries containing extracted statistics with metadata
+    """
     statistics = []
     sentences = re.split(r'(?<=[.!?])\s+', text)
 
@@ -81,16 +256,23 @@ def extract_statistics(text: str) -> List[Dict[str, Any]]:
                 # Avoid duplicate statistics
                 stat_text = sentence.strip()
                 if all(s["text"] != stat_text for s in statistics):
-                    # Attempt to rate the quality of the statistic
-                    quality = rate_statistic_quality(stat_text)
-
-                    statistics.append({
+                    # Create statistic object with enhanced metadata
+                    statistic = {
                         "text": stat_text,
                         "type": infer_statistic_type(stat_text),
                         "citations": extract_citations(stat_text),
-                        "quality_score": quality,
-                        "year_mentioned": extract_year(stat_text)
-                    })
+                        "year_mentioned": extract_year(stat_text),
+                        "source_quality": assess_source_quality(stat_text),
+                        "quality_score": rate_statistic_quality(stat_text),
+                        "credibility_terms": extract_credibility_terms(stat_text)
+                    }
+
+                    if enriched := enrich_extracted_fact(
+                        statistic, url, source_title
+                    ):
+                        statistic |= enriched
+
+                    statistics.append(statistic)
                 break
 
     return statistics
@@ -162,7 +344,7 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
 
     # Extract statistics if present in source_text
     if "source_text" in fact and isinstance(fact["source_text"], str):
-        if statistics := extract_statistics(fact["source_text"]):
+        if statistics := extract_statistics(fact["source_text"], url, source_title):
             fact["statistics"] = statistics
 
     # Extract citations if present in source_text
@@ -234,89 +416,96 @@ def find_json_object(text: str) -> Optional[str]:
     # No balanced JSON-like structure found
     return None
 
-def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
-    """Safely parse JSON response with enhanced error handling and cleanup."""
-    try:
-        # If already a dict, return it
-        if isinstance(response, dict):
-            return response
-            
-        # Clean up the response string
-        if isinstance(response, str):
-            # Remove any markdown code blocks
-            response = re.sub(r'```(?:json)?\s*|\s*```', '', response)
-            
-            # Check checkpoint with TTL
-            cache_key = f"json_parse_{hash(response)}"
-            if cached_state := memory_saver.get(RunnableConfig(configurable={"thread_id": cache_key})):
-                cached_result = cached_state.get("result")
-                if isinstance(cached_result, dict) and cached_result:
-                    timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-                    if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
-                        return cached_result
-            
-            # Remove any leading/trailing whitespace
-            response = response.strip()
-            
-            # Handle empty or invalid responses
-            if not response or response in ['{}', '[]', 'null']:
-                return get_default_extraction_result(category)
-                
-            # Handle single-quoted strings
-            response = response.replace("'", '"')
-            
-            # Handle trailing commas
-            response = re.sub(r',(\s*[}\]])', r'\1', response)
-            
-            # Handle missing braces
-            if not response.startswith('{'):
-                response = '{' + response
-            if not response.endswith('}'):
-                response = response + '}'
-                
-            # Handle quoted keys without values
-            response = re.sub(r'"(\w+)":\s*"', r'"\1": []', response)
-            
-            # Find JSON object in text
-            json_text = find_json_object(response)
-            if not json_text:
-                warning_highlight("No valid JSON object found in response")
-                return get_default_extraction_result(category)
-                
-            # Parse JSON
-            try:
-                parsed = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                warning_highlight(f"JSON decode error: {str(e)}")
-                return get_default_extraction_result(category)
-                
-            # Validate and clean up the parsed structure
-            result = get_default_extraction_result(category)
-            
-            # Copy valid fields from parsed result
-            for key, value in parsed.items():
-                if key in result:
-                    if isinstance(value, list) and isinstance(result[key], list):
-                        result[key] = value
-                    elif isinstance(value, dict) and isinstance(result[key], dict):
-                        result[key].update(value)
-                    elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
-                        result[key] = float(value)
-                        
-            # Save to checkpoint with TTL
-            memory_saver.save(RunnableConfig(configurable={
-                "thread_id": cache_key,
-                "data": {
-                    "result": result,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-            }))
-            
-            return result
-            
-    except Exception as e:
-        error_highlight(f"Error parsing JSON: {str(e)}")
+def _check_cache(response, category):
+    # Clean response string
+    response = _clean_json_string(response)
+
+    # Check cache
+    cache_key = f"json_parse_{hash(response)}"
+    if cached_result := json_cache.get(cache_key):
+        if isinstance(cached_result, dict) and cached_result.get("data"):
+            return cached_result["data"]
+
+    # Find and parse JSON
+    json_text = find_json_object(response)
+    if not json_text:
         return get_default_extraction_result(category)
+
+    parsed = json.loads(json_text)
+    result = _merge_with_default(parsed, category)
+
+    # Cache result
+    json_cache.put(
+        cache_key,
+        {
+            "data": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ttl": 3600
+        }
+    )
+
+    return result
+
+def _clean_json_string(text: str) -> str:
+    """Clean and normalize JSON string."""
+    text = re.sub(r'```(?:json)?\s*|\s*```', '', text)  # Remove code blocks
+    text = text.strip()
+    text = text.replace("'", '"')  # Handle single quotes
+    text = re.sub(r',(\s*[}\]])', r'\1', text)  # Handle trailing commas
+    
+    # Add missing braces
+    if not text.startswith('{'): text = '{' + text
+    if not text.endswith('}'): text = text + '}'
+    
+    return re.sub(r'"(\w+)":\s*"', r'"\1": []', text)  # Handle quoted keys without values
+
+def _merge_with_default(parsed: Dict[str, Any], category: str) -> Dict[str, Any]:
+    """Merge parsed result with default template."""
+    result = get_default_extraction_result(category)
+    
+    for key, value in parsed.items():
+        if key not in result:
+            continue
+            
+        if isinstance(value, type(result[key])):
+            if isinstance(value, (list, dict)):
+                result[key] = value
+            elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
+                result[key] = float(value)
+    
+    return result
+
+def assess_source_quality(text: str) -> float:
+    """Assess the quality of the source mentioned in the statistic."""
+    score = 0.5  # Base score
+
+    # Check for credibility terms
+    credibility_count = sum(
+        term.lower() in text.lower() for term in HIGH_CREDIBILITY_TERMS
+    )
+
+    # Add points for credibility terms
+    if credibility_count >= 2:
+        score += 0.3
+    elif credibility_count == 1:
+        score += 0.15
+
+    # Add points for specific source citations
+    if re.search(r'according to|reported by|cited from|source|study|survey', text, re.IGNORECASE):
+        score += 0.2
+
+    # Add points for authoritative sources
+    if any(domain in text.lower() for domain in ['.gov', '.edu', '.org', 'research', 'university']):
+        score += 0.2
+
+    return min(1.0, score)
+
+def extract_credibility_terms(text: str) -> List[str]:
+    """Extract credibility-indicating terms from the text."""
+    return [
+        term for term in HIGH_CREDIBILITY_TERMS
+        if term.lower() in text.lower()
+    ]
 
 async def extract_category_information(
     content: str,
@@ -328,130 +517,105 @@ async def extract_category_information(
     extraction_model: Any,
     config: Optional[RunnableConfig] = None
 ) -> Tuple[List[Dict[str, Any]], float]:
-    """Extract information from content for a specific category with enhanced statistics focus.
-    
-    Args:
-        content: The content to extract information from
-        url: URL of the content
-        title: Title of the content
-        category: Research category
-        original_query: Original search query
-        prompt_template: Template for extraction prompt
-        extraction_model: Model to use for extraction
-        config: Optional configuration
-        
-    Returns:
-        Tuple of (extracted facts, relevance score)
-    """
-    if not content or not url or not is_valid_url(url):
-        warning_highlight(f"Invalid content or URL for extraction: {url}")
+    """Extract information from content for a specific category with enhanced statistics focus."""
+    if not _validate_inputs(content, url):
         return [], 0.0
 
     info_highlight(f"Extracting from {url} for {category}")
-
+    
     try:
-        # Preprocess content to reduce size
         content = preprocess_content(content, url)
-
-        # Apply extraction prompt template
-        extraction_prompt = prompt_template.format(
-            query=original_query,
+        prompt = prompt_template.format(query=original_query, url=url, content=content)
+        
+        extraction_result = await _process_content(
+            content=content,
+            prompt=prompt,
+            category=category,
+            extraction_model=extraction_model,
+            config=config,
             url=url,
-            content=content
+            title=title
         )
-
-        # If content is too large, chunk it and process each chunk
-        if len(content) > 40000:  # Threshold for chunking
-            info_highlight(f"Content too large ({len(content)} chars), chunking...")
-            chunks = chunk_text(content)
-
-            all_statistics = []
-            chunk_results = []
-
-            for chunk_idx, chunk in enumerate(chunks):
-                info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
-                chunk_prompt = prompt_template.format(
-                    query=original_query,
-                    url=url,
-                    content=chunk
-                )
-
-                # Extract from this chunk
-                chunk_response = await extraction_model(
-                    messages=[{"role": "human", "content": chunk_prompt}],
-                    config=config
-                )
-
-                if chunk_result := safe_json_parse(chunk_response, category):
-                    # Extract statistics from this chunk directly
-                    chunk_statistics = extract_statistics(chunk)
-                    all_statistics.extend(chunk_statistics)
-
-                    # Add to chunk results for merging
-                    chunk_results.append(chunk_result)
-
-            # Merge results from all chunks
-            extraction_result = merge_chunk_results(chunk_results, category)
-
-            # Add all statistics to the merged result
-            if all_statistics:
-                extraction_result["statistics"] = all_statistics
-        else:
-            # Process single chunk
-            model_response = await extraction_model(
-                messages=[{"role": "human", "content": extraction_prompt}],
-                config=config
-            )
-
-            # Handle model response
-            if isinstance(model_response, str):
-                # Clean up the response
-                model_response = model_response.strip()
-                
-                # If it starts with a quoted key, wrap it in braces
-                if model_response.startswith('"') or model_response.startswith('\n  "'):
-                    # Extract the key name
-                    match = re.search(r'"(extracted_[^"]+)"', model_response)
-                    if match:
-                        key = match.group(1)
-                        model_response = f'{{"{key}": []}}'
-                    else:
-                        model_response = f'{{"extracted_facts": []}}'
-                
-                # If it's an error message, use default
-                if model_response == "' and ending with '" or model_response == '" and ending with "':
-                    model_response = '{"extracted_facts": []}'
-
-            # Safely parse the model response
-            extraction_result = safe_json_parse(model_response, category)
-
-            if statistics := extract_statistics(content):
-                extraction_result["statistics"] = statistics
-
-        # Get relevance score
-        relevance_score = extraction_result.get("relevance_score", 0.0)
-
-        # Get extracted facts based on category
+        
         facts = _get_category_facts(category, extraction_result)
-
-        # Enrich each fact with additional context
-        enriched_facts = [
-            enrich_extracted_fact(fact, url, title)
-            for fact in facts
-        ]
-
-        # Sort facts by confidence score
-        sorted_facts = sorted(
-            enriched_facts, 
-            key=lambda x: x.get("confidence_score", 0), 
+        enriched_facts = [enrich_extracted_fact(fact, url, title) for fact in facts]
+        
+        return sorted(
+            enriched_facts,
+            key=lambda x: x.get("confidence_score", 0),
             reverse=True
-        )
-
-        return sorted_facts, relevance_score
-
+        ), extraction_result.get("relevance_score", 0.0)
+        
     except Exception as e:
         error_highlight(f"Error extracting from {url}: {str(e)}")
         return [], 0.0
+
+def _validate_inputs(content: str, url: str) -> bool:
+    """Validate input content and URL."""
+    if not content or not url or not is_valid_url(url):
+        warning_highlight(f"Invalid content or URL for extraction: {url}")
+        return False
+    return True
+
+async def _process_content(
+    content: str,
+    prompt: str,
+    category: str,
+    extraction_model: Any,
+    config: Optional[RunnableConfig],
+    url: str,
+    title: str
+) -> Dict[str, Any]:
+    """Process content and extract information using the model."""
+    if len(content) > 40000:
+        return await _process_chunked_content(content, prompt, category, extraction_model, config, url, title)
+    
+    model_response = await extraction_model(
+        messages=[{"role": "human", "content": prompt}],
+        config=config
+    )
+    
+    extraction_result = safe_json_parse(model_response, category)
+    if statistics := extract_statistics(content, url, title):
+        extraction_result["statistics"] = statistics
+        
+    return extraction_result
+
+async def _process_chunked_content(
+    content: str,
+    prompt: str,
+    category: str,
+    extraction_model: Any,
+    config: Optional[RunnableConfig],
+    url: str,
+    title: str
+) -> Dict[str, Any]:
+    """Process content in chunks when it exceeds size limit."""
+    info_highlight(f"Content too large ({len(content)} chars), chunking...")
+    chunks = chunk_text(content)
+    
+    all_statistics = []
+    chunk_results = []
+    
+    for chunk_idx, chunk in enumerate(chunks):
+        info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
+        chunk_prompt = prompt.format(content=chunk)
+        
+        chunk_response = await extraction_model(
+            messages=[{"role": "human", "content": chunk_prompt}],
+            config=config
+        )
+        
+        if chunk_result := safe_json_parse(chunk_response, category):
+            chunk_statistics = extract_statistics(chunk, url, title)
+            all_statistics.extend(chunk_statistics)
+            chunk_results.append(chunk_result)
+    
+    result = merge_chunk_results(chunk_results, category)
+    if all_statistics:
+        result["statistics"] = all_statistics
+        
+    return result
 
 def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract facts from extraction result based on category structure."""
@@ -493,3 +657,20 @@ def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> Lis
         facts.extend([{"type": fact_type, "data": item} for item in items])
     
     return facts
+
+@cache_result(ttl=3600)
+def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
+    """Safely parse JSON response with enhanced error handling and cleanup."""
+    # Return if already a dict
+    if isinstance(response, dict):
+        return response
+
+    # Handle non-string input
+    if not isinstance(response, str):
+        return get_default_extraction_result(category)
+
+    try:
+        return _check_cache(response, category)
+    except Exception as e:
+        error_highlight(f"Error parsing JSON: {str(e)}")
+        return get_default_extraction_result(category)

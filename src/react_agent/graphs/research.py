@@ -524,21 +524,23 @@ async def extract_category_information(
         sources.extend(source)
         all_statistics.extend(statistics)
     
-    # Update category state
+    # Update category state with quality scores from statistics module
+    thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
+    quality_score = calculate_category_quality_score(
+        category=category,
+        extracted_facts=extracted_facts,
+        sources=sources,
+        thresholds=thresholds
+    )
+    
     category_state.update({
         "extracted_facts": extracted_facts,
         "sources": sources,
         "statistics": all_statistics,
-        "quality_score": calculate_category_quality_score(
-            category=category,
-            extracted_facts=extracted_facts,
-            sources=sources,
-            thresholds=SEARCH_QUALITY_THRESHOLDS.get(category, {})
-        )
+        "quality_score": quality_score
     })
     
-    # Calculate derived scores
-    quality_score = category_state["quality_score"]
+    # Calculate derived scores based on quality_score
     category_state.update({
         "confidence_score": quality_score,
         "cross_validation_score": quality_score * 0.8,
@@ -548,7 +550,6 @@ async def extract_category_information(
     })
     
     # Determine completion status
-    thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
     min_facts = thresholds.get("min_facts", 3)
     min_sources = thresholds.get("min_sources", 2)
     
@@ -559,62 +560,6 @@ async def extract_category_information(
     category_state["status"] = "extracted" if category_state["complete"] else "extraction_incomplete"
     
     return {"categories": categories}
-
-# Helper function to calculate quality score for a category
-def calculate_category_quality_score(
-    category: str,
-    extracted_facts: List[Dict[str, Any]],
-    sources: List[Dict[str, Any]],
-    thresholds: Dict[str, Any]
-) -> float:
-    """Calculate quality score for a category based on extracted data."""
-    # Base score starts at 0.3
-    score = 0.3
-
-    # Add points for number of facts
-    min_facts = thresholds.get("min_facts", 3)
-    fact_ratio = min(1.0, len(extracted_facts) / (min_facts * 2))
-    score += fact_ratio * 0.2
-
-    # Add points for number of sources
-    min_sources = thresholds.get("min_sources", 2)
-    source_ratio = min(1.0, len(sources) / (min_sources * 1.5))
-    score += source_ratio * 0.2
-
-    # Add points for authoritative sources
-    auth_ratio = thresholds.get("authoritative_source_ratio", 0.5)
-    authoritative_sources = [
-        s for s in sources 
-        if s.get("quality_score", 0.0) > 0.7 or
-        any(domain in s.get("url", "") for domain in ['.edu', '.gov', '.org'])
-    ]
-    auth_source_ratio = len(authoritative_sources) / len(sources) if sources else 0
-    if auth_source_ratio >= auth_ratio:
-        score += 0.2
-    else:
-        score += (auth_source_ratio / auth_ratio) * 0.1
-
-    # Add points for recency
-    recency_threshold = thresholds.get("recency_threshold_days", 365)
-    recent_sources = 0
-    for source in sources:
-        date_str = source.get("published_date")
-        if not date_str:
-            continue
-
-        with contextlib.suppress(Exception):
-            from dateutil import parser
-            from datetime import datetime, timezone
-            date = parser.parse(date_str)
-            now = datetime.now(timezone.utc)
-            days_old = (now - date).days
-            if days_old <= recency_threshold:
-                recent_sources += 1
-    if sources:
-        recency_ratio = recent_sources / len(sources)
-        score += recency_ratio * 0.1
-
-    return min(1.0, score)
 
 async def execute_research_for_categories(
     state: ResearchState,

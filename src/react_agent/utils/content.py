@@ -1,14 +1,18 @@
+from collections import defaultdict
+import contextlib
+from typing import List, Dict, Any, Optional, Callable, Tuple, Union
+import json
+from urllib.parse import urlparse
+import re
+import urllib
+import logging
+from .logging import warning_highlight, get_logger
+
 """Content processing utilities for handling large documents and context limits.
 
 This module provides utilities for processing and managing content before sending it to LLMs,
 including chunking, preprocessing, and content validation.
 """
-
-import logging
-import re
-import urllib
-from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlparse
 
 from react_agent.utils.logging import (
     error_highlight,
@@ -74,8 +78,8 @@ def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = D
             break
             
         # Find the last period or newline before the chunk end
-        last_period = text.rfind('.', start, end)
-        last_newline = text.rfind('\n', start, end)
+        last_period = text.find('.', start, end)
+        last_newline = text.find('\n', start, end)
         split_point = max(last_period, last_newline)
         
         if split_point > start:
@@ -87,54 +91,107 @@ def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = D
     logger.info(f"Created {len(chunks)} chunks")
     return chunks
 
-def detect_content_type(url: str, content: str) -> str:
-    """Detect content type from URL and content."""
-    # Enhanced HTML detection with more markers
-    html_markers = ('<html', '<!doctype', '<head>', '<meta', '<title', '<body', '<div', '<p>', '<br', '<section')
-    if content and any(tag in content.lower() for tag in html_markers):
+def detect_html(content: str) -> Optional[str]:
+    """Detect if content is HTML."""
+    if not content:
+        return None
+    content_lower = content.strip().lower()
+    if content_lower.startswith('<!doctype html') or content_lower.startswith('<html'):
         return 'html'
+    if '<body' in content_lower and '</body>' in content_lower:
+        return 'html'
+    if '<div' in content_lower and '</div>' in content_lower:
+        return 'html'
+    return None
+
+def detect_json(content: str) -> Optional[str]:
+    """Detect if content is JSON."""
+    if not content:
+        return None
+    content = content.strip()
+    if (content.startswith('{') and content.endswith('}')) or (content.startswith('[') and content.endswith(']')):
+        with contextlib.suppress(json.JSONDecodeError):
+            json.loads(content)
+            return 'json'
+    return None
+
+def detect_from_url_extension(url: str) -> Optional[str]:
+    """Detect content type from URL file extension."""
+    if not url:
+        return None
         
-    # Expanded URL pattern detection for document paths
+    extensions = {
+        '.pdf': 'pdf', '.doc': 'doc', '.docx': 'doc', '.xls': 'excel', '.xlsx': 'excel',
+        '.ppt': 'presentation', '.pptx': 'presentation', '.txt': 'text', '.md': 'text',
+        '.rst': 'text', '.html': 'html', '.htm': 'html', '.json': 'json', '.xml': 'xml',
+        '.csv': 'data'
+    }
+    
+    try:
+        ext = f".{url.lower().split('.')[-1]}"
+        return extensions.get(ext)
+    except IndexError:
+        return None
+
+def detect_from_url_path(url: str) -> Optional[str]:
+    """Detect content type from URL path patterns."""
+    if not url:
+        return None
+        
     html_path_patterns = (
         '/wiki/', '/articles/', '/blog/', '/news/',
         '/docs/', '/help/', '/support/', '/pages/',
-        '/product/details', '/science/article'  # Added patterns for observed URLs
+        '/product/', '/service/', '/consumers/',
+        '/detail/', '/view/', '/content/'
     )
-    if any(path in url.lower() for path in html_path_patterns):
-        return 'html'
-    
-    # Check HTML markers first
-    if content and any(tag in content.lower() for tag in ('<html', '<!doctype', '<head>')):
-        return 'html'
+    return 'html' if any(pattern in url.lower() for pattern in html_path_patterns) else None
+
+def detect_from_content_heuristics(content: str) -> Optional[str]:
+    """Detect content type from content patterns."""
+    if not content or len(content) < 50:
+        return None
+
+    content = content.strip()
+    if content.startswith('<?xml') or (content.startswith('<') and '>' in content):
+        return 'xml'
+    if '{' in content and '}' in content and '"' in content and ':' in content:
+        return 'data'
+    return 'text' if '\n\n' in content and len(content) > 200 else None
+
+def detect_from_url_domain(url: str) -> Optional[str]:
+    """Detect content type from URL domain."""
+    if not url:
+        return None
         
-    # Then check URL patterns
-    url_lower = url.lower()
-    extensions = {
-        '.pdf': 'pdf',
-        '.doc': 'doc',
-        '.docx': 'doc',
-        '.xls': 'excel',
-        '.xlsx': 'excel',
-        '.ppt': 'presentation',
-        '.pptx': 'presentation',
-        '.txt': 'text',
-        '.md': 'text',
-        '.rst': 'text',
-        '.html': 'html',
-        '.htm': 'html',
-        '.json': 'data',
-        '.xml': 'data'
-    }
-    
-    for ext, content_type in extensions.items():
-        if ext in url_lower:
-            return content_type
-            
-    # Check for HTML-like paths
-    if any(path in url_lower for path in ('/wiki/', '/articles/', '/blog/', '/news/')):
+    common_web_domains = ('.gov', '.org', '.edu', '.com', '.net', '.io')
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc.lower()
+    if any(domain.endswith(d) for d in common_web_domains) and (parsed_url.path and '.' not in parsed_url.path.split('/')[-1]):
         return 'html'
-        
-    return 'unknown'
+    return None
+
+def detect_content_type(url: str, content: str) -> str:
+    """Detect content type from URL and content using a modular approach."""
+    detector_functions = [
+        (detect_html, content),
+        (detect_json, content),
+        (detect_from_url_extension, url),
+        (detect_from_url_path, url),
+        (detect_from_content_heuristics, content),
+        (detect_from_url_domain, url)
+    ]
+
+    for detector, arg in detector_functions:
+        if result := detector(arg):
+            return result
+
+    return fallback_detection(url, content)
+
+def fallback_detection(url: str, content: str) -> str:
+    """Fallback detection logic."""
+    if content and content.strip():
+        return 'text'
+    return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
 
 def preprocess_content(content: str, url: str) -> str:
     """Clean and preprocess content before sending to model."""
@@ -187,64 +244,72 @@ def should_skip_content(url: str) -> bool:
     """Check if content should be skipped based on URL patterns."""
     try:
         decoded_url = urllib.parse.unquote(url).lower()
-    except:
+    except Exception:
         decoded_url = url.lower()
-    
+
     # Enhanced PDF detection
     if any(p in decoded_url for p in ('.pdf', '%2Fpdf', '%3Fpdf')):
         info_highlight(f"Skipping PDF content: {url}")
         return True
-    
+
     # Add MIME-type pattern detection
     mime_patterns = [
         r'application/pdf',
         r'application/\w+?pdf',
         r'content-type:.*pdf'
     ]
-    if any(re.search(p, decoded_url) for p in mime_patterns):
+    if any(re.match(p, decoded_url) for p in mime_patterns):
         info_highlight(f"Skipping PDF MIME-type pattern: {url}")
         return True
-    
+
     if not url:
         return True
-        
+
     url_lower = url.lower()
-    
+
     # Check for problematic file types
     for pattern in PROBLEMATIC_PATTERNS:
         if re.search(pattern, url_lower):
             info_highlight(f"Skipping content with pattern {pattern}: {url}")
             return True
-            
+
     # Check for problematic sites
     domain = urlparse(url).netloc.lower()
     for site in PROBLEMATIC_SITES:
         if site in domain:
             info_highlight(f"Skipping content from problematic site {site}: {url}")
             return True
-            
+
     return False
 
-def merge_chunk_results(results: List[Dict[str, Any]], category: str) -> Dict[str, Any]:
-    """Merge results from multiple chunks into a single result.
-    
-    Args:
-        results: List of chunk results to merge
-        category: Research category being processed
-        
-    Returns:
-        Merged result dictionary
-    """
-    if not results:
-        return get_default_extraction_result(category)
+def dict_to_hashable(d):
+    """Convert a dictionary or list to a hashable representation for deduplication."""
+    if isinstance(d, dict):
+        return tuple(sorted((k, dict_to_hashable(v)) for k, v in d.items()))
+    elif isinstance(d, list):
+        return tuple(dict_to_hashable(x) for x in d)
+    else:
+        return d
 
-    logger.info(f"Merging {len(results)} chunk results for category {category}")
+def extend_with_deduplication(existing_list: List, new_items: List) -> None:
+    """Extend a list with new items, avoiding duplicates."""
+    existing_hashables = {dict_to_hashable(item) for item in existing_list}
 
-    # Initialize merged result
-    merged: Dict[str, Any] = get_default_extraction_result(category)
+    for item in new_items:
+        item_hashable = dict_to_hashable(item)
+        if item_hashable not in existing_hashables:
+            existing_list.append(item)
+            existing_hashables.add(item_hashable)
 
-    # Define category-specific merge mappings
-    merge_mappings = {
+def update_dict_if_empty(target_dict: Dict, source_dict: Dict) -> None:
+    """Update target dictionary with values from source dictionary if target values are empty."""
+    for key, value in source_dict.items():
+        if value and key in target_dict and not target_dict[key]:
+            target_dict[key] = value
+
+def get_category_merge_mappings() -> Dict[str, Dict[str, str]]:
+    """Return the merge mappings for different categories."""
+    return {
         "market_dynamics": {
             "extracted_facts": "extend",
             "market_metrics": "update"
@@ -275,30 +340,51 @@ def merge_chunk_results(results: List[Dict[str, Any]], category: str) -> Dict[st
         }
     }
 
-    # Merge results based on category mappings
+def merge_chunk_results(results: List[Dict[str, Any]], category: str) -> Dict[str, Any]:
+    """Merge results from multiple chunks into a single result.
+    
+    Args:
+        results: List of chunk results to merge
+        category: Research category being processed
+        
+    Returns:
+        Merged result dictionary
+    """
+    if not results:
+        return get_default_extraction_result(category)
+
+    logger.info(f"Merging {len(results)} chunk results for category {category}")
+
+    # Initialize merged result
+    merged = defaultdict(list, get_default_extraction_result(category))
+
+    # Get category-specific merge mappings
+    merge_mappings = get_category_merge_mappings().get(category, {"extracted_facts": "extend"})
+
+    # Process each result
     for result in results:
         if not isinstance(result, dict):
             warning_highlight(f"Invalid chunk result format: {type(result)}")
             continue
 
-        mappings = merge_mappings.get(category, {"extracted_facts": "extend"})
-
-        for field, operation in mappings.items():
+        # Apply merge operations based on field type
+        for field, operation in merge_mappings.items():
             if field not in result:
                 continue
 
             if operation == "extend":
-                merged[field].extend(result[field])
+                extend_with_deduplication(merged[field], result[field])
             elif operation == "update" and isinstance(result[field], dict):
-                for key, value in result[field].items():
-                    if value and not merged[field][key]:
-                        merged[field][key] = value
+                update_dict_if_empty(merged[field], result[field])
 
-    if relevance_scores := [r.get("relevance_score", 0.0) for r in results]:
+    if relevance_scores := [
+        r.get("relevance_score", 0.0) for r in results if isinstance(r, dict)
+    ]:
         merged["relevance_score"] = sum(relevance_scores) / len(relevance_scores)
 
     logger.info(f"Merged result contains {len(merged.get('extracted_facts', []))} facts")
     return merged
+
 
 def validate_content(content: str) -> bool:
     """Validate content before processing.

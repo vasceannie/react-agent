@@ -1,28 +1,28 @@
-from collections import defaultdict
-import contextlib
-from typing import List, Dict, Any, Optional, Callable, Tuple, Union
-import json
-from urllib.parse import urlparse
-import re
-import urllib
-import logging
-from .logging import warning_highlight, get_logger
+"""Content processing utilities for the research agent.
 
-"""Content processing utilities for handling large documents and context limits.
-
-This module provides utilities for processing and managing content before sending it to LLMs,
-including chunking, preprocessing, and content validation.
+This module provides utilities for processing and validating content,
+including chunking, preprocessing, and content type detection.
 """
 
-from react_agent.utils.logging import (
-    error_highlight,
-    get_logger,
-    info_highlight,
-    warning_highlight,
-)
+from typing import List, Dict, Any, Optional, Union, Tuple
+import re
+from urllib.parse import urlparse
+import logging
+from datetime import datetime, timezone
+import json
+
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+from react_agent.utils.extraction import safe_json_parse
+from react_agent.utils.defaults import ChunkConfig, get_default_extraction_result, get_category_merge_mapping
+from langgraph.graph import StateGraph
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import MemorySaver
 
 # Initialize logger
 logger = get_logger(__name__)
+
+# Initialize memory saver for caching
+memory_saver = MemorySaver()
 
 # Constants
 DEFAULT_CHUNK_SIZE: int = 40000
@@ -53,42 +53,92 @@ PROBLEMATIC_SITES: List[str] = [
     'academia.edu'
 ]
 
-def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_OVERLAP) -> List[str]:
-    """Split text into overlapping chunks of specified size.
+def chunk_text(
+    text: str,
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
+    use_large_chunks: bool = False,
+    min_chunk_size: int = 100  # Minimum chunk size to avoid too small chunks
+) -> List[str]:
+    """Split text into overlapping chunks with enhanced robustness and caching.
     
     Args:
-        text: Text to split into chunks
-        chunk_size: Size of each chunk in characters
-        overlap: Number of characters to overlap between chunks
+        text: Text to chunk
+        chunk_size: Size of each chunk (defaults to ChunkConfig values)
+        overlap: Overlap between chunks (defaults to ChunkConfig values)
+        use_large_chunks: Whether to use large chunk sizes
+        min_chunk_size: Minimum size for a chunk to avoid too small chunks
         
     Returns:
         List of text chunks
     """
-    if not text:
+    if not text or text.isspace():
         return []
-        
-    logger.info(f"Chunking text of length {len(text)}")
-    chunks: List[str] = []
-    start = 0
     
-    while start < len(text):
+    # Generate cache key
+    cache_key = f"chunk_text_{hash(f'{text}_{chunk_size}_{overlap}_{use_large_chunks}_{min_chunk_size}')}"
+    
+    # Check cache with TTL
+    if cached_state := memory_saver.get(RunnableConfig(configurable={"checkpoint_id": cache_key})):
+        cached_result = cached_state.get("result")
+        if isinstance(cached_result, dict) and cached_result:
+            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                return cached_result.get("chunks", [])
+
+    # Use appropriate chunk size and overlap based on configuration
+    if use_large_chunks:
+        chunk_size = chunk_size or ChunkConfig.LARGE_CHUNK_SIZE
+        overlap = overlap or ChunkConfig.LARGE_OVERLAP
+    else:
+        chunk_size = chunk_size or ChunkConfig.DEFAULT_CHUNK_SIZE
+        overlap = overlap or ChunkConfig.DEFAULT_OVERLAP
+        
+    # Ensure chunk size is positive and overlap is less than chunk size
+    chunk_size = max(min_chunk_size, chunk_size)
+    overlap = min(chunk_size - 1, max(0, overlap))
+    
+    # Pre-calculate text length and create list with estimated size
+    text_length = len(text)
+    estimated_chunks = (text_length // (chunk_size - overlap)) + 1
+    chunks: List[str] = []
+    
+    start = 0
+    while start < text_length:
         end = start + chunk_size
-        if end >= len(text):
-            chunks.append(text[start:])
+        
+        if end >= text_length:
+            # If the remaining text is too small, append it to the last chunk
+            if chunks and len(text[start:]) < min_chunk_size:
+                chunks[-1] = chunks[-1] + text[start:]
+            else:
+                chunks.append(text[start:])
             break
             
-        # Find the last period or newline before the chunk end
-        last_period = text.find('.', start, end)
-        last_newline = text.find('\n', start, end)
-        split_point = max(last_period, last_newline)
-        
-        if split_point > start:
-            end = split_point + 1
+        # Find the last space before the chunk end
+        last_space = text.rfind(' ', start, end)
+        if last_space > start:
+            end = last_space
             
-        chunks.append(text[start:end])
+        # Ensure we don't create chunks smaller than min_chunk_size
+        if end - start < min_chunk_size and chunks:
+            # Append to previous chunk instead of creating a new one
+            chunks[-1] = chunks[-1] + text[start:end]
+        else:
+            chunks.append(text[start:end])
+            
         start = end - overlap
-        
-    logger.info(f"Created {len(chunks)} chunks")
+    
+    # Save to cache with TTL
+    memory_saver.save(
+        RunnableConfig(configurable={"checkpoint_id": cache_key}),
+        {
+            "result": {"chunks": chunks},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        },
+        ttl=3600  # 1 hour TTL
+    )
+    
     return chunks
 
 def detect_html(content: str) -> Optional[str]:
@@ -194,38 +244,67 @@ def fallback_detection(url: str, content: str) -> str:
     return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
 
 def preprocess_content(content: str, url: str) -> str:
-    """Clean and preprocess content before sending to model."""
-    content_type = detect_content_type(url, content)
+    """Clean and preprocess content before sending to model with improved performance.
     
-    # Modified to attempt extraction for document-like URLs even if type detection fails
-    if content_type != 'html':
-        warning_highlight(f"Non-HTML content detected ({content_type}): {url} - attempting extraction")
-        # Don't return empty - proceed with basic cleaning
+    Args:
+        content: Content to preprocess
+        url: URL of the content
         
-    # Keep existing cleaning logic but remove early return
-    content = re.sub(r'Copyright © \d{4}.*?reserved\.', '', content, flags=re.IGNORECASE | re.DOTALL)
-    content = re.sub(r'Terms of Service.*?Privacy Policy', '', content, flags=re.IGNORECASE | re.DOTALL)
-    
-    # Add PDF content detection fallback
-    if '%PDF' in content[:4]:
-        warning_highlight(f"PDF content detected: {url}")
-        return ""  # Actual PDF handling would require text extraction
+    Returns:
+        Preprocessed content string
+    """
+    if not content:
+        return ""
 
-    # Keep existing processing AFTER PDF check
-    content = re.sub(r'Please enable JavaScript.*?continue', '', content, flags=re.IGNORECASE | re.DOTALL)
-    content = re.sub(r'\s+', ' ', content)
-    content = content.strip()
+    logger.info(f"Preprocessing content from {url}")
+    logger.debug(f"Initial content length: {len(content)}")
+
+    # Generate cache key
+    cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
     
-    # Site-specific cleaning
+    # Check cache with TTL
+    if cached_state := load_checkpoint(cache_key):
+        cached_result = cached_state.get("result")
+        if isinstance(cached_result, dict) and cached_result:
+            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                return cached_result.get("content", "")
+
+    # Compile regex patterns once
+    boilerplate_patterns = [
+        (re.compile(r'Copyright © \d{4}.*?reserved\.', re.IGNORECASE | re.DOTALL), ''),
+        (re.compile(r'Terms of Service.*?Privacy Policy', re.IGNORECASE | re.DOTALL), ''),
+        (re.compile(r'Please enable JavaScript.*?continue', re.IGNORECASE | re.DOTALL), '')
+    ]
+    
+    # Apply boilerplate removal patterns
+    for pattern, replacement in boilerplate_patterns:
+        content = pattern.sub(replacement, content)
+
+    # Remove redundant whitespace efficiently
+    content = ' '.join(content.split())
+
+    # Site-specific cleaning with compiled pattern
     domain = urlparse(url).netloc.lower()
     if 'iaeme.com' in domain:
-        content = re.sub(r'International Journal.*?Indexing', '', content, flags=re.IGNORECASE | re.DOTALL)
+        iaeme_pattern = re.compile(r'International Journal.*?Indexing', re.IGNORECASE | re.DOTALL)
+        content = iaeme_pattern.sub('', content)
 
     # Truncate if too long
     if len(content) > MAX_CONTENT_LENGTH:
         warning_highlight(f"Content exceeds {MAX_CONTENT_LENGTH} characters, truncating")
         content = f"{content[:MAX_CONTENT_LENGTH]}..."
 
+    # Save to cache with TTL
+    create_checkpoint(
+        cache_key,
+        {
+            "result": {"content": content},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        },
+        ttl=3600  # 1 hour TTL
+    )
+    
     logger.debug(f"Final content length: {len(content)}")
     return content  # Correct final return
 
@@ -282,63 +361,34 @@ def should_skip_content(url: str) -> bool:
 
     return False
 
-def dict_to_hashable(d):
-    """Convert a dictionary or list to a hashable representation for deduplication."""
-    if isinstance(d, dict):
-        return tuple(sorted((k, dict_to_hashable(v)) for k, v in d.items()))
-    elif isinstance(d, list):
-        return tuple(dict_to_hashable(x) for x in d)
-    else:
-        return d
+def merge_chunk_results(
+    results: List[Dict[str, Any]], 
+    category: str,
+    merge_strategy: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Merge results from multiple chunks into a single result with enhanced merging strategies.
+    
+    Args:
+        results: List of chunk results to merge
+        category: Research category being processed
+        merge_strategy: Optional custom merge strategy for specific fields
+        
+    Returns:
+        Merged result dictionary
+    """
+    if not results:
+        return get_default_extraction_result(category)
 
-def extend_with_deduplication(existing_list: List, new_items: List) -> None:
-    """Extend a list with new items, avoiding duplicates."""
-    existing_hashables = {dict_to_hashable(item) for item in existing_list}
+    logger.info(f"Merging {len(results)} chunk results for category {category}")
 
-    for item in new_items:
-        item_hashable = dict_to_hashable(item)
-        if item_hashable not in existing_hashables:
-            existing_list.append(item)
-            existing_hashables.add(item_hashable)
+    # Initialize merged result
+    merged: Dict[str, Any] = get_default_extraction_result(category)
 
-def update_dict_if_empty(target_dict: Dict, source_dict: Dict) -> None:
-    """Update target dictionary with values from source dictionary if target values are empty."""
-    for key, value in source_dict.items():
-        if value and key in target_dict and not target_dict[key]:
-            target_dict[key] = value
+    # Get merge mappings for the category or use provided strategy
+    merge_mappings = merge_strategy or get_category_merge_mapping(category)
 
-def get_category_merge_mappings() -> Dict[str, Dict[str, str]]:
-    """Return the merge mappings for different categories."""
-    return {
-        "market_dynamics": {
-            "extracted_facts": "extend",
-            "market_metrics": "update"
-        },
-        "provider_landscape": {
-            "extracted_vendors": "extend",
-            "vendor_relationships": "extend"
-        },
-        "technical_requirements": {
-            "extracted_requirements": "extend",
-            "standards": "extend"
-        },
-        "regulatory_landscape": {
-            "extracted_regulations": "extend",
-            "compliance_requirements": "extend"
-        },
-        "cost_considerations": {
-            "extracted_costs": "extend",
-            "pricing_models": "extend"
-        },
-        "best_practices": {
-            "extracted_practices": "extend",
-            "methodologies": "extend"
-        },
-        "implementation_factors": {
-            "extracted_factors": "extend",
-            "challenges": "extend"
-        }
-    }
+    # Track unique items to avoid duplicates
+    seen_items = set()
 
 def merge_chunk_results(results: List[Dict[str, Any]], category: str) -> Dict[str, Any]:
     """Merge results from multiple chunks into a single result.
@@ -363,26 +413,46 @@ def merge_chunk_results(results: List[Dict[str, Any]], category: str) -> Dict[st
 
     # Process each result
     for result in results:
-        if not isinstance(result, dict):
-            warning_highlight(f"Invalid chunk result format: {type(result)}")
-            continue
-
-        # Apply merge operations based on field type
-        for field, operation in merge_mappings.items():
-            if field not in result:
+        # Handle the new response format with content field
+        if "content" in result:
+            try:
+                parsed_content = safe_json_parse(result["content"], category)
+                result = parsed_content
+            except Exception as e:
+                error_highlight(f"Error parsing content in merge_chunk_results: {str(e)}")
                 continue
 
-            if operation == "extend":
-                extend_with_deduplication(merged[field], result[field])
-            elif operation == "update" and isinstance(result[field], dict):
-                update_dict_if_empty(merged[field], result[field])
+        for field, operation in merge_mappings.items():
+            if field in result:
+                if operation == "extend":
+                    if field not in merged:
+                        merged[field] = []
+                    # Add only unique items
+                    for item in result[field]:
+                        item_key = json.dumps(item, sort_keys=True)
+                        if item_key not in seen_items:
+                            merged[field].append(item)
+                            seen_items.add(item_key)
+                elif operation == "update":
+                    if field not in merged:
+                        merged[field] = {}
+                    merged[field].update(result[field])
+                elif operation == "max":
+                    # Take the maximum value for numeric fields
+                    if field not in merged or result[field] > merged[field]:
+                        merged[field] = result[field]
+                elif operation == "min":
+                    # Take the minimum value for numeric fields
+                    if field not in merged or result[field] < merged[field]:
+                        merged[field] = result[field]
+                elif operation == "avg":
+                    # Calculate average for numeric fields
+                    if field not in merged:
+                        merged[field] = []
+                    merged[field].append(result[field])
+                    if len(merged[field]) == len(results):
+                        merged[field] = sum(merged[field]) / len(merged[field])
 
-    if relevance_scores := [
-        r.get("relevance_score", 0.0) for r in results if isinstance(r, dict)
-    ]:
-        merged["relevance_score"] = sum(relevance_scores) / len(relevance_scores)
-
-    logger.info(f"Merged result contains {len(merged.get('extracted_facts', []))} facts")
     return merged
 
 
@@ -405,56 +475,37 @@ def validate_content(content: str) -> bool:
         
     return True
 
-def get_default_extraction_result(category: str) -> Dict[str, Any]:
-    """Get a default empty extraction result when parsing fails."""
-    # Add schema validation to ensure consistent structure
-    defaults = {
-        "market_dynamics": {
-            "extracted_facts": [],
-            "market_metrics": {
-                "market_size": None,
-                "growth_rate": None,
-                "forecast_period": None
-            },
-            "relevance_score": 0.0
-        },
-        "provider_landscape": {
-            "extracted_vendors": [],
-            "vendor_relationships": [],
-            "relevance_score": 0.0
-        },
-        "technical_requirements": {
-            "extracted_requirements": [],
-            "standards": [],
-            "relevance_score": 0.0
-        },
-        "regulatory_landscape": {
-            "extracted_regulations": [],
-            "compliance_requirements": [],
-            "relevance_score": 0.0
-        },
-        "cost_considerations": {
-            "extracted_costs": [],
-            "pricing_models": [],
-            "relevance_score": 0.0
-        },
-        "best_practices": {
-            "extracted_practices": [],
-            "methodologies": [],
-            "relevance_score": 0.0
-        },
-        "implementation_factors": {
-            "extracted_factors": [],
-            "challenges": [],
-            "relevance_score": 0.0,
-            "source_validation": {
-                "is_pdf": False,
-                "is_trusted_domain": False
-            }
-        }
-    }
+def detect_content_type(url: str, content: str) -> str:
+    """Detect content type from URL and content.
     
-    return defaults.get(category, {"extracted_facts": [], "relevance_score": 0.0})
+    Args:
+        url: URL of the content
+        content: Content to analyze
+        
+    Returns:
+        Detected content type
+    """
+    if not url:
+        return "unknown"
+        
+    url_lower = url.lower()
+    
+    if url_lower.endswith('.pdf'):
+        return 'pdf'
+    elif url_lower.endswith(('.doc', '.docx')):
+        return 'doc'
+    elif url_lower.endswith(('.xls', '.xlsx')):
+        return 'excel'
+    elif url_lower.endswith(('.ppt', '.pptx')):
+        return 'presentation'
+    elif url_lower.endswith(('.txt', '.md', '.rst')):
+        return 'text'
+    elif url_lower.endswith(('.html', '.htm')):
+        return 'html'
+    elif url_lower.endswith(('.json', '.xml')):
+        return 'data'
+    else:
+        return 'unknown'
 
 __all__ = [
     "chunk_text",
@@ -463,6 +514,5 @@ __all__ = [
     "should_skip_content",
     "merge_chunk_results",
     "validate_content",
-    "detect_content_type",
-    "get_default_extraction_result"
-]
+    "detect_content_type"
+] 

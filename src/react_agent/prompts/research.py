@@ -4,7 +4,15 @@ This module provides specialized prompts for different research categories
 to improve extraction quality and relevance.
 """
 
-from typing import Final, Dict, List, Any
+from typing import Final, Dict, List, Any, Optional, Union
+import json
+from datetime import datetime
+
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight
+from react_agent.utils.defaults import get_default_extraction_result
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # Base templates for common validation requirements
 STRUCTURED_OUTPUT_VALIDATION: Final[str] = """CRITICAL: All responses MUST:
@@ -237,6 +245,11 @@ CRITICAL REQUIREMENTS:
 13. Do not include any markdown code block markers (```)
 14. Do not include any explanatory text before or after the JSON
 15. The response must start with '{{' and end with '}}' only
+16. Do not include any text that would make the JSON invalid
+17. Do not include any text that would make the JSON parsing fail
+18. Do not include any text that would make the JSON validation fail
+19. Do not include any text that would make the JSON schema validation fail
+20. Do not include any text that would make the JSON structure invalid
 
 EXAMPLE OF VALID RESPONSE:
 {{
@@ -258,7 +271,9 @@ EXAMPLE OF VALID RESPONSE:
     }}
   ],
   "relevance_score": 0.8
-}}""",
+}}
+
+CRITICAL: Your response must be ONLY the JSON object above, with no additional text, comments, or formatting. The response must start with '{{' and end with '}}' only.""",
 
     "cost_considerations": """Extract factual information about COSTS & PRICING from this content about {query}.
 
@@ -769,53 +784,6 @@ RESPONSE FORMAT:
     "specialized_areas": ["Area 1", "Area 2"]
 }"""
 
-# Add a function to provide default empty responses
-def get_default_extraction_result(category: str) -> Dict[str, Any]:
-    """Get a default empty extraction result when parsing fails."""
-    defaults = {
-        "market_dynamics": {
-            "extracted_facts": [],
-            "market_metrics": {
-                "market_size": None,
-                "growth_rate": None,
-                "forecast_period": None
-            },
-            "relevance_score": 0.0
-        },
-        "provider_landscape": {
-            "extracted_vendors": [],
-            "vendor_relationships": [],
-            "relevance_score": 0.0
-        },
-        "technical_requirements": {
-            "extracted_requirements": [],
-            "standards": [],
-            "relevance_score": 0.0
-        },
-        "regulatory_landscape": {
-            "extracted_regulations": [],
-            "compliance_requirements": [],
-            "relevance_score": 0.0
-        },
-        "cost_considerations": {
-            "extracted_costs": [],
-            "pricing_models": [],
-            "relevance_score": 0.0
-        },
-        "best_practices": {
-            "extracted_practices": [],
-            "methodologies": [],
-            "relevance_score": 0.0
-        },
-        "implementation_factors": {
-            "extracted_factors": [],
-            "challenges": [],
-            "relevance_score": 0.0
-        }
-    }
-    
-    return defaults.get(category, {"extracted_facts": [], "relevance_score": 0.0})
-
 # Export all prompts and utilities
 __all__ = [
     "STRUCTURED_OUTPUT_VALIDATION",
@@ -827,7 +795,6 @@ __all__ = [
     "CLARIFICATION_PROMPT",
     "SEARCH_QUALITY_THRESHOLDS",
     "get_extraction_prompt",
-    "get_default_extraction_result",
     "ADDITIONAL_TOPICS_PROMPT",
     "RESEARCH_BASE_PROMPT",
     "RESEARCH_AGENT_PROMPT",

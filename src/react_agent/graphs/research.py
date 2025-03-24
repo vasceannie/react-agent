@@ -19,6 +19,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.constants import START
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.checkpoint import create_checkpoint, load_checkpoint
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
 from langchain_core.documents import Document
@@ -68,6 +69,9 @@ logger = get_logger(__name__)
 
 # Define SearchType as a Literal type
 SearchType = Literal['general', 'authoritative', 'recent', 'comprehensive', 'technical']
+
+# Add at module level after imports
+from typing import Dict, List, Any, Optional, Tuple, cast
 
 class ResearchCategory(TypedDict):
     """State for a specific research category."""
@@ -441,6 +445,12 @@ async def _process_search_result(
     url = result.get("url", "")
     if not url or should_skip_content(url):
         return [], [], []
+    
+    # Check checkpoint first
+    cache_key = f"search_result_{url}_{category}"
+    if cached_state := load_checkpoint(cache_key):
+        info_highlight(f"Using cached result for {url} in {category}")
+        return cached_state.get("facts", []), cached_state.get("sources", []), cached_state.get("statistics", [])
         
     content = result.get("snippet", "")
     if not validate_content(content):
@@ -483,7 +493,21 @@ async def _process_search_result(
             "content_type": content_type
         }
         
-        return facts, [source], statistics
+        result_tuple = (facts, [source], statistics)
+        
+        # Save to checkpoint with TTL
+        create_checkpoint(
+            cache_key,
+            {
+                "facts": facts,
+                "sources": [source],
+                "statistics": statistics,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            ttl=3600  # 1 hour TTL
+        )
+        
+        return result_tuple
         
     except Exception as e:
         warning_highlight(f"Error extracting from {url}: {str(e)}")
@@ -511,15 +535,22 @@ async def extract_category_information(
     
     category_state["status"] = "extracting"
     
-    # Process all search results
+    # Process all search results in parallel
+    tasks = [
+        asyncio.create_task(_process_search_result(
+            result, category, state["original_query"], config
+        ))
+        for result in search_results
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    
+    # Aggregate results
     extracted_facts = []
     sources = []
     all_statistics = []
     
-    for result in search_results:
-        facts, source, statistics = await _process_search_result(
-            result, category, state["original_query"], config
-        )
+    for facts, source, statistics in results:
         extracted_facts.extend(facts)
         sources.extend(source)
         all_statistics.extend(statistics)
@@ -565,28 +596,68 @@ async def execute_research_for_categories(
     state: ResearchState,
     config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
-    """Execute research for all categories in parallel."""
+    """Execute research for all categories in parallel with improved caching."""
     log_step("Executing research for all categories", 5, 10)
     
     categories = state["categories"]
     research_tasks = []
     
+    # Track completed categories to avoid reprocessing
+    completed_categories = set()
+    
     for category, category_state in categories.items():
         if category_state["complete"]:
             info_highlight(f"Category {category} already complete, skipping")
+            completed_categories.add(category)
             continue
             
+        # Check checkpoint for this category
+        cache_key = f"category_{state['original_query']}_{category}"
+        if cached_state := load_checkpoint(cache_key):
+            info_highlight(f"Using cached results for category: {category}")
+            category_state["search_results"] = cached_state.get("search_results", [])
+            category_state["extracted_facts"] = cached_state.get("extracted_facts", [])
+            category_state["sources"] = cached_state.get("sources", [])
+            category_state["complete"] = True
+            completed_categories.add(category)
+            continue
+        
         # Execute search followed by extraction
         info_highlight(f"Adding research task for {category}")
         
         # Create async task for this category
-        async def process_category(cat: str) -> None:
-            search_result = await execute_category_search(state, cat, config)
-            # Only extract if search was successful
-            if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
-                await extract_category_information(state, cat, config)
+        async def process_category(cat: str, cat_state: Dict[str, Any]) -> None:
+            try:
+                # Execute search
+                search_result = await execute_category_search(state, cat, config)
+                
+                # Only extract if search was successful
+                if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
+                    # Execute extraction
+                    extraction_result = await extract_category_information(state, cat, config)
+                    
+                    # Cache the results if successful
+                    if extraction_result and cat in extraction_result.get("categories", {}):
+                        cat_state["search_results"] = extraction_result["categories"][cat]["search_results"]
+                        cat_state["extracted_facts"] = extraction_result["categories"][cat]["extracted_facts"]
+                        cat_state["sources"] = extraction_result["categories"][cat]["sources"]
+                        
+                        # Save to checkpoint with TTL
+                        create_checkpoint(
+                            f"category_{state['original_query']}_{cat}",
+                            {
+                                "search_results": cat_state["search_results"],
+                                "extracted_facts": cat_state["extracted_facts"],
+                                "sources": cat_state["sources"],
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            },
+                            ttl=86400  # 24 hour TTL
+                        )
+            except Exception as e:
+                error_highlight(f"Error processing category {cat}: {str(e)}")
+                cat_state["status"] = "failed"
         
-        task = asyncio.create_task(process_category(category))
+        task = asyncio.create_task(process_category(category, cast(Dict[str, Any], category_state)))
         research_tasks.append(task)
     
     # Wait for all research tasks to complete

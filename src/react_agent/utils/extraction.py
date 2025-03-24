@@ -4,10 +4,12 @@ This module improves the extraction of facts and statistics from search results,
 with a particular emphasis on numerical data, trends, and statistical information.
 """
 
+
+import contextlib
 from typing import Dict, List, Any, Optional, Union, Tuple
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from langchain_core.documents import Document
@@ -16,9 +18,15 @@ from langchain_core.runnables import RunnableConfig
 from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.validations import is_valid_url
 from react_agent.utils.content import chunk_text, preprocess_content, merge_chunk_results
+from react_agent.utils.defaults import get_default_extraction_result
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 # Initialize logger
 logger = get_logger(__name__)
+
+# Initialize memory saver for caching
+memory_saver = MemorySaver()
 
 # Regular expressions for identifying statistical content
 STAT_PATTERNS = [
@@ -186,6 +194,130 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
 
     return fact
 
+def find_json_object(text: str) -> Optional[str]:
+    """Find a JSON object in text using balanced brace matching.
+    
+    This is more robust than simple regex for finding JSON objects as it:
+    1. Handles nested braces correctly
+    2. Supports both objects and arrays as root elements
+    3. Finds the longest valid JSON-like structure
+    
+    Args:
+        text: Text that may contain a JSON object
+        
+    Returns:
+        Extracted JSON-like text or None if not found
+    """
+    # Look for both object and array patterns
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        # Find potential starting positions
+        start_positions = [pos for pos, char in enumerate(text) if char == start_char]
+        
+        for start_pos in start_positions:
+            # Track nesting level
+            level = 0
+            # Track position
+            pos = start_pos
+            
+            # Scan through text tracking brace/bracket balance
+            while pos < len(text):
+                char = text[pos]
+                if char == start_char:
+                    level += 1
+                elif char == end_char:
+                    level -= 1
+                    # If we've found a balanced structure, extract it
+                    if level == 0:
+                        return text[start_pos:pos+1]
+                pos += 1
+    
+    # No balanced JSON-like structure found
+    return None
+
+def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
+    """Safely parse JSON response with enhanced error handling and cleanup."""
+    try:
+        # If already a dict, return it
+        if isinstance(response, dict):
+            return response
+            
+        # Clean up the response string
+        if isinstance(response, str):
+            # Remove any markdown code blocks
+            response = re.sub(r'```(?:json)?\s*|\s*```', '', response)
+            
+            # Check checkpoint with TTL
+            cache_key = f"json_parse_{hash(response)}"
+            if cached_state := memory_saver.get(RunnableConfig(configurable={"thread_id": cache_key})):
+                cached_result = cached_state.get("result")
+                if isinstance(cached_result, dict) and cached_result:
+                    timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+                    if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                        return cached_result
+            
+            # Remove any leading/trailing whitespace
+            response = response.strip()
+            
+            # Handle empty or invalid responses
+            if not response or response in ['{}', '[]', 'null']:
+                return get_default_extraction_result(category)
+                
+            # Handle single-quoted strings
+            response = response.replace("'", '"')
+            
+            # Handle trailing commas
+            response = re.sub(r',(\s*[}\]])', r'\1', response)
+            
+            # Handle missing braces
+            if not response.startswith('{'):
+                response = '{' + response
+            if not response.endswith('}'):
+                response = response + '}'
+                
+            # Handle quoted keys without values
+            response = re.sub(r'"(\w+)":\s*"', r'"\1": []', response)
+            
+            # Find JSON object in text
+            json_text = find_json_object(response)
+            if not json_text:
+                warning_highlight("No valid JSON object found in response")
+                return get_default_extraction_result(category)
+                
+            # Parse JSON
+            try:
+                parsed = json.loads(json_text)
+            except json.JSONDecodeError as e:
+                warning_highlight(f"JSON decode error: {str(e)}")
+                return get_default_extraction_result(category)
+                
+            # Validate and clean up the parsed structure
+            result = get_default_extraction_result(category)
+            
+            # Copy valid fields from parsed result
+            for key, value in parsed.items():
+                if key in result:
+                    if isinstance(value, list) and isinstance(result[key], list):
+                        result[key] = value
+                    elif isinstance(value, dict) and isinstance(result[key], dict):
+                        result[key].update(value)
+                    elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
+                        result[key] = float(value)
+                        
+            # Save to checkpoint with TTL
+            memory_saver.save(RunnableConfig(configurable={
+                "thread_id": cache_key,
+                "data": {
+                    "result": result,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }))
+            
+            return result
+            
+    except Exception as e:
+        error_highlight(f"Error parsing JSON: {str(e)}")
+        return get_default_extraction_result(category)
+
 async def extract_category_information(
     content: str,
     url: str,
@@ -245,12 +377,12 @@ async def extract_category_information(
                 )
 
                 # Extract from this chunk
-                chunk_result = await extraction_model(
+                chunk_response = await extraction_model(
                     messages=[{"role": "human", "content": chunk_prompt}],
                     config=config
                 )
 
-                if chunk_result and isinstance(chunk_result, dict):
+                if chunk_result := safe_json_parse(chunk_response, category):
                     # Extract statistics from this chunk directly
                     chunk_statistics = extract_statistics(chunk)
                     all_statistics.extend(chunk_statistics)
@@ -266,10 +398,32 @@ async def extract_category_information(
                 extraction_result["statistics"] = all_statistics
         else:
             # Process single chunk
-            extraction_result = await extraction_model(
+            model_response = await extraction_model(
                 messages=[{"role": "human", "content": extraction_prompt}],
                 config=config
             )
+
+            # Handle model response
+            if isinstance(model_response, str):
+                # Clean up the response
+                model_response = model_response.strip()
+                
+                # If it starts with a quoted key, wrap it in braces
+                if model_response.startswith('"') or model_response.startswith('\n  "'):
+                    # Extract the key name
+                    match = re.search(r'"(extracted_[^"]+)"', model_response)
+                    if match:
+                        key = match.group(1)
+                        model_response = f'{{"{key}": []}}'
+                    else:
+                        model_response = f'{{"extracted_facts": []}}'
+                
+                # If it's an error message, use default
+                if model_response == "' and ending with '" or model_response == '" and ending with "':
+                    model_response = '{"extracted_facts": []}'
+
+            # Safely parse the model response
+            extraction_result = safe_json_parse(model_response, category)
 
             if statistics := extract_statistics(content):
                 extraction_result["statistics"] = statistics

@@ -5,7 +5,7 @@ with improved error handling, result validation, and search strategies.
 """
 
 
-from typing import Dict, List, Optional, Any, Union, cast
+from typing import Dict, List, Optional, Any, Union, cast, Tuple, Literal
 import json
 import time
 import aiohttp
@@ -13,18 +13,25 @@ import asyncio
 import contextlib
 from urllib.parse import urljoin, quote, urlparse
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 import re
+import os
 
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg
-from typing_extensions import Annotated, Literal
+from typing_extensions import Annotated
+from pydantic import BaseModel, Field
+from langchain.tools import BaseTool
+from langchain_core.tools import ToolException
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 from react_agent.configuration import Configuration
 from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.validations import is_valid_url
 from react_agent.prompts.query import optimize_query, detect_vertical, expand_acronyms
+from react_agent.utils.extraction import safe_json_parse
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -32,155 +39,50 @@ logger = get_logger(__name__)
 # Define search types for specialized search strategies
 SearchType = Literal["general", "authoritative", "recent", "comprehensive", "technical"]
 
-class RetryConfig:
-    """Configuration for retry behavior."""
-    def __init__(
-        self,
-        max_retries: int = 3,
-        base_delay: float = 1.0,
-        max_delay: float = 30.0,
-        jitter: bool = True,
-    ):
-        self.max_retries = max_retries
-        self.base_delay = base_delay
-        self.max_delay = max_delay
-        self.jitter = jitter
+# Initialize memory saver for caching
+memory_saver = MemorySaver()
 
+# Add at module level after imports
+_query_cache: Dict[str, Tuple[List[Document], datetime]] = {}
+
+class RetryConfig(BaseModel):
+    """Configuration for retry behavior."""
+    max_retries: int = Field(default=3, description="Maximum number of retries")
+    base_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
+    max_delay: float = Field(default=10.0, description="Maximum delay between retries in seconds")
+    
     def get_delay(self, attempt: int) -> float:
-        """Calculate delay with exponential backoff and optional jitter."""
+        """Calculate delay with exponential backoff."""
         delay = min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
-        if self.jitter:
-            delay = delay * (0.5 + random.random())
         return delay
 
-class SearchParams:
+class SearchParams(BaseModel):
     """Parameters for search operations."""
-    def __init__(
-        self,
-        query: str,
-        search_type: SearchType = "general",
-        max_results: int = 10,
-        min_quality_score: float = 0.5,
-        recency_days: Optional[int] = None,
-        domains: Optional[List[str]] = None,
-        exclude_domains: Optional[List[str]] = None,
-        category: Optional[str] = None,
-    ):
-        self.query = query
-        self.search_type = search_type
-        self.max_results = max_results
-        self.min_quality_score = min_quality_score
-        self.recency_days = recency_days
-        self.domains = domains or []
-        self.exclude_domains = exclude_domains or []
-        self.category = category
-
+    query: str = Field(..., description="Search query")
+    search_type: SearchType = Field(default="general", description="Type of search to perform")
+    max_results: Optional[int] = Field(default=None, description="Maximum number of results to return")
+    min_quality_score: Optional[float] = Field(default=0.5, description="Minimum quality score for results")
+    recency_days: Optional[int] = Field(default=None, description="Maximum age of results in days")
+    domains: Optional[List[str]] = Field(default=None, description="List of domains to search")
+    category: Optional[str] = Field(default=None, description="Category to search in")
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API request."""
-        # Clean and encode the query
-        cleaned_query = self.query.replace('\n', ' ').replace('\r', ' ').strip()
-        
-        # Remove any "Additional context" or similar prefixes
-        cleaned_query = cleaned_query.split("Additional context:")[0].strip()
-        
-        # Break down long queries into keyword-focused search
-        if len(cleaned_query.split()) > 10:
-            # Extract key terms using basic keyword extraction
-            # We're looking for nouns and specific terms, avoiding basic verbs and help phrases
-            skip_words = ["help", "me", "research", "find", "information", "about", "on", "for", 
-                         "the", "and", "or", "in", "to", "with", "by", "is", "are", "was", "were"]
-            
-            # Extract meaningful terms for search
-            terms = [word for word in cleaned_query.split() 
-                    if word.lower() not in skip_words and len(word) > 3]
-            
-            # If we found meaningful terms, use those; otherwise fall back to truncated original
-            if len(terms) >= 3:
-                cleaned_query = " ".join(terms[:7])  # Use up to 7 meaningful keywords
-            else:
-                # Just take the first few meaningful words if we couldn't extract good keywords
-                words = cleaned_query.split()
-                cleaned_query = " ".join(words[:5])
-        
-        # Fix common typos
-        cleaned_query = cleaned_query.replace("resaerch", "research")
-        
-        # Remove duplicate terms and phrases
-        # Remove duplicate phrases (e.g., "maintenance repair operations" repeated)
-        cleaned_query = re.sub(r'(\b\w+\s+\w+\s+\w+\b)(?:\s+\1)+', r'\1', cleaned_query)
-        
-        # Remove duplicate single words
-        words = cleaned_query.split()
-        cleaned_query = ' '.join(dict.fromkeys(words))
-        
-        # Remove redundant parentheses and their contents
-        cleaned_query = re.sub(r'\([^)]*\)', '', cleaned_query)
-        
-        # Optimize the query using query.py functions
-        if self.category:
-            # Detect vertical from the query
-            vertical = detect_vertical(cleaned_query)
-            # Expand acronyms
-            expanded_query = expand_acronyms(cleaned_query)
-            # Optimize query for the category
-            optimized_query = optimize_query(
-                original_query=expanded_query,
-                category=self.category,
-                vertical=vertical,
-                include_all_keywords=self.search_type == "comprehensive"
-            )
-        else:
-            # If no category, just expand acronyms
-            optimized_query = expand_acronyms(cleaned_query)
-        
-        # Limit query length to avoid issues
-        optimized_query = optimized_query[:100] if len(optimized_query) > 100 else optimized_query
-        
-        # Clean up any remaining special characters and extra spaces
-        optimized_query = re.sub(r'[^\w\s-]', ' ', optimized_query)
-        optimized_query = re.sub(r'\s+', ' ', optimized_query).strip()
-        
-        # Remove any remaining duplicate words
-        words = optimized_query.split()
-        optimized_query = ' '.join(dict.fromkeys(words))
-        
-        # Further simplify if the query is still too complex
-        if len(optimized_query.split()) > 7:
-            optimized_query = ' '.join(optimized_query.split()[:7])
-        
-        info_highlight(f"Original query: {self.query}")
-        info_highlight(f"Optimized query for search: {optimized_query}")
-        
         result = {
-            "q": quote(optimized_query),
-            "limit": self.max_results
+            "q": self.query,
+            "limit": self.max_results or 10,
+            "min_score": self.min_quality_score or 0.5
         }
-
-        # Add search type specific parameters
-        if self.search_type == "authoritative":
-            # Increase authority weight
-            result["authority_boost"] = 2.0
-            if self.domains:
-                result["domains"] = ",".join(self.domains)
-
-        elif self.search_type == "comprehensive":
-            # Increase diversity
-            result["diversity"] = 2.0
-
-        elif self.search_type == "recent":
-            # Add recency filter
-            result["recency_days"] = self.recency_days or 30
-        elif self.search_type == "technical":
-            # Focus on technical content
-            result["content_type"] = "technical"
-
-        # Add domain filters if not already added
-        if self.domains and "domains" not in result:
+        
+        if self.recency_days:
+            result["recency_days"] = self.recency_days
+            
+        if self.domains:
             result["domains"] = ",".join(self.domains)
-
-        if self.exclude_domains:
-            result["exclude_domains"] = ",".join(self.exclude_domains)
-
+            
+        if self.category:
+            result["category"] = self.category
+            
         return result
 
 class JinaSearchClient:
@@ -309,11 +211,31 @@ class JinaSearchClient:
             results = self._parse_search_results(data)
             info_highlight(f"Retrieved {len(results)} search results")
             
+            # If no results, try simplified query
+            if not results:
+                # Extract main keywords (first 3 words or up to 30 chars)
+                simplified_query = " ".join(params.query.split()[:3])
+                if len(simplified_query) > 30:
+                    simplified_query = simplified_query[:30]
+                
+                info_highlight(f"No results found, trying simplified query: {simplified_query}")
+                request_params["query"] = simplified_query
+                
+                data = await self._make_request_with_retry(
+                    method="GET",
+                    endpoint="/search",
+                    params=request_params
+                )
+                
+                results = self._parse_search_results(data)
+                info_highlight(f"Retrieved {len(results)} results with simplified query")
+            
             # Convert results to Documents
             documents = self._convert_to_documents(results)
             
             # Apply quality filtering
-            filtered_docs = self._filter_documents(documents, params.min_quality_score)
+            min_score: float = float(params.min_quality_score or 0.5)  # Explicit type conversion
+            filtered_docs = self._filter_documents(documents, min_score)
             info_highlight(f"Filtered to {len(filtered_docs)} high-quality results")
             
             return filtered_docs
@@ -324,28 +246,11 @@ class JinaSearchClient:
     def _parse_search_results(self, raw_results: Union[str, List[Dict], Dict]) -> List[Dict]:
         """Parse raw results with improved error handling."""
         try:
-            if isinstance(raw_results, str):
-                try:
-                    # Try to parse as JSON first
-                    parsed = json.loads(raw_results)
-                except json.JSONDecodeError:
-                    # If not valid JSON, try to clean and parse again
-                    cleaned = raw_results.strip()
-                    if cleaned.startswith('```json'):
-                        cleaned = cleaned[7:]
-                    if cleaned.endswith('```'):
-                        cleaned = cleaned[:-3]
-                    try:
-                        parsed = json.loads(cleaned)
-                    except json.JSONDecodeError as e:
-                        error_highlight(f"Failed to parse JSON results: {str(e)}")
-                        return []
-                return self._extract_results_list(parsed)
-            elif isinstance(raw_results, (list, dict)):
-                return self._extract_results_list(raw_results)
-            else:
-                warning_highlight(f"Unexpected result type: {type(raw_results)}")
-                return []
+            # Convert raw_results to string if it's not already
+            if isinstance(raw_results, (list, dict)):
+                raw_results = json.dumps(raw_results)
+            parsed = safe_json_parse(raw_results, "search_results")
+            return self._extract_results_list(parsed)
         except Exception as e:
             error_highlight(f"Error parsing search results: {str(e)}")
             return []
@@ -472,7 +377,6 @@ class JinaSearchClient:
             with contextlib.suppress(Exception):
                 # Try to parse date
                 from dateutil import parser
-                from datetime import datetime, timezone
                 published_date = parser.parse(date_field)
                 current_date = datetime.now(timezone.utc)
                 days_old = (current_date - published_date).days
@@ -491,25 +395,145 @@ class JinaSearchClient:
             if doc.metadata.get('quality_score', 0) >= min_score
         ]
 
+class JinaSearchTool(BaseTool):
+    """Enhanced Jina AI search integration with caching and parallel processing."""
+    
+    name: str = "jina_search"
+    description: str = "Search for information using Jina AI's search engine with enhanced caching and parallel processing"
+    
+    config: Configuration = Field(default_factory=Configuration)
+    
+    def __init__(self, config: Optional[Configuration] = None):
+        """Initialize the Jina search tool.
+        
+        Args:
+            config: Optional configuration for the search tool
+        """
+        super().__init__()
+        if config:
+            self.config = config
+        if not self.config.jina_api_key:
+            raise ValueError("Jina API key is required")
+            
+    async def _arun(
+        self,
+        query: str,
+        search_type: Optional[SearchType] = None,
+        max_results: Optional[int] = None,
+        min_quality_score: Optional[float] = None,
+        recency_days: Optional[int] = None,
+        domains: Optional[List[str]] = None,
+        category: Optional[str] = None
+    ) -> List[Document]:
+        """Execute search with caching and parallel processing."""
+        # Generate cache key
+        cache_key = f"jina_search_{query}_{search_type}_{max_results}_{min_quality_score}_{recency_days}_{domains}_{category}"
+        
+        # Check checkpoint with TTL
+        if cached_state := memory_saver.load(cache_key):
+            cached_results = cached_state.get("results", [])
+            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                return cached_results
+                
+        try:
+            # Create search parameters
+            params = SearchParams(
+                query=query,
+                search_type=search_type or "general",
+                max_results=max_results or self.config.max_search_results,
+                min_quality_score=min_quality_score or 0.5,
+                recency_days=recency_days,
+                domains=domains,
+                category=category
+            )
+            
+            retry_config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0)
+            async with JinaSearchClient(
+                api_key=str(self.config.jina_api_key),
+                base_url=self.config.jina_url,
+                retry_config=retry_config
+            ) as client:
+                # Create tasks for different search strategies
+                search_tasks = []
+                
+                # Main search task
+                search_tasks.append(client.search(params))
+                
+                # If no category specified, try category-specific search
+                if not params.category:
+                    # Detect vertical from query
+                    vertical = detect_vertical(params.query)
+                    if vertical:
+                        category_params = SearchParams(
+                            query=params.query,
+                            search_type=params.search_type,
+                            max_results=params.max_results or self.config.max_search_results,
+                            min_quality_score=params.min_quality_score or 0.5,
+                            recency_days=params.recency_days,
+                            domains=params.domains,
+                            category=vertical
+                        )
+                        search_tasks.append(client.search(category_params))
+                
+                # Execute all search tasks in parallel
+                results_list = await asyncio.gather(*search_tasks)
+                
+                # Merge and deduplicate results
+                all_results = []
+                seen_urls = set()
+                
+                for results in results_list:
+                    for doc in results:
+                        url = doc.metadata.get("url", "")
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(doc)
+                
+                # Sort by quality score
+                all_results.sort(
+                    key=lambda x: x.metadata.get("quality_score", 0),
+                    reverse=True
+                )
+                
+                # Filter by minimum quality score
+                min_score = min_quality_score or 0.5
+                all_results = [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_score]
+                
+                # Save to checkpoint with TTL
+                memory_saver.save(
+                    cache_key,
+                    {
+                        "results": all_results,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    },
+                    ttl=3600  # 1 hour TTL
+                )
+                
+                return all_results
+                
+        except Exception as e:
+            error_highlight(f"Error in Jina search: {str(e)}")
+            raise ToolException(f"Failed to execute Jina search: {str(e)}")
+
 async def search(
     query: str,
     search_type: Optional[SearchType] = None,
-    domains: Optional[List[str]] = None,
-    recency_days: Optional[int] = None,
-    min_quality: Optional[float] = None,
     max_results: Optional[int] = None,
+    min_quality: Optional[float] = None,
+    recency_days: Optional[int] = None,
+    domains: Optional[List[str]] = None,
     category: Optional[str] = None,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg]
-) -> Optional[List[Document]]:
-    """Enhanced search with multiple strategies and quality filters."""
+) -> List[Document]:
+    """Enhanced search with multiple strategies, quality filters, and improved caching."""
     configuration = Configuration.from_runnable_config(config)
     if not configuration.jina_api_key:
         error_highlight("Jina API key is required")
-        return None
+        return []
 
     # Set environment variables for Jina (used by some libraries)
-    import os
     os.environ["JINA_API_KEY"] = configuration.jina_api_key
     if configuration.jina_url:
         os.environ["JINA_URL"] = configuration.jina_url
@@ -525,6 +549,19 @@ async def search(
         category=category
     )
 
+    # Generate cache key from search parameters
+    cache_key = f"jina_search_{params.query}_{params.search_type}_{params.max_results}"
+
+    # Check checkpoint with TTL
+    if cached_state := memory_saver.load(cache_key):
+        cached_results = cached_state.get("results", [])
+        timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+        if (datetime.now() - timestamp).total_seconds() < 86400:  # 24 hour TTL
+            info_highlight("Using cached search results")
+            return cached_results
+        else:
+            info_highlight("Cache expired, performing fresh search")
+
     # Add default domains for educational/authoritative content if not provided
     if not domains and search_type in ["authoritative", None]:
         params.domains = ['.edu', '.gov', '.org']
@@ -532,53 +569,68 @@ async def search(
     try:
         retry_config = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0)
         async with JinaSearchClient(
-                                    api_key=configuration.jina_api_key,
-                                    base_url=configuration.jina_url,
-                                    retry_config=retry_config
-                                ) as client:
+            api_key=configuration.jina_api_key,
+            base_url=configuration.jina_url,
+            retry_config=retry_config
+        ) as client:
+            # Create tasks for different search strategies
+            search_tasks = []
             
-            # First attempt with normal query
-            results = await client.search(params)
-
-            # If no results, try with simplified query
-            if not results:
-                info_highlight("No results with initial query, trying with simplified query")
-
-                # Create simplified query by keeping only key terms
-                words = query.split()
-                if simplified_query := " ".join(
-                    [
-                        w
-                        for w in words
-                        if len(w) > 3
-                        and w.lower()
-                        not in [
-                            "help",
-                            "find",
-                            "about",
-                            "information",
-                            "research",
-                            "please",
-                        ]
-                    ][:5]
-                ):
-                    params.query = simplified_query
-                    results = await client.search(params)
-
-            # If still no results, try with just the most important keyword
-            if not results and len(words) > 1:
-                info_highlight("Still no results, trying with most important keyword")
-                # Find longest word as it's likely most important
-                important_term = max(words, key=len)
-                if len(important_term) > 3:
-                    params.query = important_term
-                    results = await client.search(params)
-
-            return results
-
+            # Main search task
+            search_tasks.append(client.search(params))
+            
+            # If no category specified, try category-specific search
+            if not category:
+                # Detect vertical from query
+                vertical = detect_vertical(query)
+                if vertical:
+                    category_params = SearchParams(
+                        query=query,
+                        search_type=search_type or "general",
+                        max_results=max_results or configuration.max_search_results,
+                        min_quality_score=min_quality or 0.5,
+                        recency_days=recency_days,
+                        domains=domains,
+                        category=vertical
+                    )
+                    search_tasks.append(client.search(category_params))
+            
+            # Execute all search tasks in parallel
+            results_list = await asyncio.gather(*search_tasks)
+            
+            # Merge and deduplicate results
+            all_results = []
+            seen_urls = set()
+            
+            for results in results_list:
+                for doc in results:
+                    url = doc.metadata.get("url", "")
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        all_results.append(doc)
+            
+            # Sort by quality score
+            all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
+            
+            # Filter by minimum quality score
+            min_score = min_quality or 0.5
+            all_results = [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_score]
+            
+            # Save to checkpoint with TTL
+            memory_saver.save(
+                cache_key,
+                {
+                    "results": all_results,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                },
+                ttl=86400  # 24 hour TTL
+            )
+            
+            return all_results
+            
     except Exception as e:
-        error_highlight(f"Search failed: {str(e)}")
-        return None
+        error_highlight(f"Error in Jina search: {str(e)}")
+        return []
 
 # Export available tools
 TOOLS = [search]

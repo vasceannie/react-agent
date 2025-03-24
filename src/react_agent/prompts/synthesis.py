@@ -16,9 +16,15 @@ from langchain_core.runnables import RunnableConfig
 from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.llm import call_model_json
 from react_agent.utils.extraction import extract_statistics
+from react_agent.utils.defaults import get_default_extraction_result
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 # Initialize logger
 logger = get_logger(__name__)
+
+# Initialize memory saver for caching
+memory_saver = MemorySaver()
 
 # Enhanced synthesis prompt template
 ENHANCED_SYNTHESIS_PROMPT = """Create a comprehensive synthesis of research findings for: {query}
@@ -265,36 +271,45 @@ async def synthesize_research(
     """Synthesize all research data into a comprehensive result with enhanced statistics focus."""
     info_highlight("Synthesizing research results with enhanced statistics focus")
     
-    categories = state["categories"]
-    original_query = state["original_query"]
-    
-    # Prepare research data for synthesis
-    research_data = {}
-    for category, category_state in categories.items():
-        # Extract statistics from facts
-        statistics = []
-        for fact in category_state.get("extracted_facts", []):
-            if "statistics" in fact:
-                statistics.extend(fact["statistics"])
-            elif "source_text" in fact:
-                # Extract statistics from source text
-                extracted_stats = extract_statistics(fact["source_text"])
-                statistics.extend(extracted_stats)
-        
-        research_data[category] = {
-            "facts": category_state["extracted_facts"],
-            "sources": category_state["sources"],
-            "quality_score": category_state["quality_score"],
-            "statistics": statistics  # Add extracted statistics
-        }
-    
-    # Generate prompt
-    synthesis_prompt = ENHANCED_SYNTHESIS_PROMPT.format(
-        query=original_query,
-        research_json=json.dumps(research_data, indent=2)
-    )
-    
     try:
+        # Check checkpoint with TTL
+        cache_key = f"synthesize_research_{hash(str(state))}"
+        if cached_state := memory_saver.get_checkpoint(cache_key):
+            cached_result = cached_state.get("result")
+            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
+            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                return cached_result
+        
+        categories = state["categories"]
+        original_query = state["original_query"]
+        
+        # Prepare research data for synthesis
+        research_data = {}
+        for category, category_state in categories.items():
+            # Extract statistics from facts
+            statistics = []
+            for fact in category_state.get("extracted_facts", []):
+                if "statistics" in fact:
+                    statistics.extend(fact["statistics"])
+                elif "source_text" in fact:
+                    # Extract statistics from source text
+                    extracted_stats = extract_statistics(fact["source_text"])
+                    statistics.extend(extracted_stats)
+            
+            research_data[category] = {
+                "facts": category_state["extracted_facts"],
+                "sources": category_state["sources"],
+                "quality_score": category_state["quality_score"],
+                "statistics": statistics  # Add extracted statistics
+            }
+        
+        # Generate prompt
+        synthesis_prompt = ENHANCED_SYNTHESIS_PROMPT.format(
+            query=original_query,
+            research_json=json.dumps(research_data, indent=2)
+        )
+        
+        # Call model for synthesis
         synthesis_result = await call_model_json(
             messages=[{"role": "human", "content": synthesis_prompt}],
             config=config
@@ -308,10 +323,23 @@ async def synthesize_research(
         overall_score = synthesis_result.get("confidence_assessment", {}).get("overall_score", 0.0)
         info_highlight(f"Research synthesis complete with confidence score: {overall_score:.2f}")
         
-        return {
+        result = {
             "synthesis": synthesis_result,
             "status": "synthesized"
         }
+        
+        # Save to checkpoint with TTL
+        memory_saver.save_checkpoint(
+            cache_key,
+            {
+                "result": result,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            ttl=3600  # 1 hour TTL
+        )
+        
+        return result
+        
     except Exception as e:
         error_highlight(f"Error in research synthesis: {str(e)}")
         return {"error": {"message": f"Error in research synthesis: {str(e)}", "phase": "synthesis"}}
@@ -478,3 +506,13 @@ async def generate_recommendations(
     except Exception as e:
         error_highlight(f"Error generating recommendations: {str(e)}")
         return "Recommendations could not be generated due to an error."
+
+__all__ = [
+    "chunk_text",
+    "preprocess_content",
+    "estimate_tokens",
+    "should_skip_content",
+    "merge_chunk_results",
+    "validate_content",
+    "detect_content_type"
+]

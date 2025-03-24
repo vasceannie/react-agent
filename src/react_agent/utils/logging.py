@@ -6,7 +6,7 @@ defined in log_config.py.
 """
 
 import logging
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Dict
 
 
 """Module: log_config.py. This module provides logging configuration for the enrichment agent.
@@ -123,35 +123,45 @@ def info_success(message: str, exc_info: bool | BaseException | None = None) -> 
     logger.info("[bold green]✓ %s[/bold green]", message, exc_info=exc_info)
 
 
-def info_highlight(message: str, exc_info: bool | BaseException | None = None) -> None:
-    """Log a highlighted informational message.
-
+def info_highlight(message: str, category: Optional[str] = None, progress: Optional[str] = None, exc_info: bool | BaseException | None = None) -> None:
+    """Log a highlighted informational message with optional category and progress tracking.
+    
     Args:
-        message (str): The message to log
-        exc_info (bool | BaseException | None): Exception information to include in the log
+        message: The message to log
+        category: Optional category for the message
+        progress: Optional progress indicator
+        exc_info: Exception information to include in the log
     """
+    if progress:
+        message = f"[{progress}] {message}"
+    if category:
+        message = f"[{category}] {message}"
     logger.info("[bold blue]ℹ %s[/bold blue]", message, exc_info=exc_info)
 
 
-def warning_highlight(
-    message: str, exc_info: bool | BaseException | None = None
-) -> None:
-    """Log a highlighted warning message.
-
+def warning_highlight(message: str, category: Optional[str] = None, exc_info: bool | BaseException | None = None) -> None:
+    """Log a highlighted warning message with optional category.
+    
     Args:
-        message (str): The message to log
-        exc_info (bool | BaseException | None): Exception information to include in the log
+        message: The message to log
+        category: Optional category for the message
+        exc_info: Exception information to include in the log
     """
+    if category:
+        message = f"[{category}] {message}"
     logger.warning("[bold yellow]⚠ %s[/bold yellow]", message, exc_info=exc_info)
 
 
-def error_highlight(message: str, exc_info: bool | BaseException | None = None) -> None:
-    """Log a highlighted error message.
-
+def error_highlight(message: str, category: Optional[str] = None, exc_info: bool | BaseException | None = None) -> None:
+    """Log a highlighted error message with optional category.
+    
     Args:
-        message (str): The message to log
-        exc_info (bool | BaseException | None): Exception information to include in the log
+        message: The message to log
+        category: Optional category for the message
+        exc_info: Exception information to include in the log
     """
+    if category:
+        message = f"[{category}] {message}"
     logger.error("[bold red]✗ %s[/bold red]", message, exc_info=exc_info)
 
 
@@ -216,3 +226,46 @@ def log_step(
             total_steps,
             step_name,
         )
+
+
+def log_progress(current: int, total: int, category: str, operation: str):
+    """Log progress for long-running operations.
+    
+    Args:
+        current: Current progress value
+        total: Total number of items
+        category: Category being processed
+        operation: Type of operation (e.g., "processing", "extracting")
+    """
+    if total > 0:
+        percentage = (current / total) * 100
+        info_highlight(
+            f"{operation} {current}/{total} ({percentage:.1f}%)",
+            category=category
+        )
+
+
+def log_performance_metrics(
+    operation: str,
+    start_time: float,
+    end_time: float,
+    category: Optional[str] = None,
+    additional_info: Optional[Dict[str, Any]] = None
+) -> None:
+    """Log performance metrics for operations.
+    
+    Args:
+        operation: Name of the operation being measured
+        start_time: Start time of the operation
+        end_time: End time of the operation
+        category: Optional category for the operation
+        additional_info: Optional dictionary of additional metrics
+    """
+    duration = end_time - start_time
+    message = f"{operation} completed in {duration:.2f}s"
+    
+    if additional_info:
+        info_parts = [f"{k}: {v}" for k, v in additional_info.items()]
+        message += f" ({', '.join(info_parts)})"
+    
+    info_highlight(message, category=category)

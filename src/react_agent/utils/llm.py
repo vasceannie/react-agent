@@ -9,7 +9,8 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union, cast
+import os
+import asyncio
 
 from anthropic import AsyncAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -26,20 +27,15 @@ from react_agent.utils.content import (
     preprocess_content,
     validate_content,
 )
-from react_agent.utils.logging import (
-    error_highlight,
-    get_logger,
-    info_highlight,
-    warning_highlight,
-)
+from react_agent.configuration import Configuration
+from react_agent.utils.extraction import safe_json_parse
+from react_agent.utils.defaults import ChunkConfig
 
 # Initialize logger
 logger = get_logger(__name__)
 
 # Constants
 MAX_TOKENS: int = 16000  # Reduced from 100000 to stay within model limits
-DEFAULT_CHUNK_SIZE: int = 4000  # Reduced chunk size
-DEFAULT_OVERLAP: int = 500  # Reduced overlap
 MAX_SUMMARY_TOKENS: int = 2000  # New constant for summary model
 
 # Initialize API clients
@@ -76,17 +72,35 @@ async def summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_TO
         error_highlight(f"Error in summarize_content: {str(e)}")
         return input_content  # Return original content if summarization fails
 
-async def _format_openai_messages(messages: List[Dict[str, str]], system_prompt: str) -> List[ChatCompletionMessageParam]:
-    """Format messages for OpenAI API."""
+async def _format_openai_messages(
+    messages: List[Dict[str, str]], 
+    system_prompt: str,
+    max_tokens: Optional[int] = None
+) -> List[ChatCompletionMessageParam]:
+    """Format messages for OpenAI API with enhanced content handling.
+    
+    Args:
+        messages: List of message dictionaries
+        system_prompt: System prompt to use
+        max_tokens: Optional maximum tokens per message
+        
+    Returns:
+        Formatted messages for OpenAI API
+    """
+    if not messages:
+        return [{"role": "system", "content": system_prompt}]
+        
     formatted_messages: List[ChatCompletionMessageParam] = []
+    max_tokens = max_tokens or MAX_TOKENS
+    
     for msg in messages:
         if msg["role"] == "system":
             formatted_messages.append({"role": "system", "content": msg["content"]})
         else:
             content = msg["content"]
-            if estimate_tokens(content) > MAX_TOKENS:
+            if estimate_tokens(content) > max_tokens:
                 info_highlight("Content too long, summarizing...")
-                content = await summarize_content(content)
+                content = await summarize_content(content, max_tokens)
             formatted_messages.append({"role": "user", "content": content})
 
     if all(msg["role"] != "system" for msg in formatted_messages):
@@ -94,24 +108,29 @@ async def _format_openai_messages(messages: List[Dict[str, str]], system_prompt:
     
     return formatted_messages
 
-async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Optional[str]:
+async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Dict[str, Any]:
     """Call OpenAI API with formatted messages."""
-    response = await openai_client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=0.7
-    )
-    return response.choices[0].message.content
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=MAX_TOKENS,
+            temperature=0.7
+        )
+        content = response.choices[0].message.content
+        return {"content": content} if content else {}
+    except Exception as e:
+        error_highlight(f"Error in _call_openai_api: {str(e)}")
+        return {}
 
 async def call_model(
     messages: List[Dict[str, str]],
     config: Optional[RunnableConfig] = None
-) -> Optional[Union[str, Dict[str, Any]]]:
+) -> Dict[str, Any]:
     """Call the language model with the given messages."""
     if not messages:
         error_highlight("No messages provided to call_model")
-        return None
+        return {}
 
     try:
         config = config or {}
@@ -156,58 +175,122 @@ async def call_model(
                 max_tokens=MAX_TOKENS,
                 temperature=0.7
             )
-            return str(response.content[0])
+            return {"content": str(response.content[0])}
         else:
             error_highlight(f"Unsupported model provider: {provider}")
-            return None
+            return {}
 
     except Exception as e:
         error_highlight(f"Error in call_model: {str(e)}")
-        return None
+        return {}
+
+async def _process_chunk(
+    chunk: str,
+    previous_messages: List[Dict[str, str]],
+    config: Optional[RunnableConfig] = None,
+    model: Optional[str] = None
+) -> Dict[str, Any]:
+    """Process a single chunk of content with enhanced error handling.
+    
+    Args:
+        chunk: Content chunk to process
+        previous_messages: Previous messages in the conversation
+        config: Optional configuration
+        model: Optional model to use for processing
+        
+    Returns:
+        Processed chunk result
+    """
+    if not chunk or not previous_messages:
+        return {}
+
+    try:
+        # Create messages with chunk
+        messages = previous_messages + [{"role": "human", "content": chunk}]
+        
+        # Call model with retries
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                response = await call_model(messages, config)
+                if not response or not response.get("content"):
+                    error_highlight("Empty response from model")
+                    return {}
+                    
+                # Parse JSON response with enhanced error handling
+                parsed = safe_json_parse(response["content"], "model_response")
+                return parsed if parsed else {}
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    warning_highlight(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                else:
+                    error_highlight(f"All retry attempts failed: {str(e)}")
+                    return {}
+                    
+    except Exception as e:
+        error_highlight(f"Error processing chunk: {str(e)}")
+        return {}
+        
+    return {}  # Fallback return to satisfy type checker
 
 async def call_model_json(
     messages: List[Dict[str, str]],
     config: Optional[RunnableConfig] = None,
-    max_tokens: int = MAX_TOKENS
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Call the LLM and get a JSON response.
+    """Call the model with JSON output format and enhanced chunking.
     
     Args:
-        messages: List of message dictionaries with role and content
-        config: Optional configuration dictionary
-        max_tokens: Maximum number of tokens to process
+        messages: List of message dictionaries
+        config: Optional configuration
+        chunk_size: Optional custom chunk size
+        overlap: Optional custom overlap size
         
     Returns:
         JSON response from the model
     """
-    if not messages:
-        error_highlight("No messages provided to call_model_json")
-        return {}
-
     try:
-        # Get and validate content from last message
-        content = messages[-1].get("content", "")
-        if not content or not validate_content(content):
-            error_highlight("Invalid or empty content in last message")
+        if not messages:
+            error_highlight("No messages provided to call_model_json")
             return {}
-
-        # Preprocess and estimate tokens
-        content = preprocess_content(content, "")
-        estimated_tokens = estimate_tokens(content)
+            
+        # Process content in chunks if needed
+        content = messages[-1]["content"]
         
-        # Handle large content with chunking
-        if estimated_tokens > max_tokens:
-            info_highlight(f"Content exceeds token limit ({estimated_tokens} > {max_tokens}), chunking")
-            return await _process_chunked_content(messages, content, config)
+        # Check if content needs chunking
+        if estimate_tokens(content) > MAX_TOKENS:
+            info_highlight(f"Content too large ({estimate_tokens(content)} tokens), chunking...")
+            chunks = chunk_text(
+                content,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                use_large_chunks=True
+            )
             
-        # Process single content
-        response = await call_model(messages, config)
-        if not response:
-            error_highlight("Empty response from model")
-            return {}
-            
-        return _parse_json_response(response)
+            if len(chunks) > 1:
+                # Process chunks in parallel with rate limiting
+                chunk_results = []
+                for chunk in chunks:
+                    result = await _process_chunk(chunk, messages[:-1], config)
+                    if result:
+                        chunk_results.append(result)
+                        
+                if not chunk_results:
+                    error_highlight("No valid results from chunks")
+                    return {}
                     
+                # Merge results with enhanced merging
+                return merge_chunk_results(chunk_results, "model_response")
+            else:
+                return await _process_chunk(content, messages[:-1], config)
+        else:
+            return await _process_chunk(content, messages[:-1], config)
+            
     except Exception as e:
         error_highlight(f"Error in call_model_json: {str(e)}")
         return {}
@@ -218,91 +301,41 @@ async def _process_chunked_content(
     config: Optional[RunnableConfig]
 ) -> Dict[str, Any]:
     """Process content that exceeds token limit by chunking."""
-    chunks = chunk_text(content, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP)
-    chunk_results = []
-    
-    for i, chunk in enumerate(chunks):
-        chunk_messages = messages[:-1] + [{"role": "human", "content": chunk}]
-        try:
-            chunk_response = await call_model(chunk_messages, config)
-            if chunk_response:
-                chunk_results.append(chunk_response)
-        except Exception as e:
-            error_highlight(f"Error processing chunk {i+1}: {str(e)}")
-            continue
-    
-    if not chunk_results:
-        error_highlight("No valid results from chunks")
-        return {}
+    try:
+        chunks = chunk_text(
+            content,
+            chunk_size=ChunkConfig.DEFAULT_CHUNK_SIZE,
+            overlap=ChunkConfig.DEFAULT_OVERLAP
+        )
+        chunk_results = []
         
-    # Parse each chunk result to ensure they are dictionaries before merging
-    parsed_results = []
-    for result in chunk_results:
-        if isinstance(result, str):
+        for i, chunk in enumerate(chunks):
+            chunk_messages = messages[:-1] + [{"role": "human", "content": chunk}]
             try:
-                parsed_result = _parse_json_response(result)
-                if parsed_result:
-                    parsed_results.append(parsed_result)
+                chunk_response = await call_model(chunk_messages, config)
+                if chunk_response and chunk_response.get("content"):
+                    chunk_results.append(chunk_response)
             except Exception as e:
-                error_highlight(f"Failed to parse chunk result: {str(e)}")
+                error_highlight(f"Error processing chunk {i+1}: {str(e)}")
                 continue
-        elif isinstance(result, dict):
-            parsed_results.append(result)
-    
-    return merge_chunk_results(parsed_results, "general")
+        
+        if not chunk_results:
+            error_highlight("No valid results from chunks")
+            return {}
+            
+        return merge_chunk_results(chunk_results, "general")
+    except Exception as e:
+        error_highlight(f"Error in _process_chunked_content: {str(e)}")
+        return {}
 
 def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Parse and clean JSON response from model."""
-    if isinstance(response, dict):
-        return response
-        
-    if not isinstance(response, str):
-        error_highlight(f"Unexpected response type: {type(response)}")
-        return {}
-        
     try:
-        return json.loads(response)
-    except json.JSONDecodeError:
-        return _clean_and_parse_json(response)
-
-def _clean_and_parse_json(response_str: str) -> Dict[str, Any]:
-    """Clean and parse potentially malformed JSON response."""
-    if "{" not in response_str or "}" not in response_str:
-        return {}
-        
-    try:
-        # Extract JSON content between first { and last }  
-        start_idx = response_str.find("{")
-        end_idx = response_str.rfind("}") + 1
-        cleaned = response_str[start_idx:end_idx]
-        
-        # Handle single quotes in JSON keys and values
-        cleaned = re.sub(r"([\{\[,]\s*)'([^']+)'(\s*:)", r'\1"\2"\3', cleaned)  # Replace single quotes in keys
-        cleaned = re.sub(r"(:\s*)'([^']+)'([,\}\]])", r'\1"\2"\3', cleaned)  # Replace single quotes in values
-        
-        # Handle trailing commas and other common issues
-        cleaned = cleaned.replace("'", '"')  # Replace any remaining single quotes
-        cleaned = cleaned.replace(",\n}", "\n}").replace(",\n]", "\n]")
-        cleaned = re.sub(r",\s*([\}\]])", r"\1", cleaned)  # Remove trailing commas
-        
-        # Handle unquoted keys
-        cleaned = re.sub(r"([{,])\s*(\w+)\s*:", r'\1"\2":', cleaned)
-        
-        return json.loads(cleaned)
+        if isinstance(response, dict):
+            return response
+        return safe_json_parse(response, "model_response")
     except Exception as e:
-        error_highlight(f"Failed to clean and parse JSON: {str(e)}")
-        # Try a more aggressive approach if the first attempt fails
-        try:
-            # Remove all whitespace outside of quoted strings to normalize the JSON
-            in_string = False
-            normalized = ""
-            for char in cleaned:
-                if char == '"' and (not normalized or normalized[-1] != '\\'):
-                    in_string = not in_string
-                if in_string or not char.isspace():
-                    normalized += char
-            return json.loads(normalized)
-        except Exception:
-            return {}
+        error_highlight(f"Error in _parse_json_response: {str(e)}")
+        return {}
 
 __all__ = ["call_model_json", "call_model"]

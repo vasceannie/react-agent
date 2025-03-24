@@ -70,7 +70,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Union, cast
 
 from anthropic import AsyncAnthropic
@@ -265,7 +265,7 @@ async def call_model(
     try:
         config = config or {}
         configurable = config.get("configurable", {})
-        configurable["timestamp"] = datetime.now(timezone.utc).isoformat()
+        configurable["timestamp"] = datetime.now(UTC).isoformat()
         config = {**config, "configurable": configurable}
 
         configuration = Configuration.from_runnable_config(config)
@@ -304,7 +304,7 @@ async def call_model(
                 messages=[{
                     "role": cast(Literal["user", "assistant"], "user" if msg["role"] not in ["user", "assistant"] else msg["role"]),
                     "content": cast(str, msg["content"])
-                } for msg in formatted_messages],
+                } for msg in formatted_messages if msg["role"] in ["user", "assistant"]],
                 max_tokens=MAX_TOKENS,
                 temperature=0.7
             )

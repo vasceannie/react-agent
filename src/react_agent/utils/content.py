@@ -1,17 +1,31 @@
 """Content processing utilities for the research agent.
 
 This module provides utilities for processing and validating content,
-including chunking, preprocessing, and content type detection.
-"""
+including chunking, preprocessing, content type detection, and merging extraction results.
 
+Examples:
+    >>> text = "This is a sample text that will be split into chunks."
+    >>> chunks = chunk_text(text, chunk_size=20, overlap=5)
+    >>> print(chunks)
+    ['This is a sample', 'sample text that', 'that will be split', 'split into chunks.']
+    
+    >>> content_type = detect_content_type("page.html", "<html><body>Content</body></html>")
+    >>> print(content_type)
+    html
+    
+    >>> valid = validate_content("This is valid content")
+    >>> print(valid)
+    True
+"""
+import time
 from typing import List, Dict, Any, Optional, Union, Tuple, TypedDict, Set, Literal
 import re
 from urllib.parse import urlparse, unquote
-import logging
 from datetime import datetime, timezone
 import json
 import contextlib
 import urllib.parse
+
 from react_agent.utils.logging import (
     get_logger,
     info_highlight, 
@@ -20,19 +34,24 @@ from react_agent.utils.logging import (
     log_progress,
     log_performance_metrics
 )
-from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.defaults import ChunkConfig, get_default_extraction_result, get_category_merge_mapping
-from langgraph.graph import StateGraph
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result
 
 # Initialize logger
 logger = get_logger(__name__)
 
 class ContentState(TypedDict):
-    """Type definition for content state in the graph."""
+    """
+    Typed dictionary for content state used in the graph.
+
+    Attributes:
+        content (str): The actual text content.
+        url (str): Source URL of the content.
+        content_type (str): Type of the content (e.g., 'html', 'json', 'text').
+        chunks (List[str]): List of text chunks.
+        metadata (Dict[str, Any]): Additional metadata about the content.
+        timestamp (str): ISO formatted timestamp when the content was processed.
+    """
     content: str
     url: str
     content_type: str
@@ -40,57 +59,15 @@ class ContentState(TypedDict):
     metadata: Dict[str, Any]
     timestamp: str
 
-def create_checkpoint(key: str, data: Dict[str, Any], ttl: int = 3600) -> None:
-    """Create a checkpoint using the caching system.
-    
-    Args:
-        key: Unique identifier for the checkpoint
-        data: Data to store in the checkpoint
-        ttl: Time to live in seconds (default 1 hour)
-        
-    Examples:
-        >>> data = {
-        ...     "content": "Sample content",
-        ...     "url": "example.com",
-        ...     "content_type": "text"
-        ... }
-        >>> create_checkpoint("test_key", data)
-        
-        >>> create_checkpoint("temp_key", data, ttl=1800)  # 30 minute TTL
-    """
-    # Use the imported create_checkpoint function
-    create_checkpoint(key, data, ttl)
-
-def load_checkpoint(key: str) -> Optional[Dict[str, Any]]:
-    """Load a checkpoint using the caching system.
-    
-    Args:
-        key: Unique identifier for the checkpoint
-        
-    Returns:
-        Channel values if found, None otherwise
-        
-    Examples:
-        >>> # Assuming checkpoint exists
-        >>> load_checkpoint("test_key")
-        {'content': 'Sample content', 'url': 'example.com', 'content_type': 'text'}
-        
-        >>> # Non-existent checkpoint
-        >>> load_checkpoint("missing_key")
-        None
-    """
-    # Use the imported load_checkpoint function
-    return load_checkpoint(key)
-
-# Constants
+# Constants for chunking and token estimation.
 DEFAULT_CHUNK_SIZE: int = 40000
 DEFAULT_OVERLAP: int = 5000
 MAX_CONTENT_LENGTH: int = 100000
 TOKEN_CHAR_RATIO: float = 4.0
 
-# Problematic content patterns
+# Problematic content patterns to skip certain file types.
 PROBLEMATIC_PATTERNS: List[str] = [
-    r'\.pdf(\?|$)',  # Modified to catch PDF URLs with query params
+    r'\.pdf(\?|$)',  # Catch PDF URLs with query params.
     r'\.docx?$',
     r'\.xlsx?$',
     r'\.ppt$',
@@ -103,7 +80,7 @@ PROBLEMATIC_PATTERNS: List[str] = [
     r'\.gz$'
 ]
 
-# Known problematic sites
+# Known problematic sites to avoid.
 PROBLEMATIC_SITES: List[str] = [
     'iaeme.com',
     'scribd.com',
@@ -119,18 +96,19 @@ def chunk_text(
     use_large_chunks: bool = False,
     min_chunk_size: int = 100
 ) -> List[str]:
-    """Split text into overlapping chunks with enhanced robustness and caching.
-    
+    """
+    Split text into overlapping chunks, returning a list of chunks.
+
     Args:
-        text: Text to chunk
-        chunk_size: Size of each chunk (defaults to ChunkConfig values)
-        overlap: Overlap between chunks (defaults to ChunkConfig values)
-        use_large_chunks: Whether to use large chunk sizes
-        min_chunk_size: Minimum size for a chunk to avoid too small chunks
-        
+        text (str): The text to be split.
+        chunk_size (Optional[int]): Desired size for each chunk. If None, defaults are taken from ChunkConfig.
+        overlap (Optional[int]): Overlap length between chunks. If None, defaults are taken from ChunkConfig.
+        use_large_chunks (bool): Flag to indicate if larger chunk sizes should be used.
+        min_chunk_size (int): Minimum acceptable chunk size to avoid very small chunks.
+
     Returns:
-        List of text chunks
-        
+        List[str]: A list of text chunks.
+
     Examples:
         >>> text = "This is a sample text that needs to be chunked into smaller pieces."
         >>> chunk_text(text, chunk_size=20, overlap=5)
@@ -140,7 +118,7 @@ def chunk_text(
         >>> chunk_text(text, use_large_chunks=True)
         ['This is a sample text that needs to be chunked into smaller pieces.']
         
-        >>> # Empty input
+        >>> # Empty input returns an empty list
         >>> chunk_text("")
         []
     """
@@ -148,7 +126,7 @@ def chunk_text(
         warning_highlight("Empty or whitespace-only text provided")
         return []
 
-    # Set chunk parameters
+    # Set chunk parameters based on defaults if not provided.
     chunk_size = max(min_chunk_size, chunk_size or (
         ChunkConfig.LARGE_CHUNK_SIZE if use_large_chunks 
         else ChunkConfig.DEFAULT_CHUNK_SIZE
@@ -161,12 +139,14 @@ def chunk_text(
     chunks: List[str] = []
     start = 0
     text_length = len(text)
+    
+    # Track chunking performance
+    import time
+    start_time = time.time()
 
     while start < text_length:
-        # Calculate chunk boundaries
         end = min(start + chunk_size, text_length)
-
-        # Find natural break point
+        # Attempt to find a natural break point.
         if end < text_length:
             end = text.rfind(' ', start + min_chunk_size, end) or end
 
@@ -175,21 +155,33 @@ def chunk_text(
                 chunks[-1] = f"{chunks[-1]} {chunk}"
             else:
                 chunks.append(chunk)
-
+                # Log progress every 5 chunks
+                if len(chunks) % 5 == 0:
+                    log_progress(len(chunks), text_length // chunk_size + 1, "chunking", "Creating chunks")
         start = end - overlap
 
+    end_time = time.time()
+    log_performance_metrics(
+        "Text chunking", 
+        start_time, 
+        end_time, 
+        "chunking",
+        {"text_length": text_length, "chunks_created": len(chunks), "avg_chunk_size": text_length / max(1, len(chunks))}
+    )
+    
     info_highlight(f"Created {len(chunks)} chunks", category="chunking")
     return chunks
 
 def detect_html(content: str) -> Optional[str]:
-    """Detect if content is HTML.
-    
+    """
+    Determine whether the provided content is HTML.
+
     Args:
-        content: String content to analyze
-        
+        content (str): The content string to be analyzed.
+
     Returns:
-        'html' if HTML is detected, None otherwise
-        
+        Optional[str]: Returns 'html' if HTML is detected; otherwise, returns None.
+
     Examples:
         >>> detect_html("<html><body>Hello</body></html>")
         'html'
@@ -198,9 +190,6 @@ def detect_html(content: str) -> Optional[str]:
         'html'
         
         >>> detect_html("Plain text content")
-        None
-        
-        >>> detect_html("")
         None
     """
     if not content:
@@ -215,14 +204,15 @@ def detect_html(content: str) -> Optional[str]:
     return None
 
 def detect_json(content: str) -> Optional[str]:
-    """Detect if content is JSON.
-    
+    """
+    Determine whether the provided content is valid JSON.
+
     Args:
-        content: String content to analyze
-        
+        content (str): The content string to analyze.
+
     Returns:
-        'json' if valid JSON is detected, None otherwise
-        
+        Optional[str]: Returns 'json' if the content is valid JSON; otherwise, returns None.
+
     Examples:
         >>> detect_json('{"key": "value"}')
         'json'
@@ -231,9 +221,6 @@ def detect_json(content: str) -> Optional[str]:
         'json'
         
         >>> detect_json('Invalid content')
-        None
-        
-        >>> detect_json('')
         None
     """
     if not content:
@@ -246,14 +233,16 @@ def detect_json(content: str) -> Optional[str]:
     return None
 
 def detect_from_url_extension(url: str) -> Optional[str]:
-    """Detect content type from URL file extension.
-    
+    """
+    Infer content type based on the file extension in the URL.
+
     Args:
-        url: URL to analyze
-        
+        url (str): The URL to analyze.
+
     Returns:
-        Content type based on file extension, or None if not detected
-        
+        Optional[str]: The inferred content type (e.g., 'pdf', 'html', 'json') based on the extension;
+                       None if the extension is not recognized.
+
     Examples:
         >>> detect_from_url_extension('document.pdf')
         'pdf'
@@ -284,7 +273,22 @@ def detect_from_url_extension(url: str) -> Optional[str]:
         return None
 
 def detect_from_url_path(url: str) -> Optional[str]:
-    """Detect content type from URL path patterns."""
+    """
+    Infer content type from common URL path patterns.
+
+    Args:
+        url (str): The URL to be analyzed.
+
+    Returns:
+        Optional[str]: Returns 'html' if known HTML path patterns are found; otherwise, None.
+
+    Examples:
+        >>> detect_from_url_path('https://example.com/wiki/Article_Title')
+        'html'
+        
+        >>> detect_from_url_path('https://example.com/api/data')
+        None
+    """
     if not url:
         return None
         
@@ -297,7 +301,25 @@ def detect_from_url_path(url: str) -> Optional[str]:
     return 'html' if any(pattern in url.lower() for pattern in html_path_patterns) else None
 
 def detect_from_content_heuristics(content: str) -> Optional[str]:
-    """Detect content type from content patterns."""
+    """
+    Infer content type based on heuristics applied directly to the content.
+
+    Args:
+        content (str): The text content to analyze.
+
+    Returns:
+        Optional[str]: Returns 'xml', 'data', or 'text' based on content patterns; otherwise, None.
+
+    Examples:
+        >>> detect_from_content_heuristics("<?xml version='1.0'?><data>123</data>")
+        'xml'
+        
+        >>> detect_from_content_heuristics('{"key": "value"}')
+        'data'
+        
+        >>> detect_from_content_heuristics("This is a simple text with multiple paragraphs.\n\nNew paragraph.")
+        'text'
+    """
     if not content or len(content) < 50:
         return None
 
@@ -309,7 +331,22 @@ def detect_from_content_heuristics(content: str) -> Optional[str]:
     return 'text' if '\n\n' in content and len(content) > 200 else None
 
 def detect_from_url_domain(url: str) -> Optional[str]:
-    """Detect content type from URL domain."""
+    """
+    Infer content type based on URL domain characteristics.
+
+    Args:
+        url (str): The URL to analyze.
+
+    Returns:
+        Optional[str]: Returns 'html' if the domain indicates a typical web page; otherwise, None.
+
+    Examples:
+        >>> detect_from_url_domain('https://www.example.com/path')
+        'html'
+        
+        >>> detect_from_url_domain('ftp://example.org/resource')
+        None
+    """
     if not url:
         return None
         
@@ -321,15 +358,19 @@ def detect_from_url_domain(url: str) -> Optional[str]:
     return None
 
 def detect_content_type(url: str, content: str) -> str:
-    """Detect content type from URL and content using a modular approach.
-    
+    """
+    Determine the content type using multiple detection strategies.
+
+    This function sequentially applies various detectors (HTML, JSON, URL extension/path,
+    content heuristics, and domain analysis). If none succeed, a fallback detection is used.
+
     Args:
-        url: URL of the content
-        content: Content to analyze
-        
+        url (str): The URL associated with the content.
+        content (str): The content to analyze.
+
     Returns:
-        Detected content type string
-        
+        str: The detected content type (e.g., 'html', 'json', 'text', 'unknown').
+
     Examples:
         >>> detect_content_type('page.html', '<html><body>Content</body></html>')
         'html'
@@ -359,33 +400,54 @@ def detect_content_type(url: str, content: str) -> str:
             info_highlight(f"Detected content type: {result}", category="content_type")
             return result
 
-    # Fallback detection
+    # Fallback detection if no other detectors return a type.
     result = fallback_detection(url, content)
     info_highlight(f"Using fallback detection, type: {result}", category="content_type")
     return result
 
 def fallback_detection(url: str, content: str) -> str:
-    """Fallback detection logic."""
+    """
+    Fallback detection logic for content type.
+
+    Args:
+        url (str): The URL to analyze.
+        content (str): The content to analyze.
+
+    Returns:
+        str: Returns 'text' if content is non-empty; if URL indicates a web resource, returns 'html';
+             otherwise returns 'unknown'.
+
+    Examples:
+        >>> fallback_detection("http://example.com", "Some text content")
+        'text'
+        
+        >>> fallback_detection("", "")
+        'unknown'
+    """
     if content and content.strip():
         return 'text'
     return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
 
 def preprocess_content(content: str, url: str) -> str:
-    """Clean and preprocess content before sending to model with improved performance.
-    
+    """
+    Clean and preprocess content prior to further processing or model ingestion.
+
+    This includes removing boilerplate text, redundant whitespace, site-specific cleaning,
+    and truncating overly long content. Results are cached for performance.
+
     Args:
-        content: Content to preprocess
-        url: URL of the content
-        
+        content (str): The raw content string to be preprocessed.
+        url (str): The URL of the content (used for site-specific rules and caching).
+
     Returns:
-        Preprocessed content string
-        
+        str: The cleaned and preprocessed content.
+
     Examples:
-        >>> content = "Copyright © 2024 Example Corp. All rights reserved.\nActual content here"
+        >>> content = "Copyright 2024 Example Corp. All rights reserved.\\nActual content here"
         >>> preprocess_content(content, "example.com")
         'Actual content here'
         
-        >>> content = "Please enable JavaScript to continue.\nImportant content"
+        >>> content = "Please enable JavaScript to continue.\\nImportant content"
         >>> preprocess_content(content, "example.com")
         'Important content'
         
@@ -398,47 +460,71 @@ def preprocess_content(content: str, url: str) -> str:
 
     info_highlight(f"Preprocessing content from {url}", category="preprocessing")
     info_highlight(f"Initial content length: {len(content)}", category="preprocessing")
+    
+    # Track preprocessing performance
+    import time
+    start_time = time.time()
 
-    # Generate cache key
+    # Generate a cache key based on content and URL.
     cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
     
-    # Check cache with TTL
+    # Retrieve cached content if available and not expired.
     if cached_state := load_checkpoint(cache_key):
         cached_result = cached_state.get("result")
         if isinstance(cached_result, dict) and cached_result:
             timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
             if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
+                log_performance_metrics(
+                    "Content preprocessing (cached)", 
+                    start_time, 
+                    time.time(), 
+                    "preprocessing",
+                    {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
+                )
                 return cached_result.get("content", "")
 
-    # Compile regex patterns once
+    # Define boilerplate removal regex patterns.
     boilerplate_patterns = [
-        (re.compile(r'Copyright © \d{4}.*?reserved\.', re.IGNORECASE | re.DOTALL), ''),
+        (re.compile(r'Copyright \d{4}.*?reserved\.', re.IGNORECASE | re.DOTALL), ''),
         (re.compile(r'Terms of Service.*?Privacy Policy', re.IGNORECASE | re.DOTALL), ''),
         (re.compile(r'Please enable JavaScript.*?continue', re.IGNORECASE | re.DOTALL), '')
     ]
     
-    # Apply boilerplate removal patterns
+    # Log progress for preprocessing steps
+    total_steps = 4  # boilerplate removal, whitespace normalization, site-specific, truncation
+    current_step = 0
+    
+    # Remove boilerplate text.
     for pattern, replacement in boilerplate_patterns:
         content = pattern.sub(replacement, content)
+    current_step += 1
+    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
-    # Remove redundant whitespace efficiently
+    # Normalize whitespace.
     content = ' '.join(content.split())
+    current_step += 1
+    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
-    # Site-specific cleaning with compiled pattern
+    # Site-specific cleaning (e.g., for iaeme.com).
     domain = urlparse(url).netloc.lower()
     if 'iaeme.com' in domain:
         iaeme_pattern = re.compile(r'International Journal.*?Indexing', re.IGNORECASE | re.DOTALL)
         content = iaeme_pattern.sub('', content)
+    current_step += 1
+    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
-    # Truncate if too long
-    if len(content) > MAX_CONTENT_LENGTH:
+    # Truncate content if it exceeds maximum length.
+    original_length = len(content)
+    if original_length > MAX_CONTENT_LENGTH:
         warning_highlight(
             f"Content exceeds {MAX_CONTENT_LENGTH} characters, truncating",
             category="preprocessing"
         )
         content = f"{content[:MAX_CONTENT_LENGTH]}..."
+    current_step += 1
+    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
-    # Save to cache with TTL
+    # Cache the preprocessed content.
     create_checkpoint(
         cache_key,
         {
@@ -448,40 +534,58 @@ def preprocess_content(content: str, url: str) -> str:
         ttl=3600  # 1 hour TTL
     )
     
+    end_time = time.time()
+    log_performance_metrics(
+        "Content preprocessing", 
+        start_time, 
+        end_time, 
+        "preprocessing",
+        {
+            "original_length": original_length, 
+            "final_length": len(content), 
+            "reduction_percent": round((1 - len(content)/max(1, original_length)) * 100, 2),
+            "cache_hit": False
+        }
+    )
+    
     info_highlight(f"Final content length: {len(content)}", category="preprocessing")
     return content
 
 def estimate_tokens(text: str) -> int:
-    """Estimate number of tokens in text using character ratio.
-    
+    """
+    Estimate the number of tokens in a text based on a fixed character-to-token ratio.
+
     Args:
-        text: Text to estimate tokens for
-        
+        text (str): The text whose tokens are to be estimated.
+
     Returns:
-        Estimated number of tokens
-        
+        int: The estimated token count.
+
     Examples:
         >>> # Assuming TOKEN_CHAR_RATIO = 4.0
         >>> estimate_tokens("This is a test string")
-        5  # ~20 characters / 4.0 = 5 tokens
+        5  # Approximately 20 characters / 4.0
         
         >>> estimate_tokens("")
         0
         
         >>> estimate_tokens("Short")
-        1  # ~5 characters / 4.0 = 1 token
+        1  # Approximately 5 characters / 4.0
     """
     return int(len(text) / TOKEN_CHAR_RATIO) if text else 0
 
 def should_skip_content(url: str) -> bool:
-    """Check if content should be skipped based on URL patterns.
-    
+    """
+    Determine if the content from a given URL should be skipped based on certain rules.
+
+    The function checks for problematic file extensions, MIME type patterns, and known problematic sites.
+
     Args:
-        url: URL to check
-        
+        url (str): The URL to evaluate.
+
     Returns:
-        True if content should be skipped, False otherwise
-        
+        bool: True if the content should be skipped; False otherwise.
+
     Examples:
         >>> should_skip_content("http://example.com/document.pdf")
         True
@@ -490,7 +594,7 @@ def should_skip_content(url: str) -> bool:
         False
         
         >>> should_skip_content("http://scribd.com/document")
-        True  # Problematic site
+        True  # Due to problematic site.
         
         >>> should_skip_content("")
         True
@@ -501,12 +605,12 @@ def should_skip_content(url: str) -> bool:
         error_highlight(f"Error decoding URL: {str(e)}", category="validation")
         decoded_url = url.lower()
 
-    # Enhanced PDF detection
+    # Enhanced PDF detection.
     if any(p in decoded_url for p in ('.pdf', '%2Fpdf', '%3Fpdf')):
         info_highlight(f"Skipping PDF content: {url}", category="validation")
         return True
 
-    # Add MIME-type pattern detection
+    # MIME-type pattern detection.
     mime_patterns = [
         r'application/pdf',
         r'application/\w+?pdf',
@@ -521,13 +625,13 @@ def should_skip_content(url: str) -> bool:
 
     url_lower = url.lower()
 
-    # Check for problematic file types
+    # Check for problematic file types.
     for pattern in PROBLEMATIC_PATTERNS:
         if re.search(pattern, url_lower):
             info_highlight(f"Skipping content with pattern {pattern}: {url}", category="validation")
             return True
 
-    # Check for problematic sites
+    # Check for problematic sites.
     domain = urlparse(url).netloc.lower()
     for site in PROBLEMATIC_SITES:
         if site in domain:
@@ -539,71 +643,68 @@ def should_skip_content(url: str) -> bool:
 
     return False
 
-def _merge_field(merged: Dict[str, Any], result: Dict[str, Any], field: str, operation: str, seen_items: set) -> None:
-    """Helper function to merge a single field based on operation type.
-    
-    Args:
-        merged: Dictionary containing the merged results
-        result: Dictionary containing the current result to merge
-        field: Field name to merge
-        operation: Type of merge operation ('extend', 'update', 'max', 'min', 'avg')
-        seen_items: Set of already seen items to prevent duplicates
-        
-    Examples:
-        # Extend operation
-        >>> merged = {'items': [1, 2]}
-        >>> result = {'items': [3, 4]}
-        >>> seen_items = set()
-        >>> _merge_field(merged, result, 'items', 'extend', seen_items)
-        >>> merged
-        {'items': [1, 2, 3, 4]}
-
-        # Update operation
-        >>> merged = {'counts': {'a': 1}}
-        >>> result = {'counts': {'b': 2}}
-        >>> _merge_field(merged, result, 'counts', 'update', seen_items)
-        >>> merged
-        {'counts': {'a': 1, 'b': 2}}
-
-        # Max operation
-        >>> merged = {'score': 5}
-        >>> result = {'score': 8}
-        >>> _merge_field(merged, result, 'score', 'max', seen_items)
-        >>> merged
-        {'score': 8}
+def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: str, operation: str, seen_items: set) -> None:
     """
-    if field not in result:
-        return
+    Helper function to merge a specific field from a list of result dictionaries into the merged dictionary.
 
-    value = result[field]
-    if operation == "extend":
-        merged[field] = merged.get(field, [])
-        item_key = json.dumps(value, sort_keys=True)
-        if item_key not in seen_items:
+    The operation can be:
+      - 'extend': Append unique items to a list.
+      - 'update': Update dictionary values.
+      - 'max' or 'min': Keep the maximum or minimum value.
+      - 'avg': Append values to compute an average later.
+
+    Args:
+        merged (Dict[str, Any]): The dictionary accumulating merged results.
+        results (List[Dict[str, Any]]): The list of result dictionaries from which to merge data.
+        field (str): The field key to merge.
+        operation (str): The merge operation to perform ('extend', 'update', 'max', 'min', 'avg').
+        seen_items (set): A set to track items already merged to avoid duplicates.
+
+    Examples:
+        >>> merged = {}
+        >>> results = [{'score': 8}, {'score': 9}]
+        >>> _merge_field(merged, results, 'score', 'max', set())
+        >>> merged
+        {'score': 9}
+    """
+    for result in results:
+        if field not in result:
+            continue
+
+        value = result[field]
+        if operation == "extend":
+            merged[field] = merged.get(field, [])
+            item_key = json.dumps(value, sort_keys=True)
+            if item_key not in seen_items:
+                merged[field].append(value)
+                seen_items.add(item_key)
+        elif operation == "update":
+            merged[field] = merged.get(field, {})
+            merged[field].update(value)
+        elif operation in {"max", "min"}:
+            if field not in merged or (operation == "max" and value > merged[field]) or (operation == "min" and value < merged[field]):
+                merged[field] = value
+        elif operation == "avg":
+            merged[field] = merged.get(field, [])
             merged[field].append(value)
-            seen_items.add(item_key)
-    elif operation == "update":
-        merged[field] = merged.get(field, {})
-        merged[field].update(value)
-    elif operation in {"max", "min"}:
-        if field not in merged or (operation == "max" and value > merged[field]) or (operation == "min" and value < merged[field]):
-            merged[field] = value
-    elif operation == "avg":
-        merged[field] = merged.get(field, [])
-        merged[field].append(value)
 
 def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Merge results from multiple chunks into a single result based on merge strategy.
-    
+    """
+    Merge multiple chunk extraction results into a single consolidated result.
+
+    The function uses a merge strategy (or a default one based on the category)
+    to determine how to merge each field (e.g., 'extend' lists, 'update' dictionaries,
+    or compute 'max', 'min', or 'avg' values).
+
     Args:
-        results: List of dictionaries containing results from each chunk
-        category: Category of the extraction (e.g., 'research', 'summary')
-        merge_strategy: Optional dictionary mapping fields to merge operations
-                       ('extend', 'update', 'max', 'min', 'avg')
-        
+        results (List[Dict[str, Any]]): A list of dictionaries containing results from each chunk.
+        category (str): The category of the extraction (e.g., 'research', 'summary').
+        merge_strategy (Optional[Dict[str, str]]): Optional mapping of field names to merge operations.
+            If not provided, a default mapping for the category is used.
+
     Returns:
-        Dictionary containing the merged results
-        
+        Dict[str, Any]: A single dictionary containing the merged results.
+
     Examples:
         >>> results = [
         ...     {'findings': ['finding1'], 'score': 5},
@@ -611,60 +712,93 @@ def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_stra
         ... ]
         >>> merge_strategy = {'findings': 'extend', 'score': 'max'}
         >>> merge_chunk_results(results, 'research', merge_strategy)
-        {
-            'findings': ['finding1', 'finding2'],
-            'score': 8
-        }
-
-        # With average operation
-        >>> results = [
-        ...     {'rating': 4.0},
-        ...     {'rating': 6.0}
-        ... ]
+        {'findings': ['finding1', 'finding2'], 'score': 8}
+        
+        >>> # Using average merge operation
+        >>> results = [{'rating': 4.0}, {'rating': 6.0}]
         >>> merge_strategy = {'rating': 'avg'}
         >>> merge_chunk_results(results, 'review', merge_strategy)
-        {
-            'rating': 5.0
-        }
+        {'rating': 5.0}
     """
     if not results:
-        warning_highlight("No results to merge", category=category)
+        warning_highlight(f"No results to merge for category: {category}")
         return get_default_extraction_result(category)
 
-    info_highlight(f"Merging {len(results)} chunk results", category=category)
-    merged = get_default_extraction_result(category)
-    merge_mappings = merge_strategy or get_category_merge_mapping(category)
-    seen_items = set()
-
-    for result in results:
-        if "content" in result:
-            try:
-                result = safe_json_parse(result["content"], category)
-            except Exception as e:
-                error_highlight(f"Error parsing content: {str(e)}", category=category)
-                continue
-                
-        for field, operation in merge_mappings.items():
-            _merge_field(merged, result, field, operation, seen_items)
+    start_time = time.time()
     
-    # Calculate averages
-    for field, operation in merge_mappings.items():
-        if operation == "avg" and field in merged:
-            merged[field] = sum(merged[field]) / len(results)
-
-    info_highlight(f"Merged {len(results)} results successfully", category=category)
+    info_highlight(f"Merging {len(results)} chunk results for category: {category}")
+    
+    # Get the default merge strategy for this category if none provided.
+    if not merge_strategy:
+        merge_strategy = get_category_merge_mapping(category)
+        
+    merged: Dict[str, Any] = {}
+    seen_items: Set[str] = set()
+    
+    # Track progress of merging
+    total_fields = len(merge_strategy) if merge_strategy else 0
+    if total_fields == 0 and results:
+        # If no merge strategy, count fields in first result
+        total_fields = len(results[0].keys())
+    
+    current_field = 0
+    
+    # Process each field according to its merge operation.
+    for field, operation in merge_strategy.items():
+        _merge_field(merged, results, field, operation, seen_items)
+        current_field += 1
+        if total_fields > 0:
+            log_progress(current_field, total_fields, "merging", f"Merging {category} results")
+    
+    # Process any fields in the results that weren't in the merge strategy.
+    for result in results:
+        for field in result:
+            if field not in merge_strategy and field not in merged:
+                # Default to 'extend' for lists, 'update' for dicts, 'max' for numbers.
+                if isinstance(result[field], list):
+                    _merge_field(merged, results, field, 'extend', seen_items)
+                elif isinstance(result[field], dict):
+                    _merge_field(merged, results, field, 'update', seen_items)
+                elif isinstance(result[field], (int, float)):
+                    _merge_field(merged, results, field, 'max', seen_items)
+                else:
+                    # For other types, just take the first non-None value.
+                    if result[field] is not None and field not in merged:
+                        merged[field] = result[field]
+    
+    # Calculate final averages for 'avg' operations.
+    for field, operation in merge_strategy.items():
+        if operation == 'avg' and isinstance(merged.get(field), list):
+            values = merged[field]
+            if values:
+                merged[field] = sum(values) / len(values)
+            else:
+                merged[field] = 0.0
+    
+    end_time = time.time()
+    log_performance_metrics(
+        f"Merging {category} results", 
+        start_time, 
+        end_time, 
+        "merging",
+        {"num_results": len(results), "num_fields": len(merged)}
+    )
+    
     return merged
 
 def validate_content(content: str) -> bool:
-    """Validate content before processing.
-    
+    """
+    Validate that the provided content meets minimum requirements.
+
+    This function checks that the content is a string, is non-empty,
+    and meets a minimum length requirement.
+
     Args:
-        content: Content string to validate
-        
+        content (str): The content string to validate.
+
     Returns:
-        True if content is valid (non-empty string with minimum length),
-        False otherwise
-        
+        bool: True if the content is valid; False otherwise.
+
     Examples:
         >>> validate_content("This is valid content")
         True
@@ -675,14 +809,14 @@ def validate_content(content: str) -> bool:
         >>> validate_content("Hi")  # Too short
         False
         
-        >>> validate_content(None)  # Invalid type
+        >>> validate_content(123)  # Invalid type (non-string)
         False
     """
     if not content or not isinstance(content, str):
         warning_highlight("Invalid content type or empty content", category="validation")
         return False
         
-    if len(content) < 10:  # Minimum content length
+    if len(content) < 10:  # Minimum content length requirement.
         warning_highlight(
             f"Content too short: {len(content)} characters",
             category="validation"
@@ -699,4 +833,4 @@ __all__ = [
     "merge_chunk_results",
     "validate_content",
     "detect_content_type"
-] 
+]

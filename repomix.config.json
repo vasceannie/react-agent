@@ -12,7 +12,7 @@
     "showLineNumbers": false,
     "copyToClipboard": false
   },
-  "include": [],
+  "include": ["src/react_agent/utils/*.py"],
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,

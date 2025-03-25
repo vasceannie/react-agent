@@ -66,6 +66,13 @@ class Configuration:
         },
     )
 
+    anthropic_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY"),
+        metadata={
+            "description": "API key for the Anthropic service. Required for chat completions."
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

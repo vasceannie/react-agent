@@ -22,6 +22,16 @@ The ReAct agent:
 
 By default, it's set up with a basic set of tools, but can be easily extended with custom tools to suit various use cases.
 
+### Document Processing
+
+The agent includes integration with [Docling](https://github.com/DS4SD/docling) for processing PDF files and other document formats (DOCX, XLSX, PPTX, etc.) that are not compatible with HTML. This enables the agent to:
+
+- Extract text from PDF files and other document formats
+- Process and analyze content from documents
+- Include document information in research and responses
+
+This integration is automatically used when processing document URLs during research tasks.
+
 ## Getting Started
 
 Assuming you have already [installed LangGraph Studio](https://github.com/langchain-ai/langgraph-studio?tab=readme-ov-file#download), to set up:

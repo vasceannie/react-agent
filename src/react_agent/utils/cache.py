@@ -36,13 +36,18 @@ import json
 import time
 from datetime import UTC, datetime
 from functools import wraps
-from typing import Any, Callable, Dict, TypeVar, cast, Optional
+from typing import Any, Callable, Dict, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
 
-from .logging import get_logger, log_performance_metrics, info_highlight, warning_highlight
+from .logging import (
+    get_logger,
+    info_highlight,
+    log_performance_metrics,
+    warning_highlight,
+)
 
 # Get module logger
 logger = get_logger(__name__)

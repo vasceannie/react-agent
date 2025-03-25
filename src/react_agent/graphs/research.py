@@ -35,6 +35,8 @@ from react_agent.utils.content import (
     detect_content_type,
     should_skip_content,
     validate_content,
+    process_document_with_docling,
+    DOCLING_AVAILABLE,
 )
 from react_agent.utils.extraction import enrich_extracted_fact, extract_statistics
 from react_agent.utils.extraction import (
@@ -453,6 +455,22 @@ async def _process_search_result(
         return [], [], []
 
     content_type = detect_content_type(url, content)
+    
+    # Handle document file types with Docling if available
+    if DOCLING_AVAILABLE and content_type in ('pdf', 'doc', 'excel', 'presentation', 'document'):
+        try:
+            info_highlight(f"Processing document with Docling: {url}", category="extraction")
+            extracted_text, detected_type = process_document_with_docling(url)
+            if validate_content(extracted_text):
+                content = extracted_text
+                content_type = detected_type
+                info_highlight(f"Successfully extracted text from document: {url}", category="extraction")
+            else:
+                warning_highlight(f"Extracted text from document didn't meet validation criteria: {url}", category="extraction")
+        except Exception as e:
+            warning_highlight(f"Error processing document with Docling: {str(e)}", category="extraction")
+            # Continue with whatever content we have
+    
     prompt_template = get_extraction_prompt(
         category=category,
         query=original_query,

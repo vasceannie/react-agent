@@ -68,10 +68,12 @@ logger = get_logger(__name__)
 # Type definitions for API responses
 # -------------------------------------------------------------------------
 class ErrorResponse(TypedDict):
+    """Type definition for error responses from Jina APIs."""
     error: Dict[str, Any]
 
 
 class RawResponse(TypedDict):
+    """Type definition for raw responses from Jina APIs."""
     raw_response: str
     status: int
 
@@ -83,8 +85,7 @@ ApiResponse = Dict[str, Any]
 # Global Retry Configuration
 # -------------------------------------------------------------------------
 class RetryConfig(BaseModel):
-    """Basic configuration for retrying failed network requests.
-    """
+    """Basic configuration for retrying failed network requests."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     max_retries: PositiveInt = Field(
@@ -139,8 +140,8 @@ async def _make_request_with_retry(
     while attempt < retry_config.max_retries:
         attempt += 1
         try:
+            info_highlight(f"Attempt {attempt} {method} {url}", "JinaTool")
             async with aiohttp.ClientSession() as session:
-                info_highlight(f"Attempt {attempt} {method} {url}", "JinaTool")
                 async with session.request(
                     method=method,
                     url=url,
@@ -271,7 +272,7 @@ class EmbeddingsTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: EmbeddingsRequest, **kwargs: Any) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Embeddings API.
 
         Args:
@@ -297,7 +298,7 @@ class EmbeddingsTool(BaseTool):
         )
         return resp
 
-    def run(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
+    def run(self, request: EmbeddingsRequest, **kwargs: Any) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Embeddings API.
 
         Args:
@@ -306,7 +307,7 @@ class EmbeddingsTool(BaseTool):
         Returns:
             The API response containing embeddings or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -363,7 +364,7 @@ class RerankerTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: RerankerRequest, **kwargs: Any) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Re-Ranker API.
 
         Args:
@@ -389,7 +390,7 @@ class RerankerTool(BaseTool):
         )
         return resp
 
-    def run(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
+    def run(self, request: RerankerRequest, **kwargs: Any) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Re-Ranker API.
 
         Args:
@@ -398,7 +399,7 @@ class RerankerTool(BaseTool):
         Returns:
             The API response containing re-ranked documents or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -406,9 +407,7 @@ class RerankerTool(BaseTool):
 #    Endpoint: https://r.jina.ai/
 # -------------------------------------------------------------------------
 class ReaderHeaders(BaseModel):
-    """Custom headers for advanced usage with the Reader API.
-    Note: All are optional, but can be used to refine scraping behaviors.
-    """
+    """Headers for the Reader API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     x_engine: Optional[str] = Field(default=None, alias="X-Engine")
@@ -443,6 +442,7 @@ class ReaderRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
+        """Validates that the URL is valid and not a placeholder."""
         if not is_valid_url(v):
             raise ValueError(f"Invalid or placeholder URL: {v}")
         return v
@@ -468,7 +468,7 @@ class ReaderTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: ReaderRequest, **kwargs: Any) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Reader API.
 
         Args:
@@ -507,7 +507,7 @@ class ReaderTool(BaseTool):
         )
         return resp
 
-    def run(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
+    def run(self, request: ReaderRequest, **kwargs: Any) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Reader API.
 
         Args:
@@ -516,7 +516,7 @@ class ReaderTool(BaseTool):
         Returns:
             The API response containing webpage content or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -550,6 +550,7 @@ class SearchRequest(BaseModel):
     @field_validator("q")
     @classmethod
     def no_placeholder_query(cls, v: str) -> str:
+        """Validates that the search query is not empty."""
         if not v.strip():
             raise ValueError("Search query cannot be empty.")
         return v
@@ -560,7 +561,6 @@ class SearchResultItem(TypedDict):
     title: str
     url: str
     snippet: str
-    content: Optional[str]
 
 
 class SearchResponse(TypedDict):
@@ -579,7 +579,7 @@ class SearchTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: SearchRequest, **kwargs: Any) -> Union[SearchResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Search API.
 
         Args:
@@ -617,7 +617,7 @@ class SearchTool(BaseTool):
         )
         return resp
 
-    def run(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
+    def run(self, request: SearchRequest, **kwargs: Any) -> Union[SearchResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Search API.
 
         Args:
@@ -626,7 +626,7 @@ class SearchTool(BaseTool):
         Returns:
             The API response containing search results or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -654,6 +654,7 @@ class GroundingRequest(BaseModel):
     @field_validator("statement")
     @classmethod
     def statement_not_empty(cls, v: str) -> str:
+        """Validates that the statement is not empty."""
         if not v.strip():
             raise ValueError("Statement cannot be empty.")
         return v
@@ -684,7 +685,7 @@ class GroundingTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
+    async def _arun(self, request: GroundingRequest, **kwargs: Any) -> Union[GroundingResult, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Grounding API.
 
         Args:
@@ -721,7 +722,7 @@ class GroundingTool(BaseTool):
         )
         return resp
 
-    def run(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
+    def run(self, request: GroundingRequest, **kwargs: Any) -> Union[GroundingResult, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Grounding API.
 
         Args:
@@ -730,7 +731,7 @@ class GroundingTool(BaseTool):
         Returns:
             The API response containing factual verification or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -773,13 +774,14 @@ class SegmenterRequest(BaseModel):
     @field_validator("content")
     @classmethod
     def content_not_empty(cls, v: str) -> str:
+        """Validates that the content is not empty."""
         if not v.strip():
             raise ValueError("Segmenter content cannot be empty.")
         return v
 
     @model_validator(mode="after")
     def validate_head_tail(self) -> "SegmenterRequest":
-        """Ensure head and tail are not both specified."""
+        """Ensures head and tail are not both specified."""
         if self.head is not None and self.tail is not None:
             raise ValueError("Only one of head or tail can be specified, not both.")
         return self
@@ -817,7 +819,7 @@ class SegmenterTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: SegmenterRequest, **kwargs: Any) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Segmenter API.
 
         Args:
@@ -843,7 +845,7 @@ class SegmenterTool(BaseTool):
         )
         return resp
 
-    def run(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
+    def run(self, request: SegmenterRequest, **kwargs: Any) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Segmenter API.
 
         Args:
@@ -852,7 +854,7 @@ class SegmenterTool(BaseTool):
         Returns:
             The API response containing segmented text or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
 
 # -------------------------------------------------------------------------
@@ -888,6 +890,7 @@ class ClassifierRequest(BaseModel):
     @field_validator("input")
     @classmethod
     def validate_input_not_empty(cls, v: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
+        """Validates that the input list is not empty."""
         if not v:
             raise ValueError("Classifier input cannot be an empty list.")
         return v
@@ -895,6 +898,7 @@ class ClassifierRequest(BaseModel):
     @field_validator("labels")
     @classmethod
     def validate_labels_not_empty(cls, v: List[str]) -> List[str]:
+        """Validates that the labels list is not empty and contains no empty strings."""
         if not v:
             raise ValueError("Classifier labels cannot be empty.")
         # Also validate individual labels are not empty
@@ -926,7 +930,7 @@ class ClassifierTool(BaseTool):
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
-    async def _arun(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
+    async def _arun(self, request: ClassifierRequest, **kwargs: Any) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
         """Asynchronously call the Jina Classifier API.
 
         Args:
@@ -952,7 +956,7 @@ class ClassifierTool(BaseTool):
         )
         return resp
 
-    def run(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
+    def run(self, request: ClassifierRequest, **kwargs: Any) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
         """Synchronous wrapper for calling the Jina Classifier API.
 
         Args:
@@ -961,9 +965,5 @@ class ClassifierTool(BaseTool):
         Returns:
             The API response containing classification results or error information
         """
-        return asyncio.run(self._arun(request))
+        return asyncio.run(self._arun(request, **kwargs))
 
-
-# -------------------------------------------------------------------------
-# End of File
-# -------------------------------------------------------------------------

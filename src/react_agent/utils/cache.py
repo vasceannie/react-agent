@@ -3,13 +3,24 @@
 This module provides a unified interface for caching and checkpointing with LangGraph,
 ensuring type safety and consistent behavior across the application.
 
-Example:
-    @cache_result(ttl=600)
-    def compute(a: int, b: int) -> int:
-        return a + b
+Examples:
+    Basic usage with simple function:
+    >>> @cache_result(ttl=600)
+    >>> def compute(a: int, b: int) -> int:
+    >>>     return a + b
+    >>> result = compute(3, 4)  # Returns 7, either from cache or computed
 
-    # Using the decorated function
-    result = compute(3, 4)  # Returns 7, either from cache or computed.
+    Using the ProcessorCache directly:
+    >>> cache = ProcessorCache(thread_id="test-thread")
+    >>> cache.put("user:123", {"name": "John", "age": 30}, ttl=3600)
+    >>> user_data = cache.get("user:123")
+    >>> print(user_data)  # Output: {'name': 'John', 'age': 30}
+
+    Cache statistics example:
+    >>> cache = ProcessorCache()
+    >>> cache.get("missing_key")  # Returns None (cache miss)
+    >>> cache.cache_hits  # Returns 0
+    >>> cache.cache_misses  # Returns 1
 """
 
 from __future__ import annotations
@@ -40,8 +51,14 @@ R = TypeVar('R')
 class CacheEntryData(TypedDict):
     """Data structure for individual cache entries.
 
-    This TypedDict defines the structure of each entry stored in the cache,
-    ensuring consistent data organization and type safety.
+    Example:
+        {
+            "data": {"product": "Widget", "price": 19.99},  # The actual cached data
+            "timestamp": "2023-10-15T14:30:00.000000+00:00",  # ISO format timestamp
+            "ttl": 3600,  # Time-to-live in seconds
+            "version": 1,  # Cache version
+            "metadata": {"source": "API", "tags": ["popular"]}  # Optional metadata
+        }
     """
     data: Any
     timestamp: str
@@ -64,7 +81,25 @@ class CheckpointMetadataDict(TypedDict):
 
 
 class ProcessorCache:
-    """A type-safe processor cache utilizing LangGraph checkpointing for persistent storage."""
+    """A type-safe processor cache utilizing LangGraph checkpointing for persistent storage.
+
+    Examples:
+        Initialization:
+        >>> cache = ProcessorCache(thread_id="user-session-123", version=2)
+
+        Basic operations:
+        >>> cache.put("product:456", {"name": "Gadget", "stock": 42}, ttl=300)
+        >>> item = cache.get("product:456")
+        >>> print(item)  # Output: {'name': 'Gadget', 'stock': 42}
+
+        With metadata:
+        >>> cache.put(
+        ...     "config:app",
+        ...     {"theme": "dark", "locale": "en_US"},
+        ...     ttl=86400,
+        ...     metadata={"updated_by": "system"}
+        ... )
+    """
     
     def __init__(self, thread_id: str = "default-processor", version: int = 1) -> None:
         """Initialize the cache with a specific thread ID and version."""
@@ -85,7 +120,21 @@ class ProcessorCache:
         })
     
     def get(self, key: str) -> Any | None:
-        """Retrieve data from the cache for a given key."""
+        """Retrieve data from the cache for a given key.
+
+        Args:
+            key: The unique identifier for the cached data
+
+        Returns:
+            The cached data if found and valid, otherwise None
+
+        Examples:
+            >>> cache.get("user:789")
+            {'name': 'Alice', 'email': 'alice@example.com'}
+
+            >>> cache.get("nonexistent_key")
+            None
+        """
         start_time = time.time()
         
         # First check memory cache for fallback
@@ -122,7 +171,25 @@ class ProcessorCache:
         ttl: int = 3600,
         metadata: Dict[str, Any] | None = None
     ) -> None:
-        """Store data in the cache under the provided key."""
+        """Store data in the cache under the provided key.
+
+        Args:
+            key: Unique identifier for the data
+            data: The data to be cached (any serializable type)
+            ttl: Time-to-live in seconds (default: 3600)
+            metadata: Optional dictionary of metadata (default: None)
+
+        Examples:
+            >>> cache.put("session:abc123", {"user_id": 42, "logged_in": True}, ttl=1800)
+
+            With metadata:
+            >>> cache.put(
+            ...     "report:q3",
+            ...     {"revenue": 1_000_000, "growth": 0.15},
+            ...     ttl=86400,
+            ...     metadata={"generated_by": "report_service", "format": "v2"}
+            ... )
+        """
         start_time = time.time()
 
         # Create cache entry
@@ -179,7 +246,27 @@ class ProcessorCache:
         self,
         ttl: int = 3600
     ) -> Callable[[Callable[..., R]], Callable[..., R]]:
-        """Decorate a function to cache its results with type preservation."""
+        """Decorate a function to cache its results with type preservation.
+
+        Args:
+            ttl: Time-to-live in seconds for cached results (default: 3600)
+
+        Returns:
+            A decorated function that caches its results
+
+        Examples:
+            Basic usage:
+            >>> @cache.cache_result(ttl=300)
+            >>> def get_user_details(user_id: int) -> dict:
+            >>>     # Expensive database call here
+            >>>     return {"id": user_id, "name": "John"}
+
+            First call (executes function):
+            >>> get_user_details(42)  # Returns {'id': 42, 'name': 'John'}
+
+            Subsequent call (returns cached result):
+            >>> get_user_details(42)  # Returns cached result immediately
+        """
         def decorator(func: Callable[..., R]) -> Callable[..., R]:
             @wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> R:

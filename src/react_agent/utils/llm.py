@@ -108,6 +108,16 @@ anthropic_client: AsyncAnthropic = AsyncAnthropic(
 
 
 class Message(TypedDict):
+    """A message in a conversation with an LLM.
+    
+    Attributes:
+        role: The role of the message sender ('system', 'user', 'assistant')
+        content: The text content of the message
+        
+    Examples:
+        >>> system_msg: Message = {"role": "system", "content": "You are helpful"}
+        >>> user_msg: Message = {"role": "user", "content": "Hello!"}
+    """
     role: str
     content: str
 
@@ -118,7 +128,22 @@ class Message(TypedDict):
 def _build_config(
     kwargs: Dict[str, Any], default_model: Union[str, None]
 ) -> Dict[str, Any]:
-    """Build a configuration dictionary from keyword arguments, ensuring the default model is set if not provided."""
+    """Build a configuration dictionary merging defaults with provided kwargs.
+    
+    Args:
+        kwargs: Configuration overrides
+        default_model: Default model if none specified
+        
+    Returns:
+        Dict containing merged configuration
+        
+    Examples:
+        >>> _build_config({"temperature": 0.5}, "openai/gpt-4")
+        {'configurable': {'model': 'openai/gpt-4', 'temperature': 0.5}}
+        
+        >>> _build_config({"model": "anthropic/claude-2"}, None)
+        {'configurable': {'model': 'anthropic/claude-2'}}
+    """
     config = kwargs.pop("config", {})
     configurable = config.get("configurable", {})
     if default_model and "model" not in configurable:
@@ -131,7 +156,25 @@ def _build_config(
 async def _ensure_system_message(
     messages: List[Message], system_prompt: str
 ) -> List[Message]:
-    """Ensure that the system message is present in the message list."""
+    """Ensure system prompt is present in message list.
+    
+    Args:
+        messages: Existing conversation messages
+        system_prompt: System instruction to add if missing
+        
+    Returns:
+        Updated message list with system prompt
+        
+    Examples:
+        >>> await _ensure_system_message(
+        ...     [{"role": "user", "content": "Hi"}], 
+        ...     "Be helpful"
+        ... )
+        [
+            {"role": "system", "content": "Be helpful"},
+            {"role": "user", "content": "Hi"}
+        ]
+    """
     if system_prompt and not any(msg["role"] == "system" for msg in messages):
         return [{"role": "system", "content": system_prompt}] + messages
     return messages
@@ -140,7 +183,20 @@ async def _ensure_system_message(
 async def _summarize_content(
     input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS
 ) -> str:
-    """Summarize long content using a concise summary model."""
+    """Generate a concise summary of long content.
+    
+    Args:
+        input_content: Text to summarize
+        max_tokens: Maximum length of summary
+        
+    Returns:
+        Concise summary text
+        
+    Examples:
+        >>> long_text = "A very long article about climate change..."
+        >>> await _summarize_content(long_text)
+        "Climate change is causing rising temperatures..."
+    """
     try:
         response = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -170,7 +226,26 @@ async def _summarize_content(
 async def _format_openai_messages(
     messages: List[Message], system_prompt: str, max_tokens: int = MAX_TOKENS
 ) -> List[ChatCompletionMessageParam]:
-    """Format messages for the OpenAI API. Summarize if content exceeds token limits."""
+    """Format messages for OpenAI API, handling long content.
+    
+    Args:
+        messages: Conversation messages
+        system_prompt: System instruction
+        max_tokens: Maximum allowed tokens per message
+        
+    Returns:
+        Formatted messages ready for OpenAI API
+        
+    Examples:
+        >>> await _format_openai_messages(
+        ...     [{"role": "user", "content": "long text..."}],
+        ...     "Be concise"
+        ... )
+        [
+            {"role": "system", "content": "Be concise"},
+            {"role": "user", "content": "summarized text..."}
+        ]
+    """
     messages = await _ensure_system_message(messages, system_prompt)
     formatted_messages: List[ChatCompletionMessageParam] = []
     for msg in messages:
@@ -191,7 +266,22 @@ async def _format_openai_messages(
 async def _call_openai_api(
     model: str, messages: List[ChatCompletionMessageParam]
 ) -> Dict[str, Any]:
-    """Call the OpenAI API with formatted messages."""
+    """Make OpenAI API call and return standardized response.
+    
+    Args:
+        model: OpenAI model name
+        messages: Formatted messages
+        
+    Returns:
+        Dict with 'content' and optional metadata
+        
+    Examples:
+        >>> await _call_openai_api(
+        ...     "gpt-4",
+        ...     [{"role": "user", "content": "Hello"}]
+        ... )
+        {'content': 'Hello! How can I help?'}
+    """
     try:
         response = await openai_client.chat.completions.create(
             model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7
@@ -204,7 +294,22 @@ async def _call_openai_api(
 
 
 async def _call_anthropic_api(model: str, messages: List[Message]) -> Dict[str, Any]:
-    """Call the Anthropic API by converting messages to the required format."""
+    """Make Anthropic API call and return standardized response.
+    
+    Args:
+        model: Anthropic model name  
+        messages: Conversation messages
+        
+    Returns:
+        Dict with 'content' and optional metadata
+        
+    Examples:
+        >>> await _call_anthropic_api(
+        ...     "claude-2",
+        ...     [{"role": "user", "content": "Hi Claude"}]
+        ... )
+        {'content': 'Hello! I am Claude.'}
+    """
     anthropic_messages = []
     for msg in messages:
         if msg["role"] == "system":
@@ -305,7 +410,23 @@ async def _call_model(
 async def _process_chunk(
     chunk: str, previous_messages: List[Message], config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
-    """Process a single chunk of content with retries."""
+    """Process a content chunk with retry logic.
+    
+    Args:
+        chunk: Text chunk to process
+        previous_messages: Conversation context
+        config: Optional runtime config
+        
+    Returns:
+        Parsed JSON response or empty dict on failure
+        
+    Examples:
+        >>> await _process_chunk(
+        ...     "Text chunk...",
+        ...     [{"role": "system", "content": "Extract entities"}]
+        ... )
+        {'entities': ['...']}
+    """
     if not chunk or not previous_messages:
         return {}
     messages: List[Message] = previous_messages + [{"role": "human", "content": chunk}]
@@ -366,7 +487,21 @@ async def _call_model_json(
 
 
 def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Parse and clean a JSON response."""
+    """Parse and clean JSON response from LLM.
+    
+    Args:
+        response: Raw LLM response (string or dict)
+        
+    Returns:
+        Parsed JSON as dict or empty dict on failure
+        
+    Examples:
+        >>> _parse_json_response('```json\n{"key": "value"}\n```')
+        {'key': 'value'}
+        
+        >>> _parse_json_response({"key": "value"})
+        {'key': 'value'}
+    """
     if isinstance(response, dict):
         return response
     try:

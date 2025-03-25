@@ -298,7 +298,34 @@ class ProcessorCache:
         return decorator
     
     def _generate_cache_key(self, func: Callable, args: tuple, kwargs: dict) -> str:
-        """Generate a unique cache key from function and arguments."""
+        """Generate a unique cache key from function and arguments.
+        
+        Creates a deterministic hash key based on:
+        - Function name or ID
+        - Arguments (positional and keyword)
+        - Cache version
+        
+        Args:
+            func: The function being cached
+            args: Positional arguments passed to the function
+            kwargs: Keyword arguments passed to the function
+            
+        Returns:
+            A SHA256 hex digest string representing the unique cache key
+            
+        Examples:
+            >>> def example(a: int, b: int = 2) -> int:
+            ...     return a + b
+            >>> cache._generate_cache_key(example, (1,), {})
+            'a1b2c3...'  # SHA256 hash
+            
+            >>> cache._generate_cache_key(example, (1,), {'b': 3})
+            'd4e5f6...'  # Different hash due to changed arguments
+            
+            With complex objects:
+            >>> cache._generate_cache_key(example, ([1,2],), {'b': {'x': 1}})
+            'g7h8i9...'  # Hash based on string representation
+        """
         try:
             func_name = func.__name__
         except (AttributeError, TypeError):
@@ -316,7 +343,45 @@ class ProcessorCache:
         return hashlib.sha256(cache_str.encode()).hexdigest()
     
     def _is_cache_valid(self, cached: Dict[str, Any]) -> bool:
-        """Check if a cached entry is still valid."""
+        """Validate if a cached entry is still fresh based on TTL.
+        
+        Checks:
+        - Presence of required timestamp field
+        - Valid ISO format timestamp
+        - Whether current time is within TTL window
+        
+        Args:
+            cached: The cache entry dictionary containing:
+                - timestamp: ISO format string
+                - ttl: Time-to-live in seconds
+                
+        Returns:
+            True if cache entry is valid and fresh, False otherwise
+            
+        Examples:
+            Valid case:
+            >>> entry = {
+            ...     "timestamp": "2023-10-15T14:30:00.000000+00:00",
+            ...     "ttl": 3600,
+            ...     "data": {...}
+            ... }
+            >>> cache._is_cache_valid(entry)  # True if within 1 hour of timestamp
+            
+            Expired case:
+            >>> old_entry = {
+            ...     "timestamp": "2023-10-01T00:00:00.000000+00:00", 
+            ...     "ttl": 3600,
+            ...     "data": {...}
+            ... }
+            >>> cache._is_cache_valid(old_entry)  # False
+            
+            Invalid format:
+            >>> bad_entry = {
+            ...     "timestamp": "invalid-date",
+            ...     "ttl": 3600
+            ... }
+            >>> cache._is_cache_valid(bad_entry)  # False
+        """
         timestamp_str = cached.get("timestamp", "")
         if not timestamp_str:
             return False

@@ -16,14 +16,19 @@ Examples:
     >>> print(score)  # Outputs a quality score between 0.0 and 1.0
 """
 
-from typing import Dict, List, Any, Optional, Set
-from datetime import datetime, timezone
-from dateutil import parser
-import re
-from urllib.parse import urlparse
-from collections import Counter
 
-from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+import contextlib
+import re
+from collections import Counter
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Set, Tuple
+
+from dateutil import parser
+
+from react_agent.utils.logging import (
+    get_logger,
+    info_highlight,
+)
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -52,14 +57,142 @@ HIGH_CREDIBILITY_TERMS = [
 ]
 
 
+def calculate_quantity_score(extracted_facts: List[Dict[str, Any]], sources: List[Dict[str, Any]], 
+                             min_facts: int, min_sources: int) -> float:
+    """Calculate the score component based on the quantity of facts and sources.
+    
+    Args:
+        extracted_facts: A list of fact dictionaries
+        sources: A list of source dictionaries
+        min_facts: Minimum number of facts expected
+        min_sources: Minimum number of sources expected
+        
+    Returns:
+        float: The quantity score component between 0.0 and 0.25
+    """
+    score = 0.0
+    
+    # Facts quantity score (up to 0.15)
+    if len(extracted_facts) >= min_facts * 3:
+        score += 0.15
+    elif len(extracted_facts) >= min_facts * 2:
+        score += 0.12
+    elif len(extracted_facts) >= min_facts:
+        score += 0.08
+    else:
+        fact_ratio = len(extracted_facts) / min_facts if min_facts else 0
+        score += fact_ratio * 0.06
+
+    # Sources quantity score (up to 0.10)
+    if len(sources) >= min_sources * 3:
+        score += 0.10
+    elif len(sources) >= min_sources * 2:
+        score += 0.08
+    elif len(sources) >= min_sources:
+        score += 0.05
+    else:
+        source_ratio = len(sources) / min_sources if min_sources else 0
+        score += source_ratio * 0.03
+        
+    return score
+
+
+def calculate_statistical_content_score(extracted_facts: List[Dict[str, Any]]) -> Tuple[float, List[Dict[str, Any]]]:
+    """Calculate the score component based on statistical content in facts.
+    
+    Args:
+        extracted_facts: A list of fact dictionaries
+        
+    Returns:
+        tuple: (score, stat_facts) where score is between 0.0 and 0.20, and stat_facts is a list
+    """
+    # Identify facts with statistical content
+    stat_facts = [
+        f for f in extracted_facts
+        if "statistics" in f or
+        (isinstance(f.get("source_text"), str) and re.search(r'\d+', f.get("source_text", "")) is not None)
+    ]
+    
+    score = 0.0
+    if stat_facts:
+        stat_ratio = len(stat_facts) / len(extracted_facts) if extracted_facts else 0
+        if stat_ratio >= 0.5:
+            score = 0.20
+        elif stat_ratio >= 0.3:
+            score = 0.15
+        elif stat_ratio >= 0.1:
+            score = 0.10
+        else:
+            score = 0.05
+            
+    return score, stat_facts
+
+
+def calculate_source_quality_score(sources: List[Dict[str, Any]], auth_ratio: float) -> Tuple[float, List[Dict[str, Any]]]:
+    """Calculate the score component based on source quality.
+    
+    Args:
+        sources: A list of source dictionaries
+        auth_ratio: Desired ratio of authoritative sources
+        
+    Returns:
+        tuple: (score, authoritative_sources) where score is between 0.0 and 0.25
+    """
+    authoritative_sources = assess_authoritative_sources(sources)
+    
+    score = 0.0
+    if sources:
+        auth_source_ratio = len(authoritative_sources) / len(sources)
+        if auth_source_ratio >= auth_ratio * 1.5:
+            score = 0.25
+        elif auth_source_ratio >= auth_ratio:
+            score = 0.20
+        elif auth_source_ratio >= auth_ratio * 0.7:
+            score = 0.15
+        elif auth_source_ratio >= auth_ratio * 0.5:
+            score = 0.10
+        else:
+            score = 0.05
+            
+    return score, authoritative_sources
+
+
+def calculate_recency_score(sources: List[Dict[str, Any]], recency_threshold: int) -> Tuple[float, int]:
+    """Calculate the score component based on source recency.
+    
+    Args:
+        sources: A list of source dictionaries
+        recency_threshold: Maximum age in days for a source to be considered recent
+        
+    Returns:
+        tuple: (score, recent_sources) where score is between 0.0 and 0.15
+    """
+    recent_sources = count_recent_sources(sources, recency_threshold)
+    
+    score = 0.0
+    if sources:
+        recency_ratio = recent_sources / len(sources)
+        if recency_ratio >= 0.8:
+            score = 0.15
+        elif recency_ratio >= 0.6:
+            score = 0.12
+        elif recency_ratio >= 0.4:
+            score = 0.08
+        elif recency_ratio >= 0.2:
+            score = 0.05
+        else:
+            score = 0.02
+            
+    return score, recent_sources
+
+
 def calculate_category_quality_score(
     category: str,
     extracted_facts: List[Dict[str, Any]],
     sources: List[Dict[str, Any]],
     thresholds: Dict[str, Any]
 ) -> float:
-    """
-    Calculate an enhanced quality score for a research category based on extracted facts and sources.
+    """Calculate an enhanced quality score for a research category based on extracted facts and sources.
 
     The score is built from several weighted components:
       1. Quantity assessment of facts and sources.
@@ -94,72 +227,19 @@ def calculate_category_quality_score(
     recency_threshold = thresholds.get("recency_threshold_days", 365)
 
     # 1. Quantity Assessment (up to 0.25)
-    if len(extracted_facts) >= min_facts * 3:
-        score += 0.15
-    elif len(extracted_facts) >= min_facts * 2:
-        score += 0.12
-    elif len(extracted_facts) >= min_facts:
-        score += 0.08
-    else:
-        fact_ratio = len(extracted_facts) / min_facts if min_facts else 0
-        score += fact_ratio * 0.06
-
-    if len(sources) >= min_sources * 3:
-        score += 0.10
-    elif len(sources) >= min_sources * 2:
-        score += 0.08
-    elif len(sources) >= min_sources:
-        score += 0.05
-    else:
-        source_ratio = len(sources) / min_sources if min_sources else 0
-        score += source_ratio * 0.03
+    score += calculate_quantity_score(extracted_facts, sources, min_facts, min_sources)
 
     # 2. Statistical Content (up to 0.20)
-    stat_facts = [
-        f for f in extracted_facts
-        if "statistics" in f or
-        (isinstance(f.get("source_text"), str) and re.search(r'\d+', f.get("source_text", "")) is not None)
-    ]
-    if stat_facts:
-        stat_ratio = len(stat_facts) / len(extracted_facts) if extracted_facts else 0
-        if stat_ratio >= 0.5:
-            score += 0.20
-        elif stat_ratio >= 0.3:
-            score += 0.15
-        elif stat_ratio >= 0.1:
-            score += 0.10
-        else:
-            score += 0.05
+    stats_score, stat_facts = calculate_statistical_content_score(extracted_facts)
+    score += stats_score
 
     # 3. Source Quality (up to 0.25)
-    authoritative_sources = assess_authoritative_sources(sources)
-    if sources:
-        auth_source_ratio = len(authoritative_sources) / len(sources)
-        if auth_source_ratio >= auth_ratio * 1.5:
-            score += 0.25
-        elif auth_source_ratio >= auth_ratio:
-            score += 0.20
-        elif auth_source_ratio >= auth_ratio * 0.7:
-            score += 0.15
-        elif auth_source_ratio >= auth_ratio * 0.5:
-            score += 0.10
-        else:
-            score += 0.05
+    quality_score, authoritative_sources = calculate_source_quality_score(sources, auth_ratio)
+    score += quality_score
 
     # 4. Recency (up to 0.15)
-    recent_sources = count_recent_sources(sources, recency_threshold)
-    if sources:
-        recency_ratio = recent_sources / len(sources)
-        if recency_ratio >= 0.8:
-            score += 0.15
-        elif recency_ratio >= 0.6:
-            score += 0.12
-        elif recency_ratio >= 0.4:
-            score += 0.08
-        elif recency_ratio >= 0.2:
-            score += 0.05
-        else:
-            score += 0.02
+    recency_score, recent_sources = calculate_recency_score(sources, recency_threshold)
+    score += recency_score
 
     # 5. Consistency and Cross-Validation (up to 0.15)
     consistency_score = assess_fact_consistency(extracted_facts)
@@ -182,8 +262,7 @@ def calculate_category_quality_score(
 
 
 def assess_authoritative_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Assess and return sources considered authoritative based on domain and credibility terms.
+    """Assess and return sources considered authoritative based on domain and credibility terms.
 
     A source is considered authoritative if its URL domain matches known patterns,
     if it has a high quality score, or if its title/source field contains multiple
@@ -209,7 +288,8 @@ def assess_authoritative_sources(sources: List[Dict[str, Any]]) -> List[Dict[str
         title = source.get("title", "").lower()
         source_name = source.get("source", "").lower()
         credibility_term_count = sum(
-            1 for term in HIGH_CREDIBILITY_TERMS if term in title or term in source_name
+            term in title or term in source_name
+            for term in HIGH_CREDIBILITY_TERMS
         )
         if is_authoritative_domain or quality_score >= 0.8 or credibility_term_count >= 2:
             authoritative_sources.append(source)
@@ -217,8 +297,7 @@ def assess_authoritative_sources(sources: List[Dict[str, Any]]) -> List[Dict[str
 
 
 def count_recent_sources(sources: List[Dict[str, Any]], recency_threshold: int) -> int:
-    """
-    Count how many sources are considered recent based on a recency threshold (in days).
+    """Count how many sources are considered recent based on a recency threshold (in days).
 
     A source is recent if its published date (as ISO string or parseable format) is within
     the specified number of days from the current time.
@@ -235,29 +314,26 @@ def count_recent_sources(sources: List[Dict[str, Any]], recency_threshold: int) 
         >>> print(recent_count)
     """
     recent_count = 0
-    current_time = datetime.now().replace(tzinfo=timezone.utc)
+    current_time = datetime.now().replace(tzinfo=UTC)
     for source in sources:
         published_date = source.get("published_date")
         if not published_date:
             continue
-        try:
+        with contextlib.suppress(Exception):
             try:
                 date = datetime.fromisoformat(published_date.replace('Z', '+00:00'))
             except (ValueError, AttributeError):
                 date = parser.parse(published_date)
             if date.tzinfo is None:
-                date = date.replace(tzinfo=timezone.utc)
+                date = date.replace(tzinfo=UTC)
             days_old = (current_time - date).days
             if days_old <= recency_threshold:
                 recent_count += 1
-        except Exception:
-            pass
     return recent_count
 
 
 def assess_fact_consistency(facts: List[Dict[str, Any]]) -> float:
-    """
-    Assess consistency among extracted facts based on common topics.
+    """Assess consistency among extracted facts based on common topics.
 
     The function extracts topics from each fact and calculates what percentage
     of the facts mention recurring topics. A higher percentage indicates higher consistency.
@@ -282,14 +358,14 @@ def assess_fact_consistency(facts: List[Dict[str, Any]]) -> float:
     if not recurring_topics:
         return 0.5
     facts_with_recurring = sum(
-        1 for fact in facts if any(topic in get_topics_in_fact(fact) for topic in recurring_topics)
+        any(topic in get_topics_in_fact(fact) for topic in recurring_topics)
+        for fact in facts
     )
     return min(1.0, facts_with_recurring / len(facts))
 
 
 def extract_topics_from_facts(facts: List[Dict[str, Any]]) -> List[str]:
-    """
-    Extract key topics or entities from a list of facts.
+    """Extract key topics or entities from a list of facts.
 
     This function aggregates topics from individual facts and returns a combined list.
 
@@ -311,8 +387,7 @@ def extract_topics_from_facts(facts: List[Dict[str, Any]]) -> List[str]:
 
 
 def get_topics_in_fact(fact: Dict[str, Any]) -> Set[str]:
-    """
-    Extract topics from a single fact.
+    """Extract topics from a single fact.
 
     Topics are extracted from the 'data' field or 'source_text' if available.
     For example, vendor names or technical terms.
@@ -347,8 +422,7 @@ def get_topics_in_fact(fact: Dict[str, Any]) -> Set[str]:
 
 
 def extract_noun_phrases(text: str, topics: Set[str]) -> None:
-    """
-    Extract potential noun phrases from text and add them to a topics set.
+    """Extract potential noun phrases from text and add them to a topics set.
 
     This basic extraction finds capitalized multi-word sequences and acronyms.
 
@@ -374,8 +448,7 @@ def extract_noun_phrases(text: str, topics: Set[str]) -> None:
 
 
 def perform_statistical_validation(facts: List[Dict[str, Any]]) -> float:
-    """
-    Validate numeric data consistency among extracted facts.
+    """Validate numeric data consistency among extracted facts.
 
     The function extracts numeric values from each fact's 'source_text' and 'data' fields,
     then computes the relative standard deviation. A lower relative standard deviation indicates
@@ -405,9 +478,8 @@ def perform_statistical_validation(facts: List[Dict[str, Any]]) -> float:
                 if isinstance(val, (int, float)):
                     numeric_values.append(float(val))
                 elif isinstance(val, str):
-                    match = pattern.search(val)
-                    if match:
-                        numeric_values.append(float(match.group(0)))
+                    if match := pattern.search(val):
+                        numeric_values.append(float(match[0]))
     if len(numeric_values) < 3:
         return 0.5  # Neutral score if insufficient numeric data.
     import statistics
@@ -415,9 +487,7 @@ def perform_statistical_validation(facts: List[Dict[str, Any]]) -> float:
         mean_val = statistics.mean(numeric_values)
         stdev_val = statistics.pstdev(numeric_values)
         if abs(mean_val) < 1e-9:
-            if all(abs(x) < 1e-9 for x in numeric_values):
-                return 1.0
-            return 0.5
+            return 1.0 if all(abs(x) < 1e-9 for x in numeric_values) else 0.5
         rel_stdev = stdev_val / abs(mean_val)
         if rel_stdev < 0.1:
             return 1.0
@@ -436,8 +506,7 @@ def calculate_overall_confidence(
     synthesis_quality: float,
     validation_score: float
 ) -> float:
-    """
-    Calculate an overall confidence score from category scores, synthesis quality, and validation score.
+    """Calculate an overall confidence score from category scores, synthesis quality, and validation score.
 
     The overall score is a weighted average of:
       - Average category score (50%)
@@ -469,7 +538,8 @@ def calculate_overall_confidence(
     if len(category_scores) >= 7 and all(score >= 0.6 for score in category_scores.values()):
         base_score += 0.1
     stats_categories = sum(
-        1 for cat, score in category_scores.items() if cat in ['market_dynamics', 'cost_considerations'] and score >= 0.7
+        cat in ['market_dynamics', 'cost_considerations'] and score >= 0.7
+        for cat, score in category_scores.items()
     )
     if stats_categories >= 2:
         base_score += 0.05
@@ -477,8 +547,7 @@ def calculate_overall_confidence(
 
 
 def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
-    """
-    Assess the quality of synthesis output based on section content, citations, and statistics.
+    """Assess the quality of synthesis output based on section content, citations, and statistics.
 
     The function checks for the presence and coverage of synthesis sections, their content,
     and associated citations and statistics to determine a quality score.
@@ -499,22 +568,16 @@ def assess_synthesis_quality(synthesis: Dict[str, Any]) -> float:
     synthesis_content = synthesis.get("synthesis", {})
     if not synthesis_content:
         return 0.3
-    sections_with_content = sum(
-        1 for section in synthesis_content.values()
-        if isinstance(section, dict) and section.get("content") and len(section.get("content", "")) > 50
-    )
+    sections_with_content = sum(bool(isinstance(section, dict) and section.get("content") and len(section.get("content", "")) > 50)
+                            for section in synthesis_content.values())
     section_ratio = sections_with_content / max(1, len(synthesis_content))
     score += section_ratio * 0.2
-    sections_with_citations = sum(
-        1 for section in synthesis_content.values()
-        if isinstance(section, dict) and section.get("citations") and len(section.get("citations", [])) > 0
-    )
+    sections_with_citations = sum(bool(isinstance(section, dict) and section.get("citations") and len(section.get("citations", [])) > 0)
+                              for section in synthesis_content.values())
     citation_ratio = sections_with_citations / max(1, len(synthesis_content))
     score += citation_ratio * 0.15
-    sections_with_stats = sum(
-        1 for section in synthesis_content.values()
-        if isinstance(section, dict) and section.get("statistics") and len(section.get("statistics", [])) > 0
-    )
+    sections_with_stats = sum(bool(isinstance(section, dict) and section.get("statistics") and len(section.get("statistics", [])) > 0)
+                          for section in synthesis_content.values())
     stats_ratio = sections_with_stats / max(1, len(synthesis_content))
     score += stats_ratio * 0.15
     return min(1.0, score)

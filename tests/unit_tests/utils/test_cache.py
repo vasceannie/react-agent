@@ -135,7 +135,7 @@ class TestCodeUnderTest:
         
         Example:
             >>> mock_checkpoint = {
-            ...     "values": {
+            ...     "channel_values": {
             ...         "entry": {
             ...             "data": {"value": "test-value"},
             ...             "timestamp": "2023-01-01T00:00:00+00:00",
@@ -158,8 +158,11 @@ class TestCodeUnderTest:
         # Mock the memory_saver's get method to simulate a checkpoint hit
         test_key = "test-key"
         test_data = {"value": "test-value"}
-        mock_checkpoint = {
-            "values": {
+        
+        # Create a mock checkpoint object that matches our new implementation
+        # which uses "channel_values" instead of "values"
+        mock_checkpoint = type('obj', (object,), {
+            "channel_values": {
                 "entry": {
                     "data": test_data,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -168,8 +171,9 @@ class TestCodeUnderTest:
                     "metadata": {}
                 }
             }
-        }
-        mocker.patch.object(MemorySaver, 'get', return_value=mock_checkpoint)
+        })
+        
+        mocker.patch.object(cache.memory_saver, 'get', return_value=mock_checkpoint)
 
         # Act
         result = cache.get(test_key)

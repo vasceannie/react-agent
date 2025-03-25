@@ -1,7 +1,8 @@
-import pytest
 from typing import Any, Dict, List, cast
 
+import pytest
 from langchain_core.runnables import RunnableConfig
+
 from react_agent.utils.llm import LLMClient, Message
 
 
@@ -122,7 +123,7 @@ class TestLLMModule:
     
         # 2. Mock warning_highlight and error_highlight to track calls
         mock_warning = mocker.patch("react_agent.utils.llm.warning_highlight")
-        mock_error = mocker.patch("react_agent.utils.llm.error_highlight")
+        mocker.patch("react_agent.utils.llm.error_highlight")
     
         # 3. Mock asyncio.sleep to avoid actual delays
         mock_sleep = mocker.patch("asyncio.sleep")

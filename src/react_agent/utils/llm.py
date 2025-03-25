@@ -1,5 +1,4 @@
-"""
-LLM utility functions for handling model calls and content processing.
+"""LLM utility functions for handling model calls and content processing.
 
 This module provides utilities for interacting with language models,
 including content length management, error handling, and JSON parsing.
@@ -28,7 +27,7 @@ Examples:
     ]
     config = {"configurable": {"model": "openai/gpt-4"}}
     response = await _call_model_json(
-        messages, 
+        messages,
         config=config,
         chunk_size=1000,  # Process in 1000-token chunks
         overlap=100       # 100-token overlap between chunks
@@ -41,7 +40,7 @@ Examples:
     ```python
     # Initialize the client
     llm_client = LLMClient(default_model="openai/gpt-4")
-    
+
     # Use in an async function or LangGraph node
     async def my_node(state: dict) -> dict:
         # Simple chat completion
@@ -49,26 +48,26 @@ Examples:
             prompt="What is the capital of France?",
             system_prompt="You are a helpful assistant."
         )
-        
+
         # Get structured JSON output
         data = await llm_client.llm_json(
             prompt="List the top 3 largest countries by area in JSON format",
             system_prompt="You are a helpful assistant that outputs valid JSON."
         )
-        
+
         # Get embeddings
         embedding = await llm_client.llm_embed("This is a text to embed")
-        
+
         return {"response": response, "data": data, "embedding": embedding}
     ```
 """
 
+import asyncio
 import json
 import os
 import re
-import asyncio
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union, cast, TypedDict, Iterable
+from datetime import UTC, datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, TypedDict, Union, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -84,11 +83,11 @@ from react_agent.utils.content import (
     preprocess_content,
     validate_content,
 )
-from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.defaults import ChunkConfig
+from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.logging import (
-    get_logger,
     error_highlight,
+    get_logger,
     info_highlight,
     warning_highlight,
 )
@@ -101,20 +100,22 @@ MAX_SUMMARY_TOKENS: int = 2000
 
 # Initialize API clients
 openai_client: AsyncClient = AsyncClient(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_API_BASE")
+    api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE")
 )
 anthropic_client: AsyncAnthropic = AsyncAnthropic(
     api_key=os.getenv("ANTHROPIC_API_KEY")
 )
 
+
 class Message(TypedDict):
     role: str
     content: str
 
-async def _summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS) -> str:
-    """
-    Summarize content using a more efficient model.
+
+async def _summarize_content(
+    input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS
+) -> str:
+    """Summarize content using a more efficient model.
 
     Args:
         input_content: The content to summarize.
@@ -127,28 +128,34 @@ async def _summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_T
         response = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": (
-                    "You are a helpful assistant that creates concise summaries. "
-                    "Focus on key points and maintain factual accuracy."
-                )},
-                {"role": "user", "content": f"Please summarize the following content concisely:\n\n{input_content}"}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant that creates concise summaries. "
+                        "Focus on key points and maintain factual accuracy."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Please summarize the following content concisely:\n\n{input_content}",
+                },
             ],
             max_tokens=max_tokens,
-            temperature=0.3
+            temperature=0.3,
         )
-        response_content: Optional[str] = cast(Optional[str], response.choices[0].message.content)
+        response_content: str | None = cast(
+            str | None, response.choices[0].message.content
+        )
         return response_content if response_content is not None else ""
     except Exception as e:
         error_highlight(f"Error in _summarize_content: {str(e)}")
         return input_content
 
+
 async def _format_openai_messages(
-    messages: List[Message],
-    system_prompt: str,
-    max_tokens: Optional[int] = None
+    messages: List[Message], system_prompt: str, max_tokens: int | None = None
 ) -> List[ChatCompletionMessageParam]:
-    """
-    Format messages for the OpenAI API with content handling.
+    """Format messages for the OpenAI API with content handling.
 
     Args:
         messages: List of message dictionaries.
@@ -160,7 +167,7 @@ async def _format_openai_messages(
     """
     if not messages:
         return [{"role": "system", "content": system_prompt}]
-    
+
     formatted_messages: List[ChatCompletionMessageParam] = []
     max_tokens = max_tokens or MAX_TOKENS
 
@@ -173,15 +180,17 @@ async def _format_openai_messages(
                 info_highlight("Content too long, summarizing...")
                 content = await _summarize_content(content, max_tokens)
             formatted_messages.append({"role": "user", "content": content})
-    
+
     if all(msg["role"] != "system" for msg in formatted_messages):
         formatted_messages.insert(0, {"role": "system", "content": system_prompt})
-    
+
     return formatted_messages
 
-async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Dict[str, Any]:
-    """
-    Call the OpenAI API using formatted messages.
+
+async def _call_openai_api(
+    model: str, messages: List[ChatCompletionMessageParam]
+) -> Dict[str, Any]:
+    """Call the OpenAI API using formatted messages.
 
     Args:
         model: The model identifier.
@@ -192,23 +201,19 @@ async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam
     """
     try:
         response = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7
+            model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7
         )
-        content: Optional[str] = response.choices[0].message.content
+        content: str | None = response.choices[0].message.content
         return {"content": content} if content else {}
     except Exception as e:
         error_highlight(f"Error in _call_openai_api: {str(e)}")
         return {}
 
+
 async def _call_model(
-    messages: List[Message],
-    config: Optional[RunnableConfig] = None
+    messages: List[Message], config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
-    """
-    Internal function to call the language model with the provided messages.
+    """Call the language model with the provided messages.
 
     Args:
         messages: List of messages (each with 'role' and 'content').
@@ -220,58 +225,62 @@ async def _call_model(
     if not messages:
         error_highlight("No messages provided to _call_model")
         return {}
-    
+
     try:
         config = config or {}
         configurable: Dict[str, Any] = config.get("configurable", {})
-        configurable["timestamp"] = datetime.now(timezone.utc).isoformat()
+        configurable["timestamp"] = datetime.now(UTC).isoformat()
         config = {**config, "configurable": configurable}
         configuration: Configuration = Configuration.from_runnable_config(config)
         logger.info(f"Calling model with {len(messages)} messages")
         logger.debug(f"Config: {config}")
         provider, model = configuration.model.split("/", 1)
         if provider == "openai":
-            openai_formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
+            openai_formatted_messages = await _format_openai_messages(
+                messages, configuration.system_prompt
+            )
             return await _call_openai_api(model, openai_formatted_messages)
         elif provider == "anthropic":
             # Check if a system message is already present
             has_system_message: bool = any(msg["role"] == "system" for msg in messages)
-            
+
             # Create properly typed messages for Anthropic
             anthropic_formatted_messages: List[Dict[str, str]] = []
-            
+
             # Add system message if not already present
             if not has_system_message and configuration.system_prompt:
                 # For Anthropic, we need to handle system messages differently
                 # as they have specific role requirements
                 anthropic_formatted_messages.append({
                     "role": "user",  # Using user role as a workaround for system
-                    "content": f"System instruction: {configuration.system_prompt}"
+                    "content": f"System instruction: {configuration.system_prompt}",
                 })
-            
+
             for msg in messages:
                 # Anthropic only accepts user and assistant roles
                 if msg["role"] == "system":
                     # Convert system messages to user messages with a prefix
                     anthropic_formatted_messages.append({
                         "role": "user",
-                        "content": f"System instruction: {msg['content']}"
+                        "content": f"System instruction: {msg['content']}",
                     })
                 elif msg["role"] in ["user", "assistant"]:
                     anthropic_formatted_messages.append({
                         "role": msg["role"],
-                        "content": msg["content"]
+                        "content": msg["content"],
                     })
-            
+
             # Make the API call
             try:
                 # Cast the messages to the expected type for Anthropic
-                typed_messages = cast(Iterable[MessageParam], anthropic_formatted_messages)
+                typed_messages = cast(
+                    Iterable[MessageParam], anthropic_formatted_messages
+                )
                 response = await anthropic_client.messages.create(
                     model=model,
                     messages=typed_messages,
                     max_tokens=MAX_TOKENS,
-                    temperature=0.7
+                    temperature=0.7,
                 )
                 # Access the content correctly based on the response structure
                 content_block = response.content[0]
@@ -290,14 +299,14 @@ async def _call_model(
         error_highlight(f"Error in _call_model: {str(e)}")
         raise
 
+
 async def _process_chunk(
     chunk: str,
     previous_messages: List[Message],
-    config: Optional[RunnableConfig] = None,
-    model: Optional[str] = None
+    config: RunnableConfig | None = None,
+    model: str | None = None,
 ) -> Dict[str, Any]:
-    """
-    Process a single chunk of content with error handling.
+    """Process a single chunk of content with error handling.
 
     Args:
         chunk: The content chunk to process.
@@ -311,25 +320,35 @@ async def _process_chunk(
     if not chunk or not previous_messages:
         return {}
     try:
-        messages: List[Message] = previous_messages + [{"role": "human", "content": chunk}]
+        messages: List[Message] = previous_messages + [
+            {"role": "human", "content": chunk}
+        ]
         max_retries: int = 3
         retry_delay: int = 1
         for attempt in range(max_retries):
             try:
                 # Convert dict to RunnableConfig if needed
-                runnable_config: Optional[RunnableConfig] = config
-                if config and not isinstance(config, dict) and not isinstance(config, RunnableConfig):
+                runnable_config: RunnableConfig | None = config
+                if (
+                    config
+                    and not isinstance(config, dict)
+                    and not isinstance(config, RunnableConfig)
+                ):
                     runnable_config = cast(RunnableConfig, config)
-                
+
                 response = await _call_model(messages, runnable_config)
                 if not response or not response.get("content"):
                     error_highlight("Empty response from model")
                     return {}
-                parsed: Optional[Dict[str, Any]] = safe_json_parse(response["content"], "model_response")
+                parsed: Dict[str, Any] = safe_json_parse(
+                    response["content"], "model_response"
+                )
                 return parsed if parsed is not None else {}
             except Exception as e:
                 if attempt < max_retries - 1:
-                    warning_highlight(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                    warning_highlight(
+                        f"Attempt {attempt + 1} failed: {str(e)}. Retrying..."
+                    )
                     await asyncio.sleep(retry_delay * (attempt + 1))
                 else:
                     error_highlight(f"All retry attempts failed: {str(e)}")
@@ -339,14 +358,14 @@ async def _process_chunk(
         return {}
     return {}
 
+
 async def _call_model_json(
     messages: List[Message],
-    config: Optional[RunnableConfig] = None,
-    chunk_size: Optional[int] = None,
-    overlap: Optional[int] = None
+    config: RunnableConfig | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
 ) -> Dict[str, Any]:
-    """
-    Internal function to call the model for JSON output, handling chunking if necessary.
+    """Call the model for JSON output, handling chunking if necessary.
 
     Args:
         messages: List of message dictionaries.
@@ -364,12 +383,11 @@ async def _call_model_json(
         content: str = messages[-1]["content"]
         if estimate_tokens(content) <= MAX_TOKENS:
             return await _process_chunk(content, messages[:-1], config)
-        info_highlight(f"Content too large ({estimate_tokens(content)} tokens), chunking...")
+        info_highlight(
+            f"Content too large ({estimate_tokens(content)} tokens), chunking..."
+        )
         chunks: List[str] = chunk_text(
-            content,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            use_large_chunks=True
+            content, chunk_size=chunk_size, overlap=overlap, use_large_chunks=True
         )
         if len(chunks) <= 1:
             return await _process_chunk(content, messages[:-1], config)
@@ -386,9 +404,9 @@ async def _call_model_json(
         error_highlight(f"Error in _call_model_json: {str(e)}")
         return {}
 
+
 def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Parse and clean a JSON response from the model.
+    """Parse and clean a JSON response from the model.
 
     Args:
         response: The raw response as a string or dictionary.
@@ -399,39 +417,35 @@ def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]
     if isinstance(response, dict):
         return response
     try:
-        cleaned: str = re.sub(r'```json\s*|\s*```', '', response)
+        cleaned: str = re.sub(r"```json\s*|\s*```", "", response)
         return json.loads(cleaned)
     except Exception:
         return {}
 
+
 class LLMClient:
-    """
-    Asynchronous LLM utility for chat, JSON output, and embeddings.
+    """Asynchronous LLM utility for chat, JSON output, and embeddings.
+    
     Provides a consolidated interface for calling language models,
     abstracting away the details of message formatting, chunking, and error handling.
 
     Attributes:
         default_model: An optional default model to use for calls.
     """
-    
-    def __init__(self, default_model: Optional[str] = None) -> None:
-        """
-        Initialize the LLMClient.
+
+    def __init__(self, default_model: str | None = None) -> None:
+        """Initialize the LLMClient.
 
         Args:
             default_model: Optional default model name (e.g., "openai/gpt-4").
                 If not provided, defaults from configuration are used.
         """
-        self.default_model: Optional[str] = default_model
-    
+        self.default_model: str | None = default_model
+
     async def llm_chat(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        **kwargs: Any
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
     ) -> str:
-        """
-        Get a chat completion as plain text.
+        """Get a chat completion as plain text.
 
         Args:
             prompt: The user prompt.
@@ -445,7 +459,7 @@ class LLMClient:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        
+
         config: Dict[str, Any] = kwargs.pop("config", {})
         configurable: Dict[str, Any] = config.get("configurable", {})
         if self.default_model and "model" not in configurable:
@@ -453,21 +467,19 @@ class LLMClient:
         for key, value in kwargs.items():
             configurable[key] = value
         config = {**config, "configurable": configurable}
-        
+
         # Convert dict to RunnableConfig
-        runnable_config: Optional[RunnableConfig] = cast(Optional[RunnableConfig], config) if config else None
-        
+        runnable_config: RunnableConfig | None = (
+            cast(RunnableConfig | None, config) if config else None
+        )
+
         response: Dict[str, Any] = await _call_model(messages, runnable_config)
         return response.get("content", "")
-    
+
     async def llm_json(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        **kwargs: Any
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
     ) -> Dict[str, Any]:
-        """
-        Get a structured JSON response as a Python dictionary.
+        """Get a structured JSON response as a Python dictionary.
 
         Args:
             prompt: The user prompt.
@@ -477,13 +489,13 @@ class LLMClient:
         Returns:
             A dictionary containing the parsed JSON response.
         """
-        chunk_size: Optional[int] = kwargs.pop("chunk_size", None)
-        overlap: Optional[int] = kwargs.pop("overlap", None)
+        chunk_size: int | None = kwargs.pop("chunk_size", None)
+        overlap: int | None = kwargs.pop("overlap", None)
         messages: List[Message] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        
+
         config: Dict[str, Any] = kwargs.pop("config", {})
         configurable: Dict[str, Any] = config.get("configurable", {})
         if self.default_model and "model" not in configurable:
@@ -491,20 +503,21 @@ class LLMClient:
         for key, value in kwargs.items():
             configurable[key] = value
         config = {**config, "configurable": configurable}
-        
+
         # Convert dict to RunnableConfig
-        runnable_config: Optional[RunnableConfig] = cast(Optional[RunnableConfig], config) if config else None
-        
+        runnable_config: RunnableConfig | None = (
+            cast(RunnableConfig | None, config) if config else None
+        )
+
         return await _call_model_json(
             messages=messages,
             config=runnable_config,
             chunk_size=chunk_size,
-            overlap=overlap
+            overlap=overlap,
         )
-    
+
     async def llm_embed(self, text: str, **kwargs: Any) -> List[float]:
-        """
-        Get embeddings for a given text.
+        """Get embeddings for a given text.
 
         Args:
             text: The text to embed.
@@ -515,7 +528,7 @@ class LLMClient:
         """
         config: Dict[str, Any] = kwargs.pop("config", {})
         configurable: Dict[str, Any] = config.get("configurable", {})
-        embedding_model: Optional[str] = kwargs.pop("embedding_model", None)
+        embedding_model: str | None = kwargs.pop("embedding_model", None)
         if embedding_model:
             configurable["model"] = embedding_model
         elif self.default_model and "model" not in configurable:
@@ -523,16 +536,17 @@ class LLMClient:
         for key, value in kwargs.items():
             configurable[key] = value
         config = {**config, "configurable": configurable}
-        
+
         try:
             # Ensure config is properly typed for from_runnable_config
-            runnable_config = cast(Optional[RunnableConfig], config)
-            configuration: Configuration = Configuration.from_runnable_config(runnable_config)
+            runnable_config = cast(RunnableConfig | None, config)
+            configuration: Configuration = Configuration.from_runnable_config(
+                runnable_config
+            )
             provider, model = configuration.model.split("/", 1)
             if provider == "openai":
                 response = await openai_client.embeddings.create(
-                    model=model,
-                    input=text
+                    model=model, input=text
                 )
                 return response.data[0].embedding
             else:
@@ -541,5 +555,6 @@ class LLMClient:
         except Exception as e:
             error_highlight(f"Error in llm_embed: {str(e)}")
             return []
+
 
 __all__ = ["LLMClient"]

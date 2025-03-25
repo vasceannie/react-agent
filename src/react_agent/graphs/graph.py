@@ -17,18 +17,18 @@ from langgraph.prebuilt import ToolNode
 from react_agent.configuration import Configuration
 from react_agent.state import InputState, State
 from react_agent.tools.tavily import TOOLS
-from react_agent.utils.llm import call_model
+from react_agent.utils.llm import LLMClient
 
-
+llm_client = LLMClient(default_model="openai/gpt-4")
 builder = StateGraph(State, input=InputState, config_schema=Configuration)
 
 # Define the two nodes we will cycle between
-builder.add_node(call_model)
+builder.add_node("llm_chat", llm_client.llm_chat)
 builder.add_node("tools", ToolNode(TOOLS))
 
-# Set the entrypoint as `call_model`
+# Set the entrypoint as `llm_chat`
 # This means that this node is the first one called
-builder.add_edge("__start__", "call_model")
+builder.add_edge("__start__", "llm_chat")
 
 
 def route_model_output(state: State) -> Literal["__end__", "tools"]:
@@ -51,17 +51,17 @@ def route_model_output(state: State) -> Literal["__end__", "tools"]:
     return "tools" if last_message.tool_calls else "__end__"
 
 
-# Add a conditional edge to determine the next step after `call_model`
+# Add a conditional edge to determine the next step after `llm_chat`
 builder.add_conditional_edges(
-    "call_model",
-    # After call_model finishes running, the next node(s) are scheduled
+    "llm_chat",
+    # After llm_chat finishes running, the next node(s) are scheduled
     # based on the output from route_model_output
     route_model_output,
 )
 
-# Add a normal edge from `tools` to `call_model`
+# Add a normal edge from `tools` to `llm_chat`
 # This creates a cycle: after using tools, we always return to the model
-builder.add_edge("tools", "call_model")
+builder.add_edge("tools", "llm_chat")
 
 # Compile the builder into an executable graph
 # You can customize this by adding interrupt points for state updates

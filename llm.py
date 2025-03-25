@@ -1,7 +1,15 @@
 """Language Model (LLM) client utilities and abstractions.
 
 This module provides a unified interface for interacting with various LLM providers,
-handling retries, rate limiting, and response processing consistently.
+handling retries, rate limiting, and response processing consistently across providers.
+
+Key Features:
+- Support for multiple providers (OpenAI, Anthropic, etc.)
+- Automatic retries with exponential backoff
+- Rate limiting and concurrent request management
+- Response caching and deduplication
+- Streaming and non-streaming interfaces
+- Structured output generation (JSON)
 
 Examples:
     Basic completion:
@@ -10,25 +18,43 @@ Examples:
     ...     prompt="Translate to French: Hello world",
     ...     temperature=0.7
     ... )
-    >>> print(response)
+    >>> print(response.content)
     "Bonjour le monde"
+    >>> print(f"Used {response.usage['total_tokens']} tokens")
 
-    Streaming response:
-    >>> stream = client.complete_stream(
-    ...     prompt="Write a short poem about AI",
-    ...     max_tokens=100
-    ... )
-    >>> for chunk in stream:
-    ...     print(chunk, end="")
+    Streaming response with error handling:
+    >>> try:
+    ...     stream = client.complete_stream(
+    ...         prompt="Write a short poem about AI",
+    ...         max_tokens=100
+    ...     )
+    ...     for chunk in stream:
+    ...         print(chunk, end="")
+    ... except LLMError as e:
+    ...     print(f"Error: {e}")
 
-    With custom parameters:
+    Advanced usage with custom parameters:
     >>> response = client.complete(
     ...     prompt="Explain quantum computing",
     ...     model="gpt-4-turbo",
     ...     temperature=0.3,
     ...     presence_penalty=0.5,
-    ...     max_tokens=500
+    ...     max_tokens=500,
+    ...     stop_sequences=["\n\n"]
     ... )
+    >>> if response.finish_reason == "stop":
+    ...     print("Completed successfully")
+    ... else:
+    ...     print(f"Stopped early: {response.finish_reason}")
+
+    Edge Cases:
+    >>> # Empty prompt
+    >>> response = client.complete(prompt="")
+    >>> print(response.content)  # May return empty string or error
+
+    >>> # Very long prompt (auto-chunking)
+    >>> long_text = "..."  # 50k characters
+    >>> response = client.complete(prompt=long_text)
 """
 
 from typing import Optional, AsyncGenerator, Dict, Any, List

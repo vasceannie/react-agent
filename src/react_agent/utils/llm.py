@@ -1,9 +1,48 @@
 """LLM utility functions for handling model calls and content processing.
 
-This module provides a consolidated interface for interacting with language models.
-It abstracts away message formatting, error handling, and content chunking while 
-minimizing duplication. The LLMClient class exposes simple methods for chat, JSON,
-and embedding calls.
+This module provides a production-grade interface for interacting with language models,
+supporting both OpenAI and Anthropic providers. It handles complex scenarios including:
+
+- Automatic content chunking for large inputs
+- Structured JSON output generation
+- System message management
+- Error handling and retries
+- Token counting and optimization
+- Embedding generation
+
+Key Components:
+- LLMClient: Main client class for chat, JSON and embedding operations
+- Message formatting utilities
+- Provider-specific API adapters
+- Content processing pipelines
+
+Examples:
+    Basic chat completion:
+    >>> client = LLMClient()
+    >>> response = await client.llm_chat(
+    ...     prompt="What's the weather today?",
+    ...     system_prompt="You are a helpful assistant"
+    ... )
+    >>> print(response)
+
+    JSON output with chunking:
+    >>> data = await client.llm_json(
+    ...     prompt="Extract key facts from this text...",
+    ...     system_prompt="Return JSON with {facts: [...]}",
+    ...     chunk_size=2000
+    ... )
+    >>> print(data["facts"])
+
+    Embeddings:
+    >>> embedding = await client.llm_embed("machine learning")
+    >>> print(len(embedding))  # 1536 for OpenAI
+
+Error Handling:
+    The module provides detailed error messages and automatic retries for:
+    - Rate limits
+    - Timeouts
+    - Invalid responses
+    - Content too long errors
 """
 
 import asyncio

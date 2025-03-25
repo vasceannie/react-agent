@@ -81,20 +81,20 @@ class RetryConfig(BaseModel):
     Basic configuration for retrying failed network requests.
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     max_retries: PositiveInt = Field(
-        default=3, 
+        default=3,
         description="Maximum number of retries."
     )
     base_delay: PositiveFloat = Field(
-        default=1.0, 
+        default=1.0,
         description="Base delay in seconds."
     )
     max_delay: PositiveFloat = Field(
-        default=5.0, 
+        default=5.0,
         description="Maximum delay in seconds."
     )
-    
+
     @model_validator(mode="after")
     def validate_delays(self) -> "RetryConfig":
         """Ensure max_delay is greater than or equal to base_delay."""
@@ -115,14 +115,14 @@ async def _make_request_with_retry(
 ) -> ApiResponse:
     """
     Make an HTTP request with basic exponential backoff retries.
-    
+
     Args:
         method: HTTP method (GET, POST, etc.)
         url: Target URL for the request
         headers: HTTP headers to include
         json_data: Optional JSON payload
         retry_config: Retry configuration settings
-        
+
     Returns:
         Parsed JSON response or error information
     """
@@ -191,10 +191,10 @@ async def _make_request_with_retry(
 def _get_jina_api_key() -> str:
     """
     Fetch the JINA_API_KEY from environment variable.
-    
+
     Returns:
         str: The API key
-        
+
     Raises:
         KeyError: If JINA_API_KEY environment variable is not set
     """
@@ -211,7 +211,7 @@ def _get_jina_api_key() -> str:
 class EmbeddingsRequest(BaseModel):
     """Request model for Jina's Embeddings API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     model: str = Field(
         ...,
         description="Identifier of the model to use. E.g. 'jina-embeddings-v3' or 'jina-clip-v2'."
@@ -272,10 +272,10 @@ class EmbeddingsTool(BaseTool):
     async def _arun(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Embeddings API.
-        
+
         Args:
             request: The embeddings request parameters
-            
+
         Returns:
             The API response containing embeddings or error information
         """
@@ -299,10 +299,10 @@ class EmbeddingsTool(BaseTool):
     def run(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Embeddings API.
-        
+
         Args:
             request: The embeddings request parameters
-            
+
         Returns:
             The API response containing embeddings or error information
         """
@@ -316,7 +316,7 @@ class EmbeddingsTool(BaseTool):
 class RerankerRequest(BaseModel):
     """Request model for Jina's Re-Ranker API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     model: str = Field(
         ...,
         description="Identifier of the model to use. E.g. 'jina-reranker-v2-base-multilingual'."
@@ -367,10 +367,10 @@ class RerankerTool(BaseTool):
     async def _arun(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Re-Ranker API.
-        
+
         Args:
             request: The re-ranker request parameters
-            
+
         Returns:
             The API response containing re-ranked documents or error information
         """
@@ -394,10 +394,10 @@ class RerankerTool(BaseTool):
     def run(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Re-Ranker API.
-        
+
         Args:
             request: The re-ranker request parameters
-            
+
         Returns:
             The API response containing re-ranked documents or error information
         """
@@ -414,7 +414,7 @@ class ReaderHeaders(BaseModel):
     Note: All are optional, but can be used to refine scraping behaviors.
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     x_engine: Optional[str] = Field(default=None, alias="X-Engine")
     x_timeout: Optional[PositiveInt] = Field(default=None, alias="X-Timeout")
     x_target_selector: Optional[str] = Field(default=None, alias="X-Target-Selector")
@@ -433,8 +433,11 @@ class ReaderHeaders(BaseModel):
 class ReaderRequest(BaseModel):
     """Request model for Jina's Reader API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
-    url: HttpUrl = Field(..., description="The website URL to read/parse.")
+
+    url: HttpUrl = Field(
+        ...,
+        description="The website URL to read/parse."
+    )
     options: Optional[Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"]] = Field(
         default=None,
         description="Extra options; often one of 'Default', 'Markdown', 'HTML', 'Text', etc."
@@ -473,10 +476,10 @@ class ReaderTool(BaseTool):
     async def _arun(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Reader API.
-        
+
         Args:
             request: The reader request parameters
-            
+
         Returns:
             The API response containing webpage content or error information
         """
@@ -513,10 +516,10 @@ class ReaderTool(BaseTool):
     def run(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Reader API.
-        
+
         Args:
             request: The reader request parameters
-            
+
         Returns:
             The API response containing webpage content or error information
         """
@@ -530,20 +533,19 @@ class ReaderTool(BaseTool):
 class SearchHeaders(BaseModel):
     """Headers for the Search API requests."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     x_site: Optional[str] = Field(default=None, alias="X-Site")
+    x_no_cache: Optional[bool] = Field(default=None, alias="X-No-Cache")
     x_with_links_summary: Optional[bool] = Field(default=None, alias="X-With-Links-Summary")
     x_with_images_summary: Optional[bool] = Field(default=None, alias="X-With-Images-Summary")
-    x_no_cache: Optional[bool] = Field(default=None, alias="X-No-Cache")
-    x_with_generated_alt: Optional[bool] = Field(default=None, alias="X-With-Generated-Alt")
 
 
 class SearchRequest(BaseModel):
     """Request model for Jina's Search API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     q: Annotated[str, StringConstraints(min_length=1)] = Field(
-        ..., 
+        ...,
         description="Search query text."
     )
     options: Optional[Literal["Default", "Markdown", "HTML", "Text"]] = Field(
@@ -588,10 +590,10 @@ class SearchTool(BaseTool):
     async def _arun(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Search API.
-        
+
         Args:
             request: The search request parameters
-            
+
         Returns:
             The API response containing search results or error information
         """
@@ -627,10 +629,10 @@ class SearchTool(BaseTool):
     def run(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Search API.
-        
+
         Args:
             request: The search request parameters
-            
+
         Returns:
             The API response containing search results or error information
         """
@@ -644,7 +646,7 @@ class SearchTool(BaseTool):
 class GroundingHeaders(BaseModel):
     """Headers for the Grounding API requests."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     x_site: Optional[str] = Field(default=None, alias="X-Site")
     x_no_cache: Optional[bool] = Field(default=None, alias="X-No-Cache")
 
@@ -652,9 +654,9 @@ class GroundingHeaders(BaseModel):
 class GroundingRequest(BaseModel):
     """Request model for Jina's Grounding API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     statement: Annotated[str, StringConstraints(min_length=1)] = Field(
-        ..., 
+        ...,
         description="The statement to verify for factual accuracy."
     )
     headers: Optional[GroundingHeaders] = None
@@ -696,10 +698,10 @@ class GroundingTool(BaseTool):
     async def _arun(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Grounding API.
-        
+
         Args:
             request: The grounding request parameters
-            
+
         Returns:
             The API response containing factual verification or error information
         """
@@ -734,10 +736,10 @@ class GroundingTool(BaseTool):
     def run(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Grounding API.
-        
+
         Args:
             request: The grounding request parameters
-            
+
         Returns:
             The API response containing factual verification or error information
         """
@@ -751,9 +753,9 @@ class GroundingTool(BaseTool):
 class SegmenterRequest(BaseModel):
     """Request model for Jina's Segmenter API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     content: Annotated[str, StringConstraints(min_length=1)] = Field(
-        ..., 
+        ...,
         description="The text content to segment."
     )
     tokenizer: Literal["cl100k_base", "p50k_base", "r50k_base"] = Field(
@@ -787,7 +789,7 @@ class SegmenterRequest(BaseModel):
         if not v.strip():
             raise ValueError("Segmenter content cannot be empty.")
         return v
-    
+
     @model_validator(mode="after")
     def validate_head_tail(self) -> "SegmenterRequest":
         """Ensure head and tail are not both specified."""
@@ -832,10 +834,10 @@ class SegmenterTool(BaseTool):
     async def _arun(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Segmenter API.
-        
+
         Args:
             request: The segmenter request parameters
-            
+
         Returns:
             The API response containing segmented text or error information
         """
@@ -859,10 +861,10 @@ class SegmenterTool(BaseTool):
     def run(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Segmenter API.
-        
+
         Args:
             request: The segmenter request parameters
-            
+
         Returns:
             The API response containing segmented text or error information
         """
@@ -876,7 +878,7 @@ class SegmenterTool(BaseTool):
 class ClassifierRequest(BaseModel):
     """Request model for Jina's Classifier API."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    
+
     model: Optional[str] = Field(
         default=None,
         description="Identifier of the model, e.g. 'jina-embeddings-v3' for text or 'jina-clip-v2' for images."
@@ -943,10 +945,10 @@ class ClassifierTool(BaseTool):
     async def _arun(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
         """
         Asynchronously call the Jina Classifier API.
-        
+
         Args:
             request: The classifier request parameters
-            
+
         Returns:
             The API response containing classification results or error information
         """
@@ -970,10 +972,10 @@ class ClassifierTool(BaseTool):
     def run(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
         """
         Synchronous wrapper for calling the Jina Classifier API.
-        
+
         Args:
             request: The classifier request parameters
-            
+
         Returns:
             The API response containing classification results or error information
         """

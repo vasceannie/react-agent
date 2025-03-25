@@ -10,6 +10,8 @@ Key Features:
 - Response caching and deduplication
 - Streaming and non-streaming interfaces
 - Structured output generation (JSON)
+- Token counting and usage tracking
+- Model configuration management
 
 Examples:
     Basic completion:
@@ -55,6 +57,19 @@ Examples:
     >>> # Very long prompt (auto-chunking)
     >>> long_text = "..."  # 50k characters
     >>> response = client.complete(prompt=long_text)
+
+    >>> # Invalid API key
+    >>> client = LLMClient(provider="openai", api_key="invalid")
+    >>> try:
+    ...     response = client.complete(prompt="Test")
+    ... except LLMError as e:
+    ...     print(f"Authentication failed: {e}")
+
+Performance Considerations:
+- Uses connection pooling for API requests
+- Implements request batching where supported
+- Caches frequent queries
+- Optimizes token usage
 """
 
 from typing import Optional, AsyncGenerator, Dict, Any, List

@@ -6,15 +6,19 @@ supporting both OpenAI and Anthropic providers. It handles complex scenarios inc
 - Automatic content chunking for large inputs
 - Structured JSON output generation
 - System message management
-- Error handling and retries
+- Error handling and retries (exponential backoff)
 - Token counting and optimization
-- Embedding generation
+- Embedding generation and caching
+- Multi-provider abstraction layer
+- Content summarization for long inputs
 
 Key Components:
 - LLMClient: Main client class for chat, JSON and embedding operations
-- Message formatting utilities
+- Message formatting utilities (provider-specific)
 - Provider-specific API adapters
 - Content processing pipelines
+- Token estimation and chunking
+- Response validation and parsing
 
 Examples:
     Basic chat completion:
@@ -33,16 +37,32 @@ Examples:
     ... )
     >>> print(data["facts"])
 
-    Embeddings:
+    Embeddings with caching:
     >>> embedding = await client.llm_embed("machine learning")
     >>> print(len(embedding))  # 1536 for OpenAI
 
-Error Handling:
-    The module provides detailed error messages and automatic retries for:
-    - Rate limits
-    - Timeouts
-    - Invalid responses
-    - Content too long errors
+    Error handling example:
+    >>> try:
+    ...     response = await client.llm_chat(
+    ...         prompt="Generate a report",
+    ...         system_prompt="You are a report generator"
+    ...     )
+    ... except Exception as e:
+    ...     print(f"Error occurred: {e}")
+    ...     # Automatic retries will be attempted
+
+Performance Considerations:
+- Implements connection pooling for API requests
+- Uses efficient chunking algorithms
+- Minimizes token usage through optimization
+- Caches frequent queries and embeddings
+- Parallel processing where possible
+
+Security:
+- Handles API keys securely
+- Validates all inputs
+- Implements rate limiting
+- Logs redacted information
 """
 
 import asyncio

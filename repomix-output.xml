@@ -88,289 +88,395 @@ __all__ = [
 This module provides a unified interface for caching and checkpointing with LangGraph,
 ensuring type safety and consistent behavior across the application.
 
-Example:
-    @cache_result(ttl=600)
-    def compute(a: int, b: int) -> int:
-        return a + b
+Examples:
+    Basic usage with simple function:
+    >>> @cache_result(ttl=600)
+    >>> def compute(a: int, b: int) -> int:
+    >>>     return a + b
+    >>> result = compute(3, 4)  # Returns 7, either from cache or computed
 
-    # Using the decorated function
-    result = compute(3, 4)  # Returns 7, either from cache or computed.
+    Using the ProcessorCache directly:
+    >>> cache = ProcessorCache(thread_id="test-thread")
+    >>> cache.put("user:123", {"name": "John", "age": 30}, ttl=3600)
+    >>> user_data = cache.get("user:123")
+    >>> print(user_data)  # Output: {'name': 'John', 'age': 30}
+
+    Cache statistics example:
+    >>> cache = ProcessorCache()
+    >>> cache.get("missing_key")  # Returns None (cache miss)
+    >>> cache.cache_hits  # Returns 0
+    >>> cache.cache_misses  # Returns 1
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, Generic, Optional, TypeVar, cast
-from dataclasses import dataclass
-from datetime import datetime, timezone
+
 import hashlib
 import json
+import time
+from datetime import UTC, datetime
 from functools import wraps
+from typing import Any, Callable, Dict, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from langgraph.checkpoint.base import Checkpoint
 from langgraph.checkpoint.memory import MemorySaver
+from typing_extensions import TypedDict
 
-from react_agent.utils.logging import get_logger
+from .logging import get_logger, log_performance_metrics
 
+# Get module logger
 logger = get_logger(__name__)
 
-# Generic type variables for strict type safety.
+# Generic type variables for strict type safety
 T = TypeVar('T')
-K = TypeVar('K')
+R = TypeVar('R')
 
-@dataclass
-class CacheEntry(Generic[T]):
+
+# Use TypedDict for better type safety
+class CacheEntryData(TypedDict):
+    """Data structure for individual cache entries.
+
+    Example:
+        {
+            "data": {"product": "Widget", "price": 19.99},  # The actual cached data
+            "timestamp": "2023-10-15T14:30:00.000000+00:00",  # ISO format timestamp
+            "ttl": 3600,  # Time-to-live in seconds
+            "version": 1,  # Cache version
+            "metadata": {"source": "API", "tags": ["popular"]}  # Optional metadata
+        }
     """
-    Represents a type-safe cache entry with metadata.
-    
-    Attributes:
-        data (T): The cached data.
-        timestamp (str): ISO formatted timestamp of when the data was cached.
-        ttl (int): Time-to-live in seconds (default is 3600 seconds, i.e. 1 hour).
-    """
-    data: T
+    data: Any
     timestamp: str
-    ttl: int = 3600
+    ttl: int
+    version: int
+    metadata: Dict[str, Any]
+
+
+class CacheState(TypedDict):
+    """State representation for the cache system."""
+    entries: Dict[str, CacheEntryData]
+    stats: Dict[str, int]
+
+
+class CheckpointMetadataDict(TypedDict):
+    """Metadata structure for checkpoints."""
+    source: str
+    function: str | None
+    ttl: int
+
 
 class ProcessorCache:
-    """
-    A type-safe processor cache utilizing LangGraph checkpointing for persistent storage.
+    """A type-safe processor cache utilizing LangGraph checkpointing for persistent storage.
 
-    Attributes:
-        thread_id (str): Identifier for this cache instance.
-        memory_saver (MemorySaver): An instance to handle checkpoint storage.
-        cache_hits (int): Count of cache hits.
-        cache_misses (int): Count of cache misses.
+    Examples:
+        Initialization:
+        >>> cache = ProcessorCache(thread_id="user-session-123", version=2)
+
+        Basic operations:
+        >>> cache.put("product:456", {"name": "Gadget", "stock": 42}, ttl=300)
+        >>> item = cache.get("product:456")
+        >>> print(item)  # Output: {'name': 'Gadget', 'stock': 42}
+
+        With metadata:
+        >>> cache.put(
+        ...     "config:app",
+        ...     {"theme": "dark", "locale": "en_US"},
+        ...     ttl=86400,
+        ...     metadata={"updated_by": "system"}
+        ... )
     """
     
-    def __init__(self, thread_id: str = "default-processor") -> None:
-        """
-        Initialize the cache with a specific thread ID.
-
-        Args:
-            thread_id (str): Identifier for this cache instance.
-        
-        Example:
-            >>> processor = ProcessorCache(thread_id="processor-1")
-        """
-        self.memory_saver: MemorySaver = MemorySaver()
-        self.thread_id: str = thread_id
-        self.cache_hits: int = 0
-        self.cache_misses: int = 0
-
+    def __init__(self, thread_id: str = "default-processor", version: int = 1) -> None:
+        """Initialize the cache with a specific thread ID and version."""
+        self.memory_saver = MemorySaver()
+        self.thread_id = thread_id
+        self.version = version
+        self.cache_hits = 0
+        self.cache_misses = 0
+        # In-memory cache for fallback
+        self.memory_cache: Dict[str, CacheEntryData] = {}
+        logger.info(f"Initialized ProcessorCache with thread_id={thread_id}, version={version}")
+    
     def _get_config(self, checkpoint_id: str) -> RunnableConfig:
-        """
-        Create a configuration object for checkpoint operations.
-
-        Args:
-            checkpoint_id (str): The unique identifier for the checkpoint.
-
-        Returns:
-            RunnableConfig: Configuration object containing thread and checkpoint IDs.
-        """
+        """Create a configuration object for checkpoint operations."""
         return RunnableConfig(configurable={
             "thread_id": self.thread_id,
-            "checkpoint_id": checkpoint_id
+            "checkpoint_id": checkpoint_id,
         })
-
-    def _create_checkpoint(
-        self,
-        key: str,
-        data: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Checkpoint:
-        """
-        Generate a checkpoint object for the given data.
+    
+    def get(self, key: str) -> Any | None:
+        """Retrieve data from the cache for a given key.
 
         Args:
-            key (str): Unique identifier for the checkpoint.
-            data (Dict[str, Any]): The data to store in the checkpoint.
-            metadata (Optional[Dict[str, Any]]): Additional metadata if needed (default is None).
+            key: The unique identifier for the cached data
 
         Returns:
-            Checkpoint: A checkpoint instance containing the provided data.
+            The cached data if found and valid, otherwise None
+
+        Examples:
+            >>> cache.get("user:789")
+            {'name': 'Alice', 'email': 'alice@example.com'}
+
+            >>> cache.get("nonexistent_key")
+            None
         """
-        return Checkpoint(
-            id=key,
-            ts=datetime.now(timezone.utc).isoformat(),
-            v=1,
-            channel_values=data,
-            channel_versions={},
-            versions_seen={},
-            pending_sends=[]
-        )
-
-    def get(self, key: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve data from the cache for a given key.
-
-        Args:
-            key (str): The cache key to lookup.
-
-        Returns:
-            Optional[Dict[str, Any]]: The cached data if present and valid, otherwise None.
-
-        Example:
-            >>> data = processor.get("some_cache_key")
-            >>> if data is not None:
-            ...     print("Cache hit!")
-        """
+        start_time = time.time()
+        
+        # First check memory cache for fallback
+        if key in self.memory_cache:
+            logger.info(f"Cache hit from memory for key: {key}")
+            self.cache_hits += 1
+            return self.memory_cache[key]["data"]
+        
         try:
-            checkpoint: Optional[Any] = self.memory_saver.get(self._get_config(key))
-            if checkpoint is not None and isinstance(checkpoint, dict):
-                channel_values: Optional[Dict[str, Any]] = cast(Dict[str, Any], checkpoint.get("channel_values"))
-                return channel_values
+            # Use LangGraph checkpoint system to retrieve data
+            checkpoint = self.memory_saver.get(self._get_config(key))
+            
+            if checkpoint is not None and (isinstance(checkpoint, dict) and "values" in checkpoint):
+                cached_entry = checkpoint["values"].get("entry")
+                if cached_entry and self._is_cache_valid(cached_entry):
+                    self.cache_hits += 1
+                    logger.info(f"Cache hit from checkpoint for key: {key}")
+                    return cached_entry["data"]
+            
+            self.cache_misses += 1
+            logger.info(f"Cache miss for key: {key}")
             return None
         except Exception as e:
-            logger.error(f"Error retrieving from cache: {str(e)}")
+            logger.error(f"Error retrieving from cache: {str(e)}", exc_info=True)
             return None
-
+        finally:
+            end_time = time.time()
+            log_performance_metrics("Cache retrieval", start_time, end_time, category="Cache")
+    
     def put(
         self,
         key: str,
-        data: Dict[str, Any],
+        data: Any,
         ttl: int = 3600,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Dict[str, Any] | None = None
     ) -> None:
-        """
-        Store data in the cache under the provided key.
+        """Store data in the cache under the provided key.
 
         Args:
-            key (str): Unique identifier for the cache entry.
-            data (Dict[str, Any]): The data to be cached.
-            ttl (int): Time-to-live in seconds for the cache entry (default is 3600 seconds).
-            metadata (Optional[Dict[str, Any]]): Additional metadata for checkpointing (default is None).
+            key: Unique identifier for the data
+            data: The data to be cached (any serializable type)
+            ttl: Time-to-live in seconds (default: 3600)
+            metadata: Optional dictionary of metadata (default: None)
 
-        Example:
-            >>> processor.put("my_key", {"data": 42}, ttl=600)
+        Examples:
+            >>> cache.put("session:abc123", {"user_id": 42, "logged_in": True}, ttl=1800)
+
+            With metadata:
+            >>> cache.put(
+            ...     "report:q3",
+            ...     {"revenue": 1_000_000, "growth": 0.15},
+            ...     ttl=86400,
+            ...     metadata={"generated_by": "report_service", "format": "v2"}
+            ... )
         """
-        checkpoint_metadata: CheckpointMetadata = CheckpointMetadata(
-            source="input",
-            step=-1,
-            writes={},
-            parents={}
-        )
+        start_time = time.time()
 
-        if metadata is not None:
-            # Assuming CheckpointMetadata is dict-like.
-            checkpoint_metadata["writes"] = metadata
+        # Create cache entry
+        entry: CacheEntryData = {
+            "data": data,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "ttl": ttl,
+            "version": self.version,
+            "metadata": metadata or {}
+        }
 
-        checkpoint: Checkpoint = self._create_checkpoint(key, data)
-        self.memory_saver.put(
-            self._get_config(key),
-            checkpoint,
-            metadata=checkpoint_metadata,
-            new_versions={}
-        )
+        # Store in memory cache for fallback
+        self.memory_cache[key] = entry
 
-    def cache_result(self, ttl: int = 3600) -> Callable[[Callable[..., T]], Callable[..., T]]:
-        """
-        Decorator to cache the result of a function call with type preservation.
+        try:
+            # Create checkpoint using LangGraph patterns
+            values = {"entry": entry}
 
-        This decorator serializes the function's arguments to generate a unique key.
-        If a cached result exists and is not expired, it returns the cached value.
-        Otherwise, it executes the function, caches its output, and returns it.
+            # Use LangGraph's checkpoint system
+            checkpoint_data: Dict[str, Any] = {
+                "id": key,
+                "ts": datetime.now(UTC).isoformat(),
+                "v": self.version,
+                "channel_values": values,
+                "channel_versions": {k: self.version for k in values},
+                "versions_seen": {self.thread_id: self.version},
+                "pending_sends": [],
+                "metadata": metadata or {},
+            }
+
+            checkpoint = Checkpoint(**checkpoint_data)
+
+            self.memory_saver.put(
+                self._get_config(key),
+                checkpoint,
+                metadata={
+                    "source": "input",
+                    "step": self.version,
+                    "writes": metadata or {},
+                    "parents": {},
+                },
+                new_versions={k: self.version for k in values},
+            )
+
+            logger.info(f"Stored data in cache for key: {key}")
+        except Exception as e:
+            logger.error(f"Error saving to checkpoint system: {str(e)}", exc_info=True)
+            logger.warning("Falling back to memory cache only")
+        finally:
+            end_time = time.time()
+            log_performance_metrics("Cache storage", start_time, end_time, category="Cache")
+    
+    def cache_result(
+        self,
+        ttl: int = 3600
+    ) -> Callable[[Callable[..., R]], Callable[..., R]]:
+        """Decorate a function to cache its results with type preservation.
 
         Args:
-            ttl (int): Time-to-live in seconds for the cached result (default is 3600 seconds).
+            ttl: Time-to-live in seconds for cached results (default: 3600)
 
         Returns:
-            Callable[[Callable[..., T]], Callable[..., T]]:
-                A decorator that wraps a function with caching behavior.
+            A decorated function that caches its results
 
-        Example:
-            >>> @processor.cache_result(ttl=600)
-            ... def add(a: int, b: int) -> int:
-            ...     return a + b
-            >>>
-            >>> result = add(2, 3)  # Returns 5, from cache on subsequent calls if within TTL.
+        Examples:
+            Basic usage:
+            >>> @cache.cache_result(ttl=300)
+            >>> def get_user_details(user_id: int) -> dict:
+            >>>     # Expensive database call here
+            >>>     return {"id": user_id, "name": "John"}
+
+            First call (executes function):
+            >>> get_user_details(42)  # Returns {'id': 42, 'name': 'John'}
+
+            Subsequent call (returns cached result):
+            >>> get_user_details(42)  # Returns cached result immediately
         """
-        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        def decorator(func: Callable[..., R]) -> Callable[..., R]:
             @wraps(func)
-            def wrapper(*args: Any, **kwargs: Any) -> T:
-                # Generate a unique cache key from function name and arguments.
-                cache_data: Dict[str, Any] = {'args': args, 'kwargs': kwargs, 'func': func.__name__}
-                cache_str: str = json.dumps(cache_data, sort_keys=True)
-                cache_key: str = hashlib.sha256(cache_str.encode()).hexdigest()
-
-                cached: Optional[Dict[str, Any]] = self.get(cache_key)
-                if cached is not None and cached.get("data") is not None:
-                    timestamp_str: str = cached.get("timestamp", "")
-                    if timestamp_str:
-                        try:
-                            timestamp: datetime = datetime.fromisoformat(timestamp_str)
-                        except ValueError:
-                            timestamp = datetime.min.replace(tzinfo=timezone.utc)
-                        elapsed: float = (datetime.now(timezone.utc) - timestamp).total_seconds()
-                        if elapsed < cached.get("ttl", ttl):
-                            self.cache_hits += 1
-                            return cast(T, cached["data"])
-                self.cache_misses += 1
-                result: T = func(*args, **kwargs)
+            def wrapper(*args: Any, **kwargs: Any) -> R:
+                start_time = time.time()
+                cache_key = self._generate_cache_key(func, args, kwargs)
+                
+                # Try to get from cache
+                cached_result = self.get(cache_key)
+                if cached_result is not None:
+                    end_time = time.time()
+                    log_performance_metrics(f"Cache hit for {func.__name__}", start_time, end_time, category="Cache")
+                    return cast(R, cached_result)
+                
+                # Execute function and cache result
+                result = func(*args, **kwargs)
+                
                 self.put(
                     cache_key,
-                    {
-                        "data": result,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "ttl": ttl
-                    }
+                    result,
+                    ttl=ttl,
+                    metadata={"function": func.__name__}
                 )
+                
+                end_time = time.time()
+                log_performance_metrics(f"Cache miss for {func.__name__}", start_time, end_time, category="Cache")
                 return result
+            
             return wrapper
         return decorator
+    
+    def _generate_cache_key(self, func: Callable, args: tuple, kwargs: dict) -> str:
+        """Generate a unique cache key from function and arguments.
+        
+        Creates a deterministic hash key based on:
+        - Function name or ID
+        - Arguments (positional and keyword)
+        - Cache version
+        
+        Args:
+            func: The function being cached
+            args: Positional arguments passed to the function
+            kwargs: Keyword arguments passed to the function
+            
+        Returns:
+            A SHA256 hex digest string representing the unique cache key
+            
+        Examples:
+            >>> def example(a: int, b: int = 2) -> int:
+            ...     return a + b
+            >>> cache._generate_cache_key(example, (1,), {})
+            'a1b2c3...'  # SHA256 hash
+            
+            >>> cache._generate_cache_key(example, (1,), {'b': 3})
+            'd4e5f6...'  # Different hash due to changed arguments
+            
+            With complex objects:
+            >>> cache._generate_cache_key(example, ([1,2],), {'b': {'x': 1}})
+            'g7h8i9...'  # Hash based on string representation
+        """
+        try:
+            func_name = func.__name__
+        except (AttributeError, TypeError):
+            func_name = id(func)
 
-# Default processor instance.
-default_processor: ProcessorCache = ProcessorCache()
-
-def create_checkpoint(key: str, data: Dict[str, Any], ttl: int = 3600) -> None:
-    """
-    Create a checkpoint using the default processor.
-
-    Args:
-        key (str): Unique identifier for the checkpoint.
-        data (Dict[str, Any]): The data to be checkpointed.
-        ttl (int): Time-to-live for the checkpoint data (default is 3600 seconds).
-
-    Example:
-        >>> create_checkpoint("checkpoint1", {"result": 100})
-    """
-    default_processor.put(key, data, ttl=ttl)
-
-def load_checkpoint(key: str) -> Optional[Dict[str, Any]]:
-    """
-    Load a checkpoint using the default processor.
-
-    Args:
-        key (str): Unique identifier for the checkpoint.
-
-    Returns:
-        Optional[Dict[str, Any]]: The checkpoint data if available, else None.
-
-    Example:
-        >>> data = load_checkpoint("checkpoint1")
-        >>> if data is not None:
-        ...     print("Checkpoint loaded:", data)
-    """
-    return default_processor.get(key)
-
-def cache_result(ttl: int = 3600) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """
-    Decorator for caching function results using the default processor.
-
-    Args:
-        ttl (int): Time-to-live in seconds for the cached result (default is 3600 seconds).
-
-    Returns:
-        Callable[[Callable[..., T]], Callable[..., T]]:
-            A decorator that applies caching to a function.
-
-    Example:
-        >>> @cache_result(ttl=600)
-        ... def multiply(x: int, y: int) -> int:
-        ...     return x * y
-        >>>
-        >>> print(multiply(3, 4))  # Outputs 12, and caches the result.
-    """
-    return default_processor.cache_result(ttl=ttl)
+        # Handle complex objects in args
+        args_str = [str(arg) if isinstance(arg, (list, dict, set)) else arg for arg in args]
+        cache_data = {
+            'args': str(args_str),
+            'kwargs': str(kwargs),
+            'func': func_name,
+            'version': self.version
+        }
+        cache_str = json.dumps(cache_data, sort_keys=True, default=str)
+        return hashlib.sha256(cache_str.encode()).hexdigest()
+    
+    def _is_cache_valid(self, cached: Dict[str, Any]) -> bool:
+        """Validate if a cached entry is still fresh based on TTL.
+        
+        Checks:
+        - Presence of required timestamp field
+        - Valid ISO format timestamp
+        - Whether current time is within TTL window
+        
+        Args:
+            cached: The cache entry dictionary containing:
+                - timestamp: ISO format string
+                - ttl: Time-to-live in seconds
+                
+        Returns:
+            True if cache entry is valid and fresh, False otherwise
+            
+        Examples:
+            Valid case:
+            >>> entry = {
+            ...     "timestamp": "2023-10-15T14:30:00.000000+00:00",
+            ...     "ttl": 3600,
+            ...     "data": {...}
+            ... }
+            >>> cache._is_cache_valid(entry)  # True if within 1 hour of timestamp
+            
+            Expired case:
+            >>> old_entry = {
+            ...     "timestamp": "2023-10-01T00:00:00.000000+00:00", 
+            ...     "ttl": 3600,
+            ...     "data": {...}
+            ... }
+            >>> cache._is_cache_valid(old_entry)  # False
+            
+            Invalid format:
+            >>> bad_entry = {
+            ...     "timestamp": "invalid-date",
+            ...     "ttl": 3600
+            ... }
+            >>> cache._is_cache_valid(bad_entry)  # False
+        """
+        timestamp_str = cached.get("timestamp", "")
+        if not timestamp_str:
+            return False
+        
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str)
+            elapsed = (datetime.now(UTC) - timestamp).total_seconds()
+            return elapsed < cached.get("ttl", 3600)
+        except ValueError:
+            return False
 </file>
 
 <file path="src/react_agent/utils/content.py">
@@ -393,32 +499,37 @@ Examples:
     >>> print(valid)
     True
 """
-import time
-from typing import List, Dict, Any, Optional, Union, Tuple, TypedDict, Set, Literal
-import re
-from urllib.parse import urlparse, unquote
-from datetime import datetime, timezone
-import json
 import contextlib
-import urllib.parse
+import json
+import re
+import time
+from typing import Any, Dict, List, Set, TypedDict
+from urllib.parse import unquote, urlparse
 
-from react_agent.utils.logging import (
-    get_logger,
-    info_highlight, 
-    warning_highlight,
-    error_highlight,
-    log_progress,
-    log_performance_metrics
+from react_agent.utils.cache import ProcessorCache
+from react_agent.utils.defaults import (
+    ChunkConfig,
+    get_category_merge_mapping,
+    get_default_extraction_result,
 )
-from react_agent.utils.defaults import ChunkConfig, get_default_extraction_result, get_category_merge_mapping
-from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    log_performance_metrics,
+    log_progress,
+    warning_highlight,
+)
 
 # Initialize logger
 logger = get_logger(__name__)
 
+# Initialize cache
+content_cache = ProcessorCache(thread_id="content")
+
+
 class ContentState(TypedDict):
-    """
-    Typed dictionary for content state used in the graph.
+    """Typed dictionary for content state used in the graph.
 
     Attributes:
         content (str): The actual text content.
@@ -434,6 +545,7 @@ class ContentState(TypedDict):
     chunks: List[str]
     metadata: Dict[str, Any]
     timestamp: str
+
 
 # Constants for chunking and token estimation.
 DEFAULT_CHUNK_SIZE: int = 40000
@@ -464,16 +576,16 @@ PROBLEMATIC_SITES: List[str] = [
     'academia.edu'
 ]
 
-@cache_result(ttl=3600)
+
+@content_cache.cache_result(ttl=3600)
 def chunk_text(
     text: str,
-    chunk_size: Optional[int] = None,
-    overlap: Optional[int] = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
     use_large_chunks: bool = False,
     min_chunk_size: int = 100
 ) -> List[str]:
-    """
-    Split text into overlapping chunks, returning a list of chunks.
+    """Split text into overlapping chunks, returning a list of chunks.
 
     Args:
         text (str): The text to be split.
@@ -548,9 +660,9 @@ def chunk_text(
     info_highlight(f"Created {len(chunks)} chunks", category="chunking")
     return chunks
 
-def detect_html(content: str) -> Optional[str]:
-    """
-    Determine whether the provided content is HTML.
+
+def detect_html(content: str) -> str | None:
+    """Determine whether the provided content is HTML.
 
     Args:
         content (str): The content string to be analyzed.
@@ -579,9 +691,9 @@ def detect_html(content: str) -> Optional[str]:
         return 'html'
     return None
 
-def detect_json(content: str) -> Optional[str]:
-    """
-    Determine whether the provided content is valid JSON.
+
+def detect_json(content: str) -> str | None:
+    """Determine whether the provided content is valid JSON.
 
     Args:
         content (str): The content string to analyze.
@@ -608,9 +720,9 @@ def detect_json(content: str) -> Optional[str]:
             return 'json'
     return None
 
-def detect_from_url_extension(url: str) -> Optional[str]:
-    """
-    Infer content type based on the file extension in the URL.
+
+def detect_from_url_extension(url: str) -> str | None:
+    """Infer content type based on the file extension in the URL.
 
     Args:
         url (str): The URL to analyze.
@@ -648,9 +760,9 @@ def detect_from_url_extension(url: str) -> Optional[str]:
     except IndexError:
         return None
 
-def detect_from_url_path(url: str) -> Optional[str]:
-    """
-    Infer content type from common URL path patterns.
+
+def detect_from_url_path(url: str) -> str | None:
+    """Infer content type from common URL path patterns.
 
     Args:
         url (str): The URL to be analyzed.
@@ -676,9 +788,9 @@ def detect_from_url_path(url: str) -> Optional[str]:
     )
     return 'html' if any(pattern in url.lower() for pattern in html_path_patterns) else None
 
-def detect_from_content_heuristics(content: str) -> Optional[str]:
-    """
-    Infer content type based on heuristics applied directly to the content.
+
+def detect_from_content_heuristics(content: str) -> str | None:
+    r"""Infer content type based on heuristics applied directly to the content.
 
     Args:
         content (str): The text content to analyze.
@@ -706,9 +818,9 @@ def detect_from_content_heuristics(content: str) -> Optional[str]:
         return 'data'
     return 'text' if '\n\n' in content and len(content) > 200 else None
 
-def detect_from_url_domain(url: str) -> Optional[str]:
-    """
-    Infer content type based on URL domain characteristics.
+
+def detect_from_url_domain(url: str) -> str | None:
+    """Infer content type based on URL domain characteristics.
 
     Args:
         url (str): The URL to analyze.
@@ -733,9 +845,9 @@ def detect_from_url_domain(url: str) -> Optional[str]:
         return 'html'
     return None
 
+
 def detect_content_type(url: str, content: str) -> str:
-    """
-    Determine the content type using multiple detection strategies.
+    r"""Determine the content type using multiple detection strategies.
 
     This function sequentially applies various detectors (HTML, JSON, URL extension/path,
     content heuristics, and domain analysis). If none succeed, a fallback detection is used.
@@ -781,9 +893,9 @@ def detect_content_type(url: str, content: str) -> str:
     info_highlight(f"Using fallback detection, type: {result}", category="content_type")
     return result
 
+
 def fallback_detection(url: str, content: str) -> str:
-    """
-    Fallback detection logic for content type.
+    """Fallback detection logic for content type.
 
     Args:
         url (str): The URL to analyze.
@@ -804,9 +916,9 @@ def fallback_detection(url: str, content: str) -> str:
         return 'text'
     return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
 
+
 def preprocess_content(content: str, url: str) -> str:
-    """
-    Clean and preprocess content prior to further processing or model ingestion.
+    r"""Clean and preprocess content prior to further processing or model ingestion.
 
     This includes removing boilerplate text, redundant whitespace, site-specific cleaning,
     and truncating overly long content. Results are cached for performance.
@@ -845,19 +957,16 @@ def preprocess_content(content: str, url: str) -> str:
     cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
     
     # Retrieve cached content if available and not expired.
-    if cached_state := load_checkpoint(cache_key):
-        cached_result = cached_state.get("result")
-        if isinstance(cached_result, dict) and cached_result:
-            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
-                log_performance_metrics(
-                    "Content preprocessing (cached)", 
-                    start_time, 
-                    time.time(), 
-                    "preprocessing",
-                    {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
-                )
-                return cached_result.get("content", "")
+    cached_result = content_cache.get(cache_key)
+    if cached_result and isinstance(cached_result, dict):
+        log_performance_metrics(
+            "Content preprocessing (cached)", 
+            start_time, 
+            time.time(), 
+            "preprocessing",
+            {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
+        )
+        return cached_result.get("content", "")
 
     # Define boilerplate removal regex patterns.
     boilerplate_patterns = [
@@ -901,12 +1010,9 @@ def preprocess_content(content: str, url: str) -> str:
     log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
     # Cache the preprocessed content.
-    create_checkpoint(
+    content_cache.put(
         cache_key,
-        {
-            "result": {"content": content},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        },
+        {"content": content},
         ttl=3600  # 1 hour TTL
     )
     
@@ -919,7 +1025,7 @@ def preprocess_content(content: str, url: str) -> str:
         {
             "original_length": original_length, 
             "final_length": len(content), 
-            "reduction_percent": round((1 - len(content)/max(1, original_length)) * 100, 2),
+            "reduction_percent": round((1 - len(content) / max(1, original_length)) * 100, 2),
             "cache_hit": False
         }
     )
@@ -927,9 +1033,9 @@ def preprocess_content(content: str, url: str) -> str:
     info_highlight(f"Final content length: {len(content)}", category="preprocessing")
     return content
 
+
 def estimate_tokens(text: str) -> int:
-    """
-    Estimate the number of tokens in a text based on a fixed character-to-token ratio.
+    """Estimate the number of tokens in a text based on a fixed character-to-token ratio.
 
     Args:
         text (str): The text whose tokens are to be estimated.
@@ -950,9 +1056,9 @@ def estimate_tokens(text: str) -> int:
     """
     return int(len(text) / TOKEN_CHAR_RATIO) if text else 0
 
+
 def should_skip_content(url: str) -> bool:
-    """
-    Determine if the content from a given URL should be skipped based on certain rules.
+    """Determine if the content from a given URL should be skipped based on certain rules.
 
     The function checks for problematic file extensions, MIME type patterns, and known problematic sites.
 
@@ -976,7 +1082,7 @@ def should_skip_content(url: str) -> bool:
         True
     """
     try:
-        decoded_url = urllib.parse.unquote(url).lower()
+        decoded_url = unquote(url).lower()
     except Exception as e:
         error_highlight(f"Error decoding URL: {str(e)}", category="validation")
         decoded_url = url.lower()
@@ -1019,9 +1125,9 @@ def should_skip_content(url: str) -> bool:
 
     return False
 
+
 def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: str, operation: str, seen_items: set) -> None:
-    """
-    Helper function to merge a specific field from a list of result dictionaries into the merged dictionary.
+    """Merge a specific field from a list of result dictionaries into the merged dictionary.
 
     The operation can be:
       - 'extend': Append unique items to a list.
@@ -1064,9 +1170,9 @@ def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: s
             merged[field] = merged.get(field, [])
             merged[field].append(value)
 
-def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """
-    Merge multiple chunk extraction results into a single consolidated result.
+
+def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Dict[str, str] | None = None) -> Dict[str, Any]:
+    """Merge multiple chunk extraction results into a single consolidated result.
 
     The function uses a merge strategy (or a default one based on the category)
     to determine how to merge each field (e.g., 'extend' lists, 'update' dictionaries,
@@ -1162,9 +1268,9 @@ def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_stra
     
     return merged
 
+
 def validate_content(content: str) -> bool:
-    """
-    Validate that the provided content meets minimum requirements.
+    """Validate that the provided content meets minimum requirements.
 
     This function checks that the content is a string, is non-empty,
     and meets a minimum length requirement.
@@ -1200,6 +1306,7 @@ def validate_content(content: str) -> bool:
         return False
         
     return True
+
 
 __all__ = [
     "chunk_text",
@@ -1347,13 +1454,13 @@ with a particular emphasis on numerical data, trends, and statistical informatio
 Examples:
     Input text example:
         >>> text = '''
-        ... According to a recent survey by TechCorp, 75% of enterprises adopted cloud 
-        ... computing in 2023, up from 60% in 2022. The global cloud market reached 
-        ... $483.3 billion in revenue, with AWS maintaining a 32% market share. 
-        ... A separate study by MarketWatch revealed that cybersecurity spending 
+        ... According to a recent survey by TechCorp, 75% of enterprises adopted cloud
+        ... computing in 2023, up from 60% in 2022. The global cloud market reached
+        ... $483.3 billion in revenue, with AWS maintaining a 32% market share.
+        ... A separate study by MarketWatch revealed that cybersecurity spending
         ... increased by 15% year-over-year.
         ... '''
-    
+
     Extracting citations:
         >>> citations = extract_citations(text)
         >>> citations
@@ -1367,7 +1474,7 @@ Examples:
                 "context": "A separate study by MarketWatch revealed that cybersecurity"
             }
         ]
-    
+
     Extracting statistics:
         >>> stats = extract_statistics(text)
         >>> stats
@@ -1396,28 +1503,28 @@ Examples:
                 "year_mentioned": None
             }
         ]
-    
+
     Rating statistic quality:
         >>> quality = rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of Fortune 500 companies...")
         >>> quality
         0.95
-    
+
     Inferring statistic type:
         >>> infer_statistic_type("Market share increased to 45%")
         'percentage'
         >>> infer_statistic_type("$50 million in revenue")
         'financial'
-    
+
     Extracting year:
         >>> extract_year("In 2023, cloud adoption grew by 25%")
         2023
-    
+
     Finding JSON objects:
         >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
         >>> json_obj = find_json_object(text_with_json)
         >>> json_obj
         '{"key": "value", "nested": {"data": 123}}'
-    
+
     Enriching extracted facts:
         >>> fact = {
         ...     "text": "Cloud adoption grew by 25% in 2023",
@@ -1438,7 +1545,7 @@ Examples:
             "additional_citations": [...],
             "confidence_score": 0.9
         }
-    
+
     Full category information extraction (asynchronous):
         >>> facts, relevance = await extract_category_information(
         ...     content=text,
@@ -1479,20 +1586,29 @@ from urllib.parse import urlparse
 
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
-
-from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
-from react_agent.utils.validations import is_valid_url
-from react_agent.utils.content import chunk_text, preprocess_content, merge_chunk_results
-from react_agent.utils.defaults import get_default_extraction_result
-from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint, cache_result
 from langgraph.graph import StateGraph
+
+from react_agent.utils.cache import ProcessorCache
+from react_agent.utils.content import (
+    chunk_text,
+    merge_chunk_results,
+    preprocess_content,
+)
+from react_agent.utils.defaults import get_default_extraction_result
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
 
 # Import statistical utilities
 from react_agent.utils.statistics import (
-    calculate_category_quality_score,
+    HIGH_CREDIBILITY_TERMS,
     assess_authoritative_sources,
-    HIGH_CREDIBILITY_TERMS
+    calculate_category_quality_score,
 )
+from react_agent.utils.validations import is_valid_url
 
 # Initialize logger and JSON cache.
 logger = get_logger(__name__)
@@ -1500,22 +1616,23 @@ json_cache = ProcessorCache(thread_id="json_parser")
 
 # Regular expressions for identifying statistical content.
 STAT_PATTERNS: List[str] = [
-    r'\d+%',  # Percentage
-    r'\$\d+(?:,\d+)*(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Currency
-    r'\d+(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Numbers with scale
-    r'increased by|decreased by|grew by|reduced by|rose|fell',  # Trend language
-    r'majority|minority|fraction|proportion|ratio',  # Proportion language
-    r'survey|respondents|participants|study found',  # Research language
-    r'statistics show|data indicates|report reveals',  # Statistical citation
-    r'market share|growth rate|adoption rate|satisfaction score',  # Business metrics
-    r'average|mean|median|mode|range|standard deviation'  # Statistical terms
+    r"\d+%",  # Percentage
+    r"\$\d+(?:,\d+)*(?:\.\d+)?(?:\s?(?:million|billion|trillion))?",  # Currency
+    r"\d+(?:\.\d+)?(?:\s?(?:million|billion|trillion))?",  # Numbers with scale
+    r"increased by|decreased by|grew by|reduced by|rose|fell",  # Trend language
+    r"majority|minority|fraction|proportion|ratio",  # Proportion language
+    r"survey|respondents|participants|study found",  # Research language
+    r"statistics show|data indicates|report reveals",  # Statistical citation
+    r"market share|growth rate|adoption rate|satisfaction score",  # Business metrics
+    r"average|mean|median|mode|range|standard deviation",  # Statistical terms
 ]
-COMPILED_STAT_PATTERNS: List[re.Pattern] = [re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS]
+COMPILED_STAT_PATTERNS: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS
+]
 
 
 def extract_citations(text: str) -> List[Dict[str, str]]:
-    """
-    Extract citation information from a text.
+    """Extract citation information from a text.
 
     Searches for patterns such as "(Source: X)", "[X]", "cited from X", etc.
 
@@ -1531,21 +1648,23 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
     """
     citations: List[Dict[str, str]] = []
     citation_patterns = [
-        r'\(Source:?\s+([^)]+)\)',
-        r'\[([^]]+)\]',
-        r'cited\s+from\s+([^,.;]+)',
-        r'according\s+to\s+([^,.;]+)',
-        r'reported\s+by\s+([^,.;]+)',
-        r'([^,.;]+)\s+reports'
+        r"\(Source:?\s+([^)]+)\)",
+        r"\[([^]]+)\]",
+        r"cited\s+from\s+([^,.;]+)",
+        r"according\s+to\s+([^,.;]+)",
+        r"reported\s+by\s+([^,.;]+)",
+        r"([^,.;]+)\s+reports",
     ]
     for pattern in citation_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             citation = match.group(1).strip()
             # Skip if the citation appears to be a year.
-            if not re.match(r'^(19|20)\d{2}$', citation):
+            if not re.match(r"^(19|20)\d{2}$", citation):
                 citations.append({
                     "source": citation,
-                    "context": text[max(0, match.start() - 50):min(len(text), match.end() + 50)]
+                    "context": text[
+                        max(0, match.start() - 50) : min(len(text), match.end() + 50)
+                    ],
                 })
     return citations
 
@@ -1566,19 +1685,25 @@ def infer_statistic_type(text: str) -> str:
         >>> infer_statistic_type("Market share increased to 45%")
         'percentage'
     """
-    if re.search(r'%|percent|percentage', text, re.IGNORECASE):
+    if re.search(r"%|percent|percentage", text, re.IGNORECASE):
         return "percentage"
-    elif re.search(r'\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget', text, re.IGNORECASE):
+    elif re.search(
+        r"\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget",
+        text,
+        re.IGNORECASE,
+    ):
         return "financial"
-    elif re.search(r'time|duration|period|year|month|week|day|hour', text, re.IGNORECASE):
+    elif re.search(
+        r"time|duration|period|year|month|week|day|hour", text, re.IGNORECASE
+    ):
         return "temporal"
-    elif re.search(r'ratio|proportion|fraction', text, re.IGNORECASE):
+    elif re.search(r"ratio|proportion|fraction", text, re.IGNORECASE):
         return "ratio"
-    elif re.search(r'increase|decrease|growth|decline|trend', text, re.IGNORECASE):
+    elif re.search(r"increase|decrease|growth|decline|trend", text, re.IGNORECASE):
         return "trend"
-    elif re.search(r'survey|respondent|participant', text, re.IGNORECASE):
+    elif re.search(r"survey|respondent|participant", text, re.IGNORECASE):
         return "survey"
-    elif re.search(r'market share|market size', text, re.IGNORECASE):
+    elif re.search(r"market share|market size", text, re.IGNORECASE):
         return "market"
     else:
         return "general"
@@ -1602,15 +1727,21 @@ def rate_statistic_quality(stat_text: str) -> float:
         0.95
     """
     score = 0.5  # Base score
-    if re.search(r'\d+(?:\.\d+)?%', stat_text):
+    if re.search(r"\d+(?:\.\d+)?%", stat_text):
         score += 0.15
-    elif re.search(r'\$\d+(?:,\d+)*(?:\.\d+)?', stat_text):
+    elif re.search(r"\$\d+(?:,\d+)*(?:\.\d+)?", stat_text):
         score += 0.15
-    if re.search(r'according to|reported by|cited from|source|study|survey', stat_text, re.IGNORECASE):
+    if re.search(
+        r"according to|reported by|cited from|source|study|survey",
+        stat_text,
+        re.IGNORECASE,
+    ):
         score += 0.2
     if extract_year(stat_text):
         score += 0.1
-    if re.search(r'may|might|could|possibly|potentially|estimated', stat_text, re.IGNORECASE):
+    if re.search(
+        r"may|might|could|possibly|potentially|estimated", stat_text, re.IGNORECASE
+    ):
         score -= 0.1
     return max(0.0, min(1.0, score))
 
@@ -1629,7 +1760,7 @@ def extract_year(text: str) -> Optional[int]:
         >>> extract_year("In 2023, cloud adoption grew.")
         2023
     """
-    year_match = re.search(r'\b(19\d{2}|20\d{2})\b', text)
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text)
     return int(year_match[1]) if year_match else None
 
 
@@ -1668,19 +1799,28 @@ def assess_source_quality(text: str) -> float:
         0.8
     """
     score = 0.5
-    credibility_count = sum(term.lower() in text.lower() for term in HIGH_CREDIBILITY_TERMS)
+    credibility_count = sum(
+        term.lower() in text.lower() for term in HIGH_CREDIBILITY_TERMS
+    )
     if credibility_count >= 2:
         score += 0.3
     elif credibility_count == 1:
         score += 0.15
-    if re.search(r'according to|reported by|cited from|source|study|survey', text, re.IGNORECASE):
+    if re.search(
+        r"according to|reported by|cited from|source|study|survey", text, re.IGNORECASE
+    ):
         score += 0.2
-    if any(domain in text.lower() for domain in ['.gov', '.edu', '.org', 'research', 'university']):
+    if any(
+        domain in text.lower()
+        for domain in [".gov", ".edu", ".org", "research", "university"]
+    ):
         score += 0.2
     return min(1.0, score)
 
 
-def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> Dict[str, Any]:
+def enrich_extracted_fact(
+    fact: Dict[str, Any], url: str, source_title: str
+) -> Dict[str, Any]:
     """
     Enrich an extracted fact with additional metadata and context.
 
@@ -1709,9 +1849,11 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
     fact["extraction_timestamp"] = datetime.now(timezone.utc).isoformat()
 
     if isinstance(fact.get("source_text"), str):
-        if (extracted_stats := extract_statistics(fact["source_text"], url, source_title)):
+        if extracted_stats := extract_statistics(
+            fact["source_text"], url, source_title
+        ):
             fact["statistics"] = extracted_stats
-        if (citations := extract_citations(fact["source_text"])):
+        if citations := extract_citations(fact["source_text"]):
             fact["additional_citations"] = citations
 
     # Normalize confidence to a float value.
@@ -1728,7 +1870,12 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
 
     # Use assess_authoritative_sources to give a small extra boost if the URL is authoritative.
     if url and is_valid_url(url):
-        source_info = {"url": url, "title": source_title, "source": urlparse(url).netloc, "quality_score": 0.8}
+        source_info = {
+            "url": url,
+            "title": source_title,
+            "source": urlparse(url).netloc,
+            "quality_score": 0.8,
+        }
         if assess_authoritative_sources([source_info]):
             confidence_score = min(1.0, confidence_score + 0.05)
 
@@ -1750,7 +1897,7 @@ def find_json_object(text: str) -> Optional[str]:
         >>> find_json_object('Some text {"key": "value", "nested": {"data": 123}} more text')
         '{"key": "value", "nested": {"data": 123}}'
     """
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
         start_positions = [pos for pos, char in enumerate(text) if char == start_char]
         for start_pos in start_positions:
             level = 0
@@ -1762,7 +1909,7 @@ def find_json_object(text: str) -> Optional[str]:
                 elif char == end_char:
                     level -= 1
                     if level == 0:
-                        return text[start_pos:pos+1]
+                        return text[start_pos : pos + 1]
                 pos += 1
     return None
 
@@ -1784,13 +1931,13 @@ def _clean_json_string(text: str) -> str:
         >>> _clean_json_string("```json\\n{'key': 'value',}\\n```")
         '{"key": []}'
     """
-    text = re.sub(r'```(?:json)?\s*|\s*```', '', text)
+    text = re.sub(r"```(?:json)?\s*|\s*```", "", text)
     text = text.strip().replace("'", '"')
-    text = re.sub(r',(\s*[}\]])', r'\1', text)
-    if not text.startswith('{'):
-        text = '{' + text
-    if not text.endswith('}'):
-        text = text + '}'
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    if not text.startswith("{"):
+        text = "{" + text
+    if not text.endswith("}"):
+        text = text + "}"
     return re.sub(r'"(\w+)":\s*"', r'"\1": []', text)
 
 
@@ -1818,7 +1965,10 @@ def _merge_with_default(parsed: Dict[str, Any], category: str) -> Dict[str, Any]
         if isinstance(value, type(result[key])):
             if isinstance(value, (list, dict)):
                 result[key] = value
-            elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
+            elif isinstance(value, (int, float)) and key in [
+                "relevance_score",
+                "confidence_score",
+            ]:
                 result[key] = float(value)
     return result
 
@@ -1842,7 +1992,11 @@ def _check_cache(response: str, category: str) -> Dict[str, Any]:
     """
     response = _clean_json_string(response)
     cache_key = f"json_parse_{hash(response)}"
-    if (cached_result := json_cache.get(cache_key)) and isinstance(cached_result, dict) and cached_result.get("data"):
+    if (
+        (cached_result := json_cache.get(cache_key))
+        and isinstance(cached_result, dict)
+        and cached_result.get("data")
+    ):
         return cached_result["data"]
     json_text = find_json_object(response)
     if not json_text:
@@ -1854,14 +2008,16 @@ def _check_cache(response: str, category: str) -> Dict[str, Any]:
         {
             "data": result,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ttl": 3600
-        }
+            "ttl": 3600,
+        },
     )
     return result
 
 
-@cache_result(ttl=3600)
-def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
+@json_cache.cache_result(ttl=3600)
+def safe_json_parse(
+    response: Union[str, Dict[str, Any]], category: str
+) -> Dict[str, Any]:
     """
     Safely parse a JSON response with enhanced error handling and cleanup.
 
@@ -1889,7 +2045,9 @@ def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict
         return get_default_extraction_result(category)
 
 
-def extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
+def extract_statistics(
+    text: str, url: str = "", source_title: str = ""
+) -> List[Dict[str, Any]]:
     """
     Extract statistics and numerical data from text along with metadata.
 
@@ -1909,7 +2067,7 @@ def extract_statistics(text: str, url: str = "", source_title: str = "") -> List
         >>> extract_statistics("According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023.")
     """
     statistics: List[Dict[str, Any]] = []
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
     for sentence in sentences:
         for pattern in COMPILED_STAT_PATTERNS:
             if pattern.search(sentence):
@@ -1922,10 +2080,10 @@ def extract_statistics(text: str, url: str = "", source_title: str = "") -> List
                         "year_mentioned": extract_year(stat_text),
                         "source_quality": assess_source_quality(stat_text),
                         "quality_score": rate_statistic_quality(stat_text),
-                        "credibility_terms": extract_credibility_terms(stat_text)
+                        "credibility_terms": extract_credibility_terms(stat_text),
                     }
                     # Enrich the statistic with additional metadata.
-                    if (enriched := enrich_extracted_fact(statistic, url, source_title)):
+                    if enriched := enrich_extracted_fact(statistic, url, source_title):
                         statistic |= enriched
                     statistics.append(statistic)
                 break
@@ -1940,7 +2098,7 @@ async def extract_category_information(
     original_query: str,
     prompt_template: str,
     extraction_model: Any,
-    config: Optional[RunnableConfig] = None
+    config: Optional[RunnableConfig] = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
     """
     Extract information for a specific category with enhanced statistical focus.
@@ -1988,11 +2146,13 @@ async def extract_category_information(
             extraction_model=extraction_model,
             config=config,
             url=url,
-            title=title
+            title=title,
         )
         facts = _get_category_facts(category, extraction_result)
         enriched_facts = [enrich_extracted_fact(fact, url, title) for fact in facts]
-        sorted_facts = sorted(enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True)
+        sorted_facts = sorted(
+            enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True
+        )
         return sorted_facts, extraction_result.get("relevance_score", 0.0)
     except Exception as e:
         error_highlight(f"Error extracting from {url}: {str(e)}")
@@ -2027,7 +2187,7 @@ async def _process_content(
     extraction_model: Any,
     config: Optional[RunnableConfig],
     url: str,
-    title: str
+    title: str,
 ) -> Dict[str, Any]:
     """
     Process content with the extraction model.
@@ -2050,13 +2210,14 @@ async def _process_content(
         >>> result = await _process_content("Some content", "Prompt here", "market", model, None, "https://example.com", "Report")
     """
     if len(content) > 40000:
-        return await _process_chunked_content(content, prompt, category, extraction_model, config, url, title)
+        return await _process_chunked_content(
+            content, prompt, category, extraction_model, config, url, title
+        )
     model_response = await extraction_model(
-        messages=[{"role": "human", "content": prompt}],
-        config=config
+        messages=[{"role": "human", "content": prompt}], config=config
     )
     extraction_result = safe_json_parse(model_response, category)
-    if (stats := extract_statistics(content, url, title)):
+    if stats := extract_statistics(content, url, title):
         extraction_result["statistics"] = stats
     return extraction_result
 
@@ -2068,7 +2229,7 @@ async def _process_chunked_content(
     extraction_model: Any,
     config: Optional[RunnableConfig],
     url: str,
-    title: str
+    title: str,
 ) -> Dict[str, Any]:
     """
     Process content in chunks when it exceeds a size limit.
@@ -2098,10 +2259,9 @@ async def _process_chunked_content(
         info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
         chunk_prompt = prompt.format(content=chunk)
         chunk_response = await extraction_model(
-            messages=[{"role": "human", "content": chunk_prompt}],
-            config=config
+            messages=[{"role": "human", "content": chunk_prompt}], config=config
         )
-        if (chunk_result := safe_json_parse(chunk_response, category)):
+        if chunk_result := safe_json_parse(chunk_response, category):
             chunk_statistics = extract_statistics(chunk, url, title)
             all_statistics.extend(chunk_statistics)
             chunk_results.append(chunk_result)
@@ -2111,7 +2271,9 @@ async def _process_chunked_content(
     return result
 
 
-def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _get_category_facts(
+    category: str, extraction_result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     """
     Extract facts from the extraction result based on category structure.
 
@@ -2134,28 +2296,28 @@ def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> Lis
         "market_dynamics": [("fact", "extracted_facts")],
         "provider_landscape": [
             ("vendor", "extracted_vendors"),
-            ("relationship", "vendor_relationships")
+            ("relationship", "vendor_relationships"),
         ],
         "technical_requirements": [
             ("requirement", "extracted_requirements"),
-            ("standard", "standards")
+            ("standard", "standards"),
         ],
         "regulatory_landscape": [
             ("regulation", "extracted_regulations"),
-            ("compliance", "compliance_requirements")
+            ("compliance", "compliance_requirements"),
         ],
         "cost_considerations": [
             ("cost", "extracted_costs"),
-            ("pricing_model", "pricing_models")
+            ("pricing_model", "pricing_models"),
         ],
         "best_practices": [
             ("practice", "extracted_practices"),
-            ("methodology", "methodologies")
+            ("methodology", "methodologies"),
         ],
         "implementation_factors": [
             ("factor", "extracted_factors"),
-            ("challenge", "challenges")
-        ]
+            ("challenge", "challenges"),
+        ],
     }
     facts: List[Dict[str, Any]] = []
     for fact_type, key in category_mapping.get(category, [("fact", "extracted_facts")]):

@@ -158,7 +158,6 @@ from react_agent.utils.logging import (
 from react_agent.utils.statistics import (
     HIGH_CREDIBILITY_TERMS,
     assess_authoritative_sources,
-    calculate_category_quality_score,
 )
 from react_agent.utils.validations import is_valid_url
 

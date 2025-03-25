@@ -4,8 +4,9 @@ This module consolidates all default values, configurations, and common structur
 used across the research agent to maintain consistency and reduce duplication.
 """
 
-from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
+from typing import Any, Dict
+
 
 # Default chunking configurations
 @dataclass
@@ -15,6 +16,7 @@ class ChunkConfig:
     DEFAULT_OVERLAP: int = 500
     LARGE_CHUNK_SIZE: int = 40000
     LARGE_OVERLAP: int = 5000
+
 
 # Default extraction result structure
 DEFAULT_EXTRACTION_RESULTS = {
@@ -91,6 +93,7 @@ CATEGORY_MERGE_MAPPINGS = {
     }
 }
 
+
 def get_default_extraction_result(category: str) -> Dict[str, Any]:
     """Get a default empty extraction result when parsing fails.
     
@@ -102,6 +105,7 @@ def get_default_extraction_result(category: str) -> Dict[str, Any]:
     """
     return DEFAULT_EXTRACTION_RESULTS.get(category, {"extracted_facts": [], "relevance_score": 0.0})
 
+
 def get_category_merge_mapping(category: str) -> Dict[str, str]:
     """Get the merge mapping for a specific category.
     
@@ -112,6 +116,7 @@ def get_category_merge_mapping(category: str) -> Dict[str, str]:
         Dictionary mapping field names to merge operations
     """
     return CATEGORY_MERGE_MAPPINGS.get(category, {})
+
 
 # Export all defaults
 __all__ = [

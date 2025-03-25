@@ -252,23 +252,21 @@ class EmbeddingData(TypedDict):
     embedding: List[float]
     index: int
     object: str
-
-
+"""Embedding data."""
+ 
 class EmbeddingsResponse(TypedDict):
     data: List[EmbeddingData]
     model: str
     object: str
     usage: Dict[str, int]
+"""Embeddings response."""
 
 
 class EmbeddingsTool(BaseTool):
     """Tool for calling the Jina Embeddings API to generate embeddings for text/images.
     """
     name: str = "EmbeddingsTool"
-    description: str = (
-        "Use this tool to convert text or images into vector embeddings via Jina's Embeddings API. "
-        "Requires the JINA_API_KEY environment variable."
-    )
+    description: str = "Use this tool to convert text or images into vector embeddings via Jina's Embeddings API. Requires the JINA_API_KEY environment variable."
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -346,21 +344,19 @@ class RerankerScoreData(TypedDict):
     document: Union[str, Dict[str, Any]]
     index: int
     relevance_score: float
-
-
+"""Re-ranker score data."""
+ 
 class RerankerResponse(TypedDict):
     model: str
     results: List[RerankerScoreData]
+"""Re-ranker response."""
 
 
 class RerankerTool(BaseTool):
     """Tool for calling the Jina Re-Ranker API to refine search results.
     """
     name: str = "RerankerTool"
-    description: str = (
-        "Use this tool to re-rank search results using Jina's Re-Ranker API. "
-        "Requires the JINA_API_KEY environment variable."
-    )
+    description: str = "Use this tool to re-rank search results using Jina's Re-Ranker API. Requires the JINA_API_KEY environment variable."
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -455,16 +451,14 @@ class ReaderResponse(TypedDict):
     images: Optional[List[Dict[str, str]]]
     title: Optional[str]
     url: str
+"""Reader response."""
 
 
 class ReaderTool(BaseTool):
     """Tool for calling the Jina Reader API to retrieve/parse web content.
     """
     name: str = "ReaderTool"
-    description: str = (
-        "Use this tool to scrape and parse a single webpage using Jina's Reader API. "
-        "Requires the JINA_API_KEY environment variable."
-    )
+    description: str = "Use this tool to scrape and parse a single webpage using Jina's Reader API. Requires the JINA_API_KEY environment variable."
 
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 

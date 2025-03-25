@@ -1,3 +1,16 @@
+"""Unit tests for the cache module.
+
+This test suite verifies the functionality of the ProcessorCache class and its methods,
+including caching behavior, checkpoint integration, and edge case handling.
+
+Examples of test cases:
+    - Basic cache operations (get/put)
+    - Cache hit/miss scenarios
+    - TTL expiration validation
+    - Error handling cases
+    - Decorator functionality
+"""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -5,11 +18,36 @@ from langgraph.checkpoint.memory import MemorySaver
 
 
 class TestCodeUnderTest:
-    """Tests for the cache module."""
+    """Tests for the cache module.
+    
+    Test scenarios cover:
+    - Memory cache operations
+    - Checkpoint integration
+    - Cache statistics tracking
+    - Decorator behavior
+    - Edge cases (empty values, exceptions)
+    
+    Example test cases:
+        >>> test_memory_cache_hit_retrieves_correct_data()
+        Verifies memory cache returns stored data
+        
+        >>> test_cache_result_decorator_caches_function_results()
+        Verifies decorated functions cache results
+    """
 
     @pytest.fixture(autouse=True)
     def setup_mocks(self, mocker):
-        """Set up mocks for all tests."""
+        """Set up mocks for all tests.
+        
+        Initializes:
+        - Mock modules to prevent import errors
+        - Logger and metrics mocks
+        - ProcessorCache instance for testing
+        
+        Example mock setup:
+            >>> mocker.patch('openai.AsyncOpenAI')
+            >>> mocker.patch('react_agent.utils.cache.logger')
+        """
         # Mock all necessary modules to prevent import errors
         mocker.patch.dict('sys.modules', {
             'openai': mocker.MagicMock(),
@@ -26,8 +64,14 @@ class TestCodeUnderTest:
         from src.react_agent.utils.cache import ProcessorCache
         self.ProcessorCache = ProcessorCache
 
-    # Cache hit retrieves correct data from memory cache
     def test_memory_cache_hit_retrieves_correct_data(self, mocker):
+        """Verify memory cache returns stored data for existing keys.
+        
+        Example:
+            >>> cache.put("test-key", {"value": "test"})
+            >>> cache.get("test-key") 
+            {'value': 'test'}  # Returns stored data
+        """
         # Arrange
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
     
@@ -55,8 +99,14 @@ class TestCodeUnderTest:
         assert result == test_data
         mock_logger.info.assert_any_call(f"Cache hit from memory for key: {test_key}")
 
-    # Handling exceptions during checkpoint retrieval
     def test_exception_handling_during_checkpoint_retrieval(self, mocker):
+        """Verify exception handling during checkpoint retrieval.
+        
+        Example:
+            >>> cache.memory_saver.get.side_effect = Exception("Test error")
+            >>> cache.get("key")  # Should handle exception gracefully
+            None  # Returns None instead of raising exception
+        """
         # Arrange
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
@@ -80,8 +130,24 @@ class TestCodeUnderTest:
         assert "Error retrieving from cache" in mock_logger.error.call_args[0][0]
         assert mock_metrics.called
 
-    # Cache hit retrieves correct data from checkpoint
     def test_checkpoint_cache_hit_retrieves_correct_data(self, mocker):
+        """Verify checkpoint cache returns stored data for existing keys.
+        
+        Example:
+            >>> mock_checkpoint = {
+            ...     "values": {
+            ...         "entry": {
+            ...             "data": {"value": "test-value"},
+            ...             "timestamp": "2023-01-01T00:00:00+00:00",
+            ...             "ttl": 3600,
+            ...             "version": 1,
+            ...             "metadata": {}
+            ...         }
+            ...     }
+            ... }
+            >>> cache.get("test-key")  # Returns data from checkpoint
+            {'value': 'test-value'}
+        """
         # Arrange
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
@@ -112,8 +178,16 @@ class TestCodeUnderTest:
         assert result == test_data
         mock_logger.info.assert_any_call(f"Cache hit from checkpoint for key: {test_key}")
 
-    # Cache miss returns None and increments cache_misses counter
     def test_cache_miss_increments_counter(self, mocker):
+        """Verify cache miss returns None and increments counter.
+        
+        Example:
+            >>> cache.cache_misses = 0
+            >>> cache.get("nonexistent-key")  # Key doesn't exist
+            None
+            >>> cache.cache_misses
+            1  # Counter incremented after miss
+        """
         # Arrange
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
@@ -132,8 +206,15 @@ class TestCodeUnderTest:
         assert cache.cache_misses == 1
         mock_logger.info.assert_any_call("Cache miss for key: nonexistent-key")
 
-    # put() successfully stores data in both memory cache and checkpoint
     def test_put_stores_data_in_memory_and_checkpoint(self, mocker):
+        """Verify put() stores data in both memory cache and checkpoint.
+        
+        Example:
+            >>> cache.put("test-key", {"value": "test"}, ttl=3600)
+            >>> "test-key" in cache.memory_cache  # Stored in memory
+            True
+            >>> mock_memory_saver_put.assert_called_once()  # Stored in checkpoint
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
 
@@ -157,8 +238,17 @@ class TestCodeUnderTest:
         mock_memory_saver_put.assert_called_once()
         mock_logger.info.assert_any_call(f"Stored data in cache for key: {test_key}")
 
-    # cache_result decorator correctly caches function results
     def test_cache_result_decorator_caches_function_results(self, mocker):
+        """Verify decorated functions cache their return values.
+        
+        Example:
+            >>> @cache.cache_result(ttl=600)
+            >>> def add(a, b): return a + b
+            >>> add(3, 4)  # First call computes and caches
+            7
+            >>> add(3, 4)  # Second call returns cached result
+            7 (from cache)
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
         
@@ -176,8 +266,17 @@ class TestCodeUnderTest:
         assert result2 == 7
         assert cache.cache_hits == 1
 
-    # Decorated function returns cached result on subsequent calls with same parameters
     def test_decorated_function_returns_cached_result(self, mocker):
+        """Verify decorated function returns cached result on subsequent calls.
+        
+        Example:
+            >>> @cache.cache_result(ttl=600)
+            >>> def expensive_operation(x): 
+            ...     print("Computing...")
+            ...     return x * 2
+            >>> expensive_operation(5)  # Prints "Computing..." and returns 10
+            >>> expensive_operation(5)  # Returns 10 without printing "Computing..."
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
     
@@ -204,8 +303,15 @@ class TestCodeUnderTest:
         assert second_result == 7
         assert mock_logger.info.call_count >= 1  # At least one log message for cache hit
 
-    # _generate_cache_key creates unique keys for different function calls
     def test_generate_cache_key_creates_unique_keys(self, mocker):
+        """Verify cache keys are unique for different inputs.
+        
+        Example:
+            >>> key1 = cache._generate_cache_key(func, (1, 2), {})
+            >>> key2 = cache._generate_cache_key(func, (2, 3), {})
+            >>> key1 != key2  # Different args generate different keys
+            True
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
         mock_func = mocker.Mock(__name__='mock_func')
@@ -220,8 +326,18 @@ class TestCodeUnderTest:
         assert key1 != key3
         assert key2 != key3
 
-    # _is_cache_valid correctly determines if cached entries are expired
     def test_is_cache_valid_expired_entry(self, mocker):
+        """Verify cache validation correctly identifies expired entries.
+        
+        Example:
+            >>> entry = {
+            ...     "timestamp": "2023-01-01T00:00:00+00:00",  # Old timestamp
+            ...     "ttl": 3600,
+            ...     "data": {...}
+            ... }
+            >>> cache._is_cache_valid(entry)
+            False  # Because entry is expired
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
 
@@ -248,8 +364,17 @@ class TestCodeUnderTest:
         # Assert
         assert not is_valid
 
-    # Empty or None values being cached correctly
     def test_cache_empty_none_values(self, mocker):
+        """Verify empty and None values are cached correctly.
+        
+        Example:
+            >>> cache.put("empty-key", "")
+            >>> cache.put("none-key", None)
+            >>> cache.get("empty-key")
+            ''  # Empty string retrieved correctly
+            >>> cache.get("none-key")
+            None  # None value retrieved correctly
+        """
         # Create cache instance
         cache = self.ProcessorCache(thread_id="test-thread", version=1)
 

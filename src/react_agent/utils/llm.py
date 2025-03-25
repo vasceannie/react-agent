@@ -66,8 +66,8 @@ import asyncio
 import json
 import os
 import re
-from datetime import UTC, datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, TypedDict, Union, cast
+from datetime import UTC, datetime
+from typing import Any, Dict, Iterable, List, TypedDict, Union, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -425,7 +425,7 @@ def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]
 
 class LLMClient:
     """Asynchronous LLM utility for chat, JSON output, and embeddings.
-    
+
     Provides a consolidated interface for calling language models,
     abstracting away the details of message formatting, chunking, and error handling.
 

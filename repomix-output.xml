@@ -410,9 +410,7 @@ from react_agent.utils.logging import (
     log_progress,
     log_performance_metrics
 )
-from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.defaults import ChunkConfig, get_default_extraction_result, get_category_merge_mapping
-from langgraph.graph import StateGraph
 from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result
 
 # Initialize logger
@@ -1377,9 +1375,11 @@ Examples:
             {
                 "text": "75% of enterprises adopted cloud computing in 2023",
                 "type": "percentage",
-                "citations": [{"source": "TechCorp", "context": "...survey by TechCorp, 75% of enterprises..."}],
+                "citations": [{"source": "TechCorp", "context": "...survey by TechCorp..."}],
+                "year_mentioned": 2023,
+                "source_quality": 0.7,
                 "quality_score": 0.95,
-                "year_mentioned": 2023
+                "credibility_terms": []
             },
             {
                 "text": "global cloud market reached $483.3 billion in revenue",
@@ -1398,8 +1398,7 @@ Examples:
         ]
     
     Rating statistic quality:
-        >>> stat_text = "According to Gartner's 2023 survey, 78.5% of Fortune 500 companies..."
-        >>> quality = rate_statistic_quality(stat_text)
+        >>> quality = rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of Fortune 500 companies...")
         >>> quality
         0.95
     
@@ -1447,7 +1446,7 @@ Examples:
         ...     title="Cloud Computing Trends 2023",
         ...     category="market_dynamics",
         ...     original_query="cloud computing adoption trends",
-        ...     prompt_template="Your prompt here with {query}, {url}, and {content}",
+        ...     prompt_template="Extract facts for {query} from {url}: {content}",
         ...     extraction_model=model
         ... )
         >>> facts
@@ -1471,10 +1470,11 @@ Examples:
 """
 
 import contextlib
-from typing import Dict, List, Any, Optional, Union, Tuple
-import re
 import json
+import re
+import time
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 from langchain_core.documents import Document
@@ -1486,18 +1486,20 @@ from react_agent.utils.content import chunk_text, preprocess_content, merge_chun
 from react_agent.utils.defaults import get_default_extraction_result
 from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint, cache_result
 from langgraph.graph import StateGraph
+
+# Import statistical utilities
 from react_agent.utils.statistics import (
     calculate_category_quality_score,
     assess_authoritative_sources,
     HIGH_CREDIBILITY_TERMS
 )
 
-# Initialize logger and cache for JSON parsing.
+# Initialize logger and JSON cache.
 logger = get_logger(__name__)
 json_cache = ProcessorCache(thread_id="json_parser")
 
 # Regular expressions for identifying statistical content.
-STAT_PATTERNS = [
+STAT_PATTERNS: List[str] = [
     r'\d+%',  # Percentage
     r'\$\d+(?:,\d+)*(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Currency
     r'\d+(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Numbers with scale
@@ -1508,29 +1510,24 @@ STAT_PATTERNS = [
     r'market share|growth rate|adoption rate|satisfaction score',  # Business metrics
     r'average|mean|median|mode|range|standard deviation'  # Statistical terms
 ]
-
-COMPILED_STAT_PATTERNS = [re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS]
+COMPILED_STAT_PATTERNS: List[re.Pattern] = [re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS]
 
 
 def extract_citations(text: str) -> List[Dict[str, str]]:
     """
     Extract citation information from a text.
 
-    The function searches for patterns like "(Source: X)", "[X]", "cited from X", etc., and
-    returns a list of citations with the source and a context snippet.
+    Searches for patterns such as "(Source: X)", "[X]", "cited from X", etc.
 
     Args:
-        text (str): The input text from which to extract citations.
+        text (str): The input text.
 
     Returns:
-        List[Dict[str, str]]: A list of dictionaries each containing:
-            - "source": The extracted source string.
-            - "context": A snippet of the text around the citation.
+        List[Dict[str, str]]: A list of dictionaries, each with keys "source" and "context".
 
     Examples:
-        >>> text = "According to a recent survey by TechCorp, 75% of enterprises adopted..."
-        >>> extract_citations(text)
-        [{'source': 'TechCorp', 'context': '...survey by TechCorp, 75% of enterprises adopted...'}]
+        >>> extract_citations("According to a recent survey by TechCorp, 75%...")
+        [{'source': 'TechCorp', 'context': '...survey by TechCorp, 75%...'}]
     """
     citations: List[Dict[str, str]] = []
     citation_patterns = [
@@ -1542,10 +1539,9 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
         r'([^,.;]+)\s+reports'
     ]
     for pattern in citation_patterns:
-        matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in matches:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
             citation = match.group(1).strip()
-            # Skip if the citation is a year (e.g., [2022])
+            # Skip if the citation appears to be a year.
             if not re.match(r'^(19|20)\d{2}$', citation):
                 citations.append({
                     "source": citation,
@@ -1554,80 +1550,55 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
     return citations
 
 
-def extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
+def infer_statistic_type(text: str) -> str:
     """
-    Extract statistics and numerical data from text along with their metadata.
+    Infer the type of statistic from text.
 
-    The function scans the text sentence by sentence and applies several regular expression
-    patterns to detect statistical information. For each statistic found, it infers its type,
-    extracts citations, checks for a mentioned year, assesses source quality, and rates the statistic's quality.
+    Determines the type based on keywords and symbols.
 
     Args:
-        text (str): The text to extract statistics from.
-        url (str): Optional URL associated with the text.
-        source_title (str): Optional title of the source document.
+        text (str): The text to analyze.
 
     Returns:
-        List[Dict[str, Any]]: A list of dictionaries for each extracted statistic. Each dictionary may include:
-            - "text": The statistic text.
-            - "type": Inferred type (e.g., 'percentage', 'financial').
-            - "citations": List of citation dictionaries.
-            - "year_mentioned": Extracted year (if any).
-            - "source_quality": Quality score of the source.
-            - "quality_score": Overall quality score (0.0 to 1.0).
-            - "credibility_terms": List of credibility terms found.
+        str: The inferred type (e.g., 'percentage', 'financial', etc.).
 
     Examples:
-        >>> text = "According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023."
-        >>> extract_statistics(text)
-        [{
-            "text": "75% of enterprises adopted cloud computing in 2023",
-            "type": "percentage",
-            "citations": [{"source": "TechCorp", "context": "...survey by TechCorp..."}],
-            "year_mentioned": 2023,
-            "source_quality": 0.7,
-            "quality_score": 0.95,
-            "credibility_terms": []
-        }]
+        >>> infer_statistic_type("Market share increased to 45%")
+        'percentage'
     """
-    statistics: List[Dict[str, Any]] = []
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    for sentence in sentences:
-        for pattern in COMPILED_STAT_PATTERNS:
-            if pattern.search(sentence):
-                stat_text = sentence.strip()
-                if all(s["text"] != stat_text for s in statistics):
-                    statistic: Dict[str, Any] = {
-                        "text": stat_text,
-                        "type": infer_statistic_type(stat_text),
-                        "citations": extract_citations(stat_text),
-                        "year_mentioned": extract_year(stat_text),
-                        "source_quality": assess_source_quality(stat_text),
-                        "quality_score": rate_statistic_quality(stat_text),
-                        "credibility_terms": extract_credibility_terms(stat_text)
-                    }
-                    if enriched := enrich_extracted_fact(statistic, url, source_title):
-                        statistic |= enriched
-                    statistics.append(statistic)
-                break
-    return statistics
+    if re.search(r'%|percent|percentage', text, re.IGNORECASE):
+        return "percentage"
+    elif re.search(r'\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget', text, re.IGNORECASE):
+        return "financial"
+    elif re.search(r'time|duration|period|year|month|week|day|hour', text, re.IGNORECASE):
+        return "temporal"
+    elif re.search(r'ratio|proportion|fraction', text, re.IGNORECASE):
+        return "ratio"
+    elif re.search(r'increase|decrease|growth|decline|trend', text, re.IGNORECASE):
+        return "trend"
+    elif re.search(r'survey|respondent|participant', text, re.IGNORECASE):
+        return "survey"
+    elif re.search(r'market share|market size', text, re.IGNORECASE):
+        return "market"
+    else:
+        return "general"
 
 
 def rate_statistic_quality(stat_text: str) -> float:
     """
     Rate the quality of a statistic on a scale from 0.0 to 1.0.
 
-    The function increases the base score based on the presence of specific numbers,
-    citation indicators, and a mentioned year; it also penalizes vague language.
+    Increases the base score based on numerical presence, citation indicators,
+    and a mentioned year; penalizes vague language.
 
     Args:
-        stat_text (str): The statistic text to rate.
+        stat_text (str): The statistic text.
 
     Returns:
         float: A quality score between 0.0 and 1.0.
 
     Examples:
-        >>> rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of companies...")
+        >>> rate_statistic_quality("According to Gartner's 2023 survey, 78.5%...")
         0.95
     """
     score = 0.5  # Base score
@@ -1649,10 +1620,10 @@ def extract_year(text: str) -> Optional[int]:
     Extract a year from text if present.
 
     Args:
-        text (str): The text that may contain a year (e.g., "2023").
+        text (str): The input text.
 
     Returns:
-        Optional[int]: The extracted year as an integer, or None if no year is found.
+        Optional[int]: The year found, or None.
 
     Examples:
         >>> extract_year("In 2023, cloud adoption grew.")
@@ -1662,247 +1633,32 @@ def extract_year(text: str) -> Optional[int]:
     return int(year_match[1]) if year_match else None
 
 
-def infer_statistic_type(text: str) -> str:
+def extract_credibility_terms(text: str) -> List[str]:
     """
-    Infer the type of statistic from the text.
-
-    The function identifies keywords and symbols to determine the type, such as:
-        - 'percentage' for values like 45%
-        - 'financial' for monetary values
-        - 'temporal' for time-related data
-        - 'ratio' for proportions
-        - 'trend' for increases/decreases
-        - 'survey' for research-related data
-        - 'market' for market-related terms
-        - 'general' if none of the above match
+    Extract credibility-indicating terms from text.
 
     Args:
         text (str): The text to analyze.
 
     Returns:
-        str: The inferred statistic type.
+        List[str]: A list of credibility terms found.
 
     Examples:
-        >>> infer_statistic_type("Market share increased to 45%")
-        'percentage'
-        >>> infer_statistic_type("$50 million in revenue")
-        'financial'
+        >>> extract_credibility_terms("Reported by a renowned research institute")
+        ['research', 'institute']
     """
-    if re.search(r'%|percent|percentage', text, re.IGNORECASE):
-        return "percentage"
-    elif re.search(r'\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget', text, re.IGNORECASE):
-        return "financial"
-    elif re.search(r'time|duration|period|year|month|week|day|hour', text, re.IGNORECASE):
-        return "temporal"
-    elif re.search(r'ratio|proportion|fraction', text, re.IGNORECASE):
-        return "ratio"
-    elif re.search(r'increase|decrease|growth|decline|trend', text, re.IGNORECASE):
-        return "trend"
-    elif re.search(r'survey|respondent|participant', text, re.IGNORECASE):
-        return "survey"
-    elif re.search(r'market share|market size', text, re.IGNORECASE):
-        return "market"
-    else:
-        return "general"
-
-
-def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> Dict[str, Any]:
-    """
-    Enrich an extracted fact with additional metadata and context.
-
-    This function adds source information, extracts the domain from the URL, adds a timestamp,
-    and may extract additional statistics and citations from a "source_text" field if present.
-    It also adjusts the confidence score based on the presence of statistics and citations.
-
-    Args:
-        fact (Dict[str, Any]): The initial extracted fact.
-        url (str): The source URL.
-        source_title (str): The title of the source document.
-
-    Returns:
-        Dict[str, Any]: The enriched fact dictionary.
-
-    Examples:
-        >>> fact = {
-        ...     "text": "Cloud adoption grew by 25% in 2023",
-        ...     "confidence": 0.8,
-        ...     "source_text": "According to AWS, cloud adoption grew by 25% in 2023"
-        ... }
-        >>> enrich_extracted_fact(fact, "https://example.com/report", "Cloud Market Report")
-        { ... "source_url": "https://example.com/report", ... "confidence_score": 0.9 }
-    """
-    fact["source_url"] = url
-    fact["source_title"] = source_title
-    try:
-        domain = urlparse(url).netloc
-        fact["source_domain"] = domain
-    except Exception:
-        fact["source_domain"] = ""
-    fact["extraction_timestamp"] = datetime.now().isoformat()
-    if "source_text" in fact and isinstance(fact["source_text"], str):
-        if statistics := extract_statistics(fact["source_text"], url, source_title):
-            fact["statistics"] = statistics
-        if citations := extract_citations(fact["source_text"]):
-            fact["additional_citations"] = citations
-    confidence_score = fact.get("confidence", 0.5)
-    if isinstance(confidence_score, str):
-        if confidence_score.lower() == "high":
-            confidence_score = 0.9
-        elif confidence_score.lower() == "medium":
-            confidence_score = 0.7
-        elif confidence_score.lower() == "low":
-            confidence_score = 0.4
-        else:
-            confidence_score = 0.5
-    if "statistics" in fact and len(fact["statistics"]) > 0:
-        confidence_score = min(1.0, confidence_score + 0.1)
-    if "additional_citations" in fact and len(fact["additional_citations"]) > 0:
-        confidence_score = min(1.0, confidence_score + 0.1)
-    fact["confidence_score"] = confidence_score
-    return fact
-
-
-def find_json_object(text: str) -> Optional[str]:
-    """
-    Find a JSON object or array in a text using balanced brace matching.
-
-    This method attempts to locate the longest valid JSON-like structure by tracking
-    the nesting of braces or brackets.
-
-    Args:
-        text (str): The text that may contain a JSON object.
-
-    Returns:
-        Optional[str]: The extracted JSON-like string if found, otherwise None.
-
-    Examples:
-        >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
-        >>> find_json_object(text_with_json)
-        '{"key": "value", "nested": {"data": 123}}'
-    """
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
-        start_positions = [pos for pos, char in enumerate(text) if char == start_char]
-        for start_pos in start_positions:
-            level = 0
-            pos = start_pos
-            while pos < len(text):
-                char = text[pos]
-                if char == start_char:
-                    level += 1
-                elif char == end_char:
-                    level -= 1
-                    if level == 0:
-                        return text[start_pos:pos+1]
-                pos += 1
-    return None
-
-
-def _check_cache(response: str, category: str) -> Dict[str, Any]:
-    """
-    Check and cache the JSON parsing result of a response.
-
-    This helper function cleans the response string, checks if the parsed result exists in cache,
-    and if not, attempts to find, parse, merge with default template, and then cache the result.
-
-    Args:
-        response (str): The raw response string containing JSON.
-        category (str): The extraction category to determine the default template.
-
-    Returns:
-        Dict[str, Any]: The parsed and merged JSON result.
-
-    Examples:
-        >>> _check_cache('{"key": "value"}', "research")
-        {"key": "value"}
-    """
-    response = _clean_json_string(response)
-    cache_key = f"json_parse_{hash(response)}"
-    if cached_result := json_cache.get(cache_key):
-        if isinstance(cached_result, dict) and cached_result.get("data"):
-            return cached_result["data"]
-    json_text = find_json_object(response)
-    if not json_text:
-        return get_default_extraction_result(category)
-    parsed = json.loads(json_text)
-    result = _merge_with_default(parsed, category)
-    json_cache.put(
-        cache_key,
-        {
-            "data": result,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ttl": 3600
-        }
-    )
-    return result
-
-
-def _clean_json_string(text: str) -> str:
-    """
-    Clean and normalize a JSON string.
-
-    This helper removes code block markers, trims whitespace, replaces single quotes with double quotes,
-    removes trailing commas, and attempts to add missing braces.
-
-    Args:
-        text (str): The raw JSON string.
-
-    Returns:
-        str: The cleaned JSON string.
-
-    Examples:
-        >>> _clean_json_string("```json\n{'key': 'value',}\n```")
-        '{"key": []}'
-    """
-    text = re.sub(r'```(?:json)?\s*|\s*```', '', text)
-    text = text.strip()
-    text = text.replace("'", '"')
-    text = re.sub(r',(\s*[}\]])', r'\1', text)
-    if not text.startswith('{'):
-        text = '{' + text
-    if not text.endswith('}'):
-        text = text + '}'
-    return re.sub(r'"(\w+)":\s*"', r'"\1": []', text)
-
-
-def _merge_with_default(parsed: Dict[str, Any], category: str) -> Dict[str, Any]:
-    """
-    Merge a parsed JSON object with the default extraction result template for a category.
-
-    This function updates the default extraction result with values from the parsed data
-    if the types match and for select keys like 'relevance_score' or 'confidence_score'.
-
-    Args:
-        parsed (Dict[str, Any]): The parsed JSON object.
-        category (str): The extraction category to select the default template.
-
-    Returns:
-        Dict[str, Any]: The merged result.
-
-    Examples:
-        >>> _merge_with_default({"confidence_score": "0.85"}, "research")
-        { ... "confidence_score": 0.85, ... }
-    """
-    result = get_default_extraction_result(category)
-    for key, value in parsed.items():
-        if key not in result:
-            continue
-        if isinstance(value, type(result[key])):
-            if isinstance(value, (list, dict)):
-                result[key] = value
-            elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
-                result[key] = float(value)
-    return result
+    return [term for term in HIGH_CREDIBILITY_TERMS if term.lower() in text.lower()]
 
 
 def assess_source_quality(text: str) -> float:
     """
-    Assess the quality of the source mentioned in a statistic.
+    Assess the quality of a source from a text snippet.
 
-    The function awards points based on the presence of credibility terms,
-    source citation phrases, and authoritative source indicators.
+    Awards points based on the presence of credibility terms, citation phrases,
+    and authoritative source indicators (e.g. .gov, .edu).
 
     Args:
-        text (str): The text containing the source information.
+        text (str): The text containing source information.
 
     Returns:
         float: A quality score between 0.0 and 1.0.
@@ -1924,24 +1680,256 @@ def assess_source_quality(text: str) -> float:
     return min(1.0, score)
 
 
-def extract_credibility_terms(text: str) -> List[str]:
+def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> Dict[str, Any]:
     """
-    Extract terms from the text that indicate credibility.
+    Enrich an extracted fact with additional metadata and context.
+
+    Adds source URL, title, domain, timestamp, and further extracts statistics
+    and citations from an optional "source_text" field. It also adjusts the confidence
+    score based on available evidence and applies a small boost if the source is authoritative.
 
     Args:
-        text (str): The text to search for credibility-indicating terms.
+        fact (Dict[str, Any]): The initial fact.
+        url (str): The source URL.
+        source_title (str): The source document title.
 
     Returns:
-        List[str]: A list of credibility terms found in the text.
+        Dict[str, Any]: The enriched fact.
 
     Examples:
-        >>> extract_credibility_terms("Reported by a renowned research institute")
-        ['research institute']
+        >>> fact = {"text": "Cloud adoption grew by 25% in 2023", "confidence": 0.8, "source_text": "..."}
+        >>> enrich_extracted_fact(fact, "https://example.com/report", "Cloud Market Report")
     """
-    return [
-        term for term in HIGH_CREDIBILITY_TERMS
-        if term.lower() in text.lower()
-    ]
+    fact["source_url"] = url
+    fact["source_title"] = source_title
+    try:
+        fact["source_domain"] = urlparse(url).netloc
+    except Exception:
+        fact["source_domain"] = ""
+    fact["extraction_timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    if isinstance(fact.get("source_text"), str):
+        if (extracted_stats := extract_statistics(fact["source_text"], url, source_title)):
+            fact["statistics"] = extracted_stats
+        if (citations := extract_citations(fact["source_text"])):
+            fact["additional_citations"] = citations
+
+    # Normalize confidence to a float value.
+    confidence_score = fact.get("confidence", 0.5)
+    if isinstance(confidence_score, str):
+        mapping = {"high": 0.9, "medium": 0.7, "low": 0.4}
+        confidence_score = mapping.get(confidence_score.lower(), 0.5)
+
+    # Boost confidence if statistics or additional citations are present.
+    if fact.get("statistics"):
+        confidence_score = min(1.0, confidence_score + 0.1)
+    if fact.get("additional_citations"):
+        confidence_score = min(1.0, confidence_score + 0.1)
+
+    # Use assess_authoritative_sources to give a small extra boost if the URL is authoritative.
+    if url and is_valid_url(url):
+        source_info = {"url": url, "title": source_title, "source": urlparse(url).netloc, "quality_score": 0.8}
+        if assess_authoritative_sources([source_info]):
+            confidence_score = min(1.0, confidence_score + 0.05)
+
+    fact["confidence_score"] = confidence_score
+    return fact
+
+
+def find_json_object(text: str) -> Optional[str]:
+    """
+    Find a JSON object or array in text using balanced brace matching.
+
+    Args:
+        text (str): The input text.
+
+    Returns:
+        Optional[str]: The JSON-like string if found; otherwise, None.
+
+    Examples:
+        >>> find_json_object('Some text {"key": "value", "nested": {"data": 123}} more text')
+        '{"key": "value", "nested": {"data": 123}}'
+    """
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        start_positions = [pos for pos, char in enumerate(text) if char == start_char]
+        for start_pos in start_positions:
+            level = 0
+            pos = start_pos
+            while pos < len(text):
+                char = text[pos]
+                if char == start_char:
+                    level += 1
+                elif char == end_char:
+                    level -= 1
+                    if level == 0:
+                        return text[start_pos:pos+1]
+                pos += 1
+    return None
+
+
+def _clean_json_string(text: str) -> str:
+    """
+    Clean and normalize a JSON string.
+
+    Removes code block markers, trims whitespace, replaces single quotes with double quotes,
+    removes trailing commas, and ensures proper bracing.
+
+    Args:
+        text (str): The raw JSON string.
+
+    Returns:
+        str: The cleaned JSON string.
+
+    Examples:
+        >>> _clean_json_string("```json\\n{'key': 'value',}\\n```")
+        '{"key": []}'
+    """
+    text = re.sub(r'```(?:json)?\s*|\s*```', '', text)
+    text = text.strip().replace("'", '"')
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+    if not text.startswith('{'):
+        text = '{' + text
+    if not text.endswith('}'):
+        text = text + '}'
+    return re.sub(r'"(\w+)":\s*"', r'"\1": []', text)
+
+
+def _merge_with_default(parsed: Dict[str, Any], category: str) -> Dict[str, Any]:
+    """
+    Merge a parsed JSON object with the default extraction result template for a category.
+
+    Only updates keys that exist in the default template and for certain numeric keys,
+    converts values to float if needed.
+
+    Args:
+        parsed (Dict[str, Any]): The parsed JSON.
+        category (str): The extraction category.
+
+    Returns:
+        Dict[str, Any]: The merged result.
+
+    Examples:
+        >>> _merge_with_default({"confidence_score": "0.85"}, "research")
+    """
+    result = get_default_extraction_result(category)
+    for key, value in parsed.items():
+        if key not in result:
+            continue
+        if isinstance(value, type(result[key])):
+            if isinstance(value, (list, dict)):
+                result[key] = value
+            elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
+                result[key] = float(value)
+    return result
+
+
+def _check_cache(response: str, category: str) -> Dict[str, Any]:
+    """
+    Check and cache the JSON parsing result of a response.
+
+    Cleans the response string, looks up a cache key, and if not found,
+    extracts, parses, merges with the default template, and caches the result.
+
+    Args:
+        response (str): The raw JSON response string.
+        category (str): The extraction category.
+
+    Returns:
+        Dict[str, Any]: The parsed and merged JSON result.
+
+    Examples:
+        >>> _check_cache('{"key": "value"}', "research")
+    """
+    response = _clean_json_string(response)
+    cache_key = f"json_parse_{hash(response)}"
+    if (cached_result := json_cache.get(cache_key)) and isinstance(cached_result, dict) and cached_result.get("data"):
+        return cached_result["data"]
+    json_text = find_json_object(response)
+    if not json_text:
+        return get_default_extraction_result(category)
+    parsed = json.loads(json_text)
+    result = _merge_with_default(parsed, category)
+    json_cache.put(
+        cache_key,
+        {
+            "data": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ttl": 3600
+        }
+    )
+    return result
+
+
+@cache_result(ttl=3600)
+def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
+    """
+    Safely parse a JSON response with enhanced error handling and cleanup.
+
+    If the response is already a dictionary, it is returned as is; otherwise, it is cleaned,
+    parsed, merged with the default template, and cached.
+
+    Args:
+        response (Union[str, Dict[str, Any]]): The response to parse.
+        category (str): The extraction category.
+
+    Returns:
+        Dict[str, Any]: The parsed JSON as a dictionary.
+
+    Examples:
+        >>> safe_json_parse('{"key": "value"}', "research")
+    """
+    if isinstance(response, dict):
+        return response
+    if not isinstance(response, str):
+        return get_default_extraction_result(category)
+    try:
+        return _check_cache(response, category)
+    except Exception as e:
+        error_highlight(f"Error parsing JSON: {str(e)}")
+        return get_default_extraction_result(category)
+
+
+def extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
+    """
+    Extract statistics and numerical data from text along with metadata.
+
+    Scans the text sentence by sentence and applies several regex patterns to detect statistical information.
+    For each detected statistic, infers its type, extracts citations and a mentioned year, assesses source quality,
+    rates its quality, and extracts credibility terms. The fact is then enriched with additional metadata.
+
+    Args:
+        text (str): The text to process.
+        url (str): Optional URL associated with the text.
+        source_title (str): Optional title of the source document.
+
+    Returns:
+        List[Dict[str, Any]]: A list of extracted statistic dictionaries.
+
+    Examples:
+        >>> extract_statistics("According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023.")
+    """
+    statistics: List[Dict[str, Any]] = []
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    for sentence in sentences:
+        for pattern in COMPILED_STAT_PATTERNS:
+            if pattern.search(sentence):
+                stat_text = sentence.strip()
+                if all(s["text"] != stat_text for s in statistics):
+                    statistic: Dict[str, Any] = {
+                        "text": stat_text,
+                        "type": infer_statistic_type(stat_text),
+                        "citations": extract_citations(stat_text),
+                        "year_mentioned": extract_year(stat_text),
+                        "source_quality": assess_source_quality(stat_text),
+                        "quality_score": rate_statistic_quality(stat_text),
+                        "credibility_terms": extract_credibility_terms(stat_text)
+                    }
+                    # Enrich the statistic with additional metadata.
+                    if (enriched := enrich_extracted_fact(statistic, url, source_title)):
+                        statistic |= enriched
+                    statistics.append(statistic)
+                break
+    return statistics
 
 
 async def extract_category_information(
@@ -1955,26 +1943,25 @@ async def extract_category_information(
     config: Optional[RunnableConfig] = None
 ) -> Tuple[List[Dict[str, Any]], float]:
     """
-    Extract information from content for a specific category with enhanced statistics focus.
+    Extract information for a specific category with enhanced statistical focus.
 
-    This asynchronous function preprocesses content, builds a prompt using a template, processes the content
-    with an extraction model, and then enriches the extracted facts. It returns a list of enriched facts sorted
-    by confidence and an overall relevance score.
+    Preprocesses the content, builds a prompt using a template, processes the content with the extraction model,
+    extracts and enriches facts, and returns the facts sorted by confidence along with an overall relevance score.
 
     Args:
-        content (str): The raw content to process.
+        content (str): The raw content.
         url (str): The source URL.
         title (str): The source title.
         category (str): The extraction category (e.g., "market_dynamics").
         original_query (str): The original search query.
         prompt_template (str): A template for building the prompt.
-        extraction_model (Any): The model to use for extraction.
-        config (Optional[RunnableConfig]): Optional configuration for the extraction model.
+        extraction_model (Any): The extraction model to use.
+        config (Optional[RunnableConfig]): Optional model configuration.
 
     Returns:
         Tuple[List[Dict[str, Any]], float]:
             - A list of enriched fact dictionaries.
-            - A relevance score (float) indicating how relevant the extracted information is.
+            - A relevance score indicating overall relevance.
 
     Examples:
         >>> facts, relevance = await extract_category_information(
@@ -1986,8 +1973,6 @@ async def extract_category_information(
         ...     prompt_template="Extract facts for {query} from {url}: {content}",
         ...     extraction_model=model
         ... )
-        >>> relevance
-        0.95
     """
     if not _validate_inputs(content, url):
         return [], 0.0
@@ -2007,7 +1992,8 @@ async def extract_category_information(
         )
         facts = _get_category_facts(category, extraction_result)
         enriched_facts = [enrich_extracted_fact(fact, url, title) for fact in facts]
-        return sorted(enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True), extraction_result.get("relevance_score", 0.0)
+        sorted_facts = sorted(enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True)
+        return sorted_facts, extraction_result.get("relevance_score", 0.0)
     except Exception as e:
         error_highlight(f"Error extracting from {url}: {str(e)}")
         return [], 0.0
@@ -2015,14 +2001,14 @@ async def extract_category_information(
 
 def _validate_inputs(content: str, url: str) -> bool:
     """
-    Validate that the content and URL are suitable for extraction.
+    Validate that content and URL are suitable for extraction.
 
     Args:
         content (str): The text content.
         url (str): The URL to validate.
 
     Returns:
-        bool: True if valid, False otherwise.
+        bool: True if valid; otherwise, False.
 
     Examples:
         >>> _validate_inputs("Some content", "https://example.com")
@@ -2044,21 +2030,21 @@ async def _process_content(
     title: str
 ) -> Dict[str, Any]:
     """
-    Process content and extract information using the provided extraction model.
+    Process content with the extraction model.
 
-    If the content is large, it delegates to chunked processing.
+    If the content is very large, it delegates to chunked processing.
 
     Args:
         content (str): Preprocessed content.
         prompt (str): The prompt to send to the model.
-        category (str): Extraction category.
-        extraction_model (Any): The model for extraction.
+        category (str): The extraction category.
+        extraction_model (Any): The extraction model.
         config (Optional[RunnableConfig]): Additional configuration.
-        url (str): Source URL.
-        title (str): Source title.
+        url (str): The source URL.
+        title (str): The source title.
 
     Returns:
-        Dict[str, Any]: The extraction result as a dictionary.
+        Dict[str, Any]: The extraction result.
 
     Examples:
         >>> result = await _process_content("Some content", "Prompt here", "market", model, None, "https://example.com", "Report")
@@ -2070,8 +2056,8 @@ async def _process_content(
         config=config
     )
     extraction_result = safe_json_parse(model_response, category)
-    if statistics := extract_statistics(content, url, title):
-        extraction_result["statistics"] = statistics
+    if (stats := extract_statistics(content, url, title)):
+        extraction_result["statistics"] = stats
     return extraction_result
 
 
@@ -2085,19 +2071,18 @@ async def _process_chunked_content(
     title: str
 ) -> Dict[str, Any]:
     """
-    Process content in chunks when it exceeds the size limit.
+    Process content in chunks when it exceeds a size limit.
 
-    This function splits the content, processes each chunk with the extraction model,
-    merges the results, and aggregates statistics.
+    Splits the content, processes each chunk, merges the results, and aggregates statistics.
 
     Args:
-        content (str): The large content to process.
+        content (str): The large content.
         prompt (str): The prompt template.
-        category (str): Extraction category.
-        extraction_model (Any): The model for extraction.
+        category (str): The extraction category.
+        extraction_model (Any): The extraction model.
         config (Optional[RunnableConfig]): Optional configuration.
-        url (str): Source URL.
-        title (str): Source title.
+        url (str): The source URL.
+        title (str): The source title.
 
     Returns:
         Dict[str, Any]: The merged extraction result.
@@ -2116,7 +2101,7 @@ async def _process_chunked_content(
             messages=[{"role": "human", "content": chunk_prompt}],
             config=config
         )
-        if chunk_result := safe_json_parse(chunk_response, category):
+        if (chunk_result := safe_json_parse(chunk_response, category)):
             chunk_statistics = extract_statistics(chunk, url, title)
             all_statistics.extend(chunk_statistics)
             chunk_results.append(chunk_result)
@@ -2130,23 +2115,22 @@ def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> Lis
     """
     Extract facts from the extraction result based on category structure.
 
-    The function uses a mapping of categories to their corresponding fact types and keys,
-    and returns a list of fact dictionaries.
+    Uses a mapping of categories to their corresponding fact types and keys,
+    returning a list of fact dictionaries.
 
     Args:
-        category (str): The extraction category (e.g., "market_dynamics").
-        extraction_result (Dict[str, Any]): The result from the extraction process.
+        category (str): The extraction category.
+        extraction_result (Dict[str, Any]): The extraction result.
 
     Returns:
         List[Dict[str, Any]]: A list of fact dictionaries.
 
     Examples:
         >>> _get_category_facts("market_dynamics", {"extracted_facts": [{"text": "Example fact"}]})
-        [{'type': 'fact', 'data': {"text": "Example fact"}}]
     """
     if not extraction_result or not isinstance(extraction_result, dict):
         return []
-    category_mapping = {
+    category_mapping: Dict[str, List[Tuple[str, str]]] = {
         "market_dynamics": [("fact", "extracted_facts")],
         "provider_landscape": [
             ("vendor", "extracted_vendors"),
@@ -2178,489 +2162,569 @@ def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> Lis
         items = extraction_result.get(key, [])
         facts.extend([{"type": fact_type, "data": item} for item in items])
     return facts
-
-
-@cache_result(ttl=3600)
-def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
-    """
-    Safely parse a JSON response with enhanced error handling and cleanup.
-
-    If the response is already a dictionary, it is returned as is. Otherwise, the response
-    string is cleaned, parsed, merged with a default extraction template, and cached.
-
-    Args:
-        response (Union[str, Dict[str, Any]]): The response to parse.
-        category (str): The extraction category to determine the default template.
-
-    Returns:
-        Dict[str, Any]: The parsed JSON as a dictionary.
-
-    Examples:
-        >>> safe_json_parse('{"key": "value"}', "research")
-        {"key": "value"}
-    """
-    if isinstance(response, dict):
-        return response
-    if not isinstance(response, str):
-        return get_default_extraction_result(category)
-    try:
-        return _check_cache(response, category)
-    except Exception as e:
-        error_highlight(f"Error parsing JSON: {str(e)}")
-        return get_default_extraction_result(category)
 </file>
 
 <file path="src/react_agent/utils/llm.py">
 """LLM utility functions for handling model calls and content processing.
 
 This module provides utilities for interacting with language models,
-including content length management and error handling.
+including content length management, error handling, and JSON parsing.
+The LLMClient class consolidates chat, JSON, and embedding calls into a
+single interface, minimizing breaking changes while providing a strictly typed
+interface for LangGraph nodes.
 
 Examples:
     Basic usage of call_model:
-    
+
     ```python
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is the capital of France?"}
     ]
-    response = await call_model(messages)
+    response = await _call_model(messages)
     # Returns: {"content": "The capital of France is Paris."}
     ```
 
-    Using call_model_json with chunking:
-    
+    Using _call_model_json with chunking:
+
     ```python
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Analyze this long text: " + large_document}
     ]
     config = {"configurable": {"model": "openai/gpt-4"}}
-    response = await call_model_json(
-        messages, 
+    response = await _call_model_json(
+        messages,
         config=config,
         chunk_size=1000,  # Process in 1000-token chunks
         overlap=100       # 100-token overlap between chunks
     )
-    # Returns: {
-    #     "analysis": "Key points from the document...",
-    #     "summary": "Overall summary...",
-    #     "topics": ["topic1", "topic2", ...]
-    # }
+    # Returns a merged JSON response.
+    ```
+
+    Using the LLMClient for LangGraph nodes:
+
+    ```python
+    # Initialize the client
+    llm_client = LLMClient(default_model="openai/gpt-4")
+
+    # Use in an async function or LangGraph node
+    async def my_node(state: dict) -> dict:
+        # Simple chat completion
+        response = await llm_client.llm_chat(
+            prompt="What is the capital of France?",
+            system_prompt="You are a helpful assistant."
+        )
+
+        # Get structured JSON output
+        data = await llm_client.llm_json(
+            prompt="List the top 3 largest countries by area in JSON format",
+            system_prompt="You are a helpful assistant that outputs valid JSON."
+        )
+
+        # Get embeddings
+        embedding = await llm_client.llm_embed("This is a text to embed")
+
+        return {"response": response, "data": data, "embedding": embedding}
     ```
 """
 
+import asyncio
 import json
-import logging
 import os
 import re
-from datetime import datetime, timezone
-import os
-import asyncio
-from typing import Any, Dict, List, Optional, Union, cast
+from datetime import UTC, datetime
+from typing import Any, Dict, Iterable, List, TypedDict, Union, cast
 
 from anthropic import AsyncAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableConfig, ensure_config
+from anthropic.types import MessageParam
+from langchain_core.runnables import RunnableConfig
 from openai import AsyncClient
 from openai.types.chat import ChatCompletionMessageParam
 
 from react_agent.configuration import Configuration
 from react_agent.utils.content import (
     chunk_text,
-    detect_content_type,
     estimate_tokens,
     merge_chunk_results,
     preprocess_content,
     validate_content,
 )
-from react_agent.configuration import Configuration
-from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.defaults import ChunkConfig
+from react_agent.utils.extraction import safe_json_parse
 from react_agent.utils.logging import (
-    get_logger,
     error_highlight,
+    get_logger,
     info_highlight,
-    warning_highlight
+    warning_highlight,
 )
 
-# Initialize logger
 logger = get_logger(__name__)
 
-# Constants
-MAX_TOKENS: int = 16000  # Reduced from 100000 to stay within model limits
-MAX_SUMMARY_TOKENS: int = 2000  # New constant for summary model
+# Constants for token limits
+MAX_TOKENS: int = 16000
+MAX_SUMMARY_TOKENS: int = 2000
 
 # Initialize API clients
-openai_client = AsyncClient(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_API_BASE")
+openai_client: AsyncClient = AsyncClient(
+    api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE")
 )
-anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+anthropic_client: AsyncAnthropic = AsyncAnthropic(
+    api_key=os.getenv("ANTHROPIC_API_KEY")
+)
 
-async def summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS) -> str:
+
+class Message(TypedDict):
+    role: str
+    content: str
+
+
+async def _summarize_content(
+    input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS
+) -> str:
     """Summarize content using a more efficient model.
-    
+
     Args:
-        input_content: The content to summarize
-        max_tokens: Maximum tokens for the summary
-        
+        input_content: The content to summarize.
+        max_tokens: Maximum tokens for the summary.
+
     Returns:
-        Summarized content
+        A concise summary of the input content.
     """
     try:
-        # Use a more efficient model for summarization
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Use a more efficient model for summarization
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that creates concise summaries. Focus on key points and maintain factual accuracy."},
-                {"role": "user", "content": f"Please summarize the following content concisely:\n\n{input_content}"}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant that creates concise summaries. "
+                        "Focus on key points and maintain factual accuracy."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Please summarize the following content concisely:\n\n{input_content}",
+                },
             ],
             max_tokens=max_tokens,
-            temperature=0.3  # Lower temperature for more focused summaries
+            temperature=0.3,
         )
-        response_content = cast(Optional[str], response.choices[0].message.content)
+        response_content: str | None = cast(
+            str | None, response.choices[0].message.content
+        )
         return response_content if response_content is not None else ""
     except Exception as e:
-        error_highlight(f"Error in summarize_content: {str(e)}")
-        return input_content  # Return original content if summarization fails
+        error_highlight(f"Error in _summarize_content: {str(e)}")
+        return input_content
+
 
 async def _format_openai_messages(
-    messages: List[Dict[str, str]], 
-    system_prompt: str,
-    max_tokens: Optional[int] = None
+    messages: List[Message], system_prompt: str, max_tokens: int | None = None
 ) -> List[ChatCompletionMessageParam]:
-    """Format messages for OpenAI API with enhanced content handling.
-    
+    """Format messages for the OpenAI API with content handling.
+
     Args:
-        messages: List of message dictionaries
-        system_prompt: System prompt to use
-        max_tokens: Optional maximum tokens per message
-        
+        messages: List of message dictionaries.
+        system_prompt: System prompt to include.
+        max_tokens: Optional maximum tokens per message.
+
     Returns:
-        Formatted messages for OpenAI API
+        A list of formatted messages for the API.
     """
     if not messages:
         return [{"role": "system", "content": system_prompt}]
-        
+
     formatted_messages: List[ChatCompletionMessageParam] = []
     max_tokens = max_tokens or MAX_TOKENS
-    
+
     for msg in messages:
         if msg["role"] == "system":
             formatted_messages.append({"role": "system", "content": msg["content"]})
         else:
-            content = msg["content"]
+            content: str = msg["content"]
             if estimate_tokens(content) > max_tokens:
                 info_highlight("Content too long, summarizing...")
-                content = await summarize_content(content, max_tokens)
+                content = await _summarize_content(content, max_tokens)
             formatted_messages.append({"role": "user", "content": content})
 
     if all(msg["role"] != "system" for msg in formatted_messages):
         formatted_messages.insert(0, {"role": "system", "content": system_prompt})
-    
+
     return formatted_messages
 
-async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam]) -> Dict[str, Any]:
-    """Call OpenAI API with formatted messages."""
+
+async def _call_openai_api(
+    model: str, messages: List[ChatCompletionMessageParam]
+) -> Dict[str, Any]:
+    """Call the OpenAI API using formatted messages.
+
+    Args:
+        model: The model identifier.
+        messages: Formatted messages for the API.
+
+    Returns:
+        A dictionary containing the model's response.
+    """
     try:
         response = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7
+            model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7
         )
-        content = response.choices[0].message.content
+        content: str | None = response.choices[0].message.content
         return {"content": content} if content else {}
     except Exception as e:
         error_highlight(f"Error in _call_openai_api: {str(e)}")
         return {}
 
-async def call_model(
-    messages: List[Dict[str, str]],
-    config: Optional[RunnableConfig] = None
+
+async def _call_model(
+    messages: List[Message], config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
-    """Call the language model with the given messages.
-    
+    """Call the language model with the provided messages.
+
     Args:
-        messages: List of message dictionaries. Each message should have 'role' 
-                 (system/user/assistant) and 'content' keys.
-        config: Optional configuration for the model call. Can include model selection,
-               temperature, and other parameters.
+        messages: List of messages (each with 'role' and 'content').
+        config: Optional configuration for the model call.
 
     Returns:
-        Dict containing the model's response. The response will always have a 'content'
-        key with the model's output.
-
-    Examples:
-        ```python
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "What is 2+2?"}
-        ]
-        
-        response = await call_model(messages)
-        # Returns: {"content": "2 + 2 = 4"}
-        
-        # With custom configuration
-        config = {
-            "configurable": {
-                "model": "anthropic/claude-3",
-                "temperature": 0.7
-            }
-        }
-        response = await call_model(messages, config)
-        ```
+        A dictionary with the model's output under the key 'content'.
     """
     if not messages:
-        error_highlight("No messages provided to call_model")
+        error_highlight("No messages provided to _call_model")
         return {}
 
     try:
         config = config or {}
-        configurable = config.get("configurable", {})
-        configurable["timestamp"] = datetime.now(timezone.utc).isoformat()
+        configurable: Dict[str, Any] = config.get("configurable", {})
+        configurable["timestamp"] = datetime.now(UTC).isoformat()
         config = {**config, "configurable": configurable}
-
-        configuration = Configuration.from_runnable_config(config)
+        configuration: Configuration = Configuration.from_runnable_config(config)
         logger.info(f"Calling model with {len(messages)} messages")
         logger.debug(f"Config: {config}")
-
         provider, model = configuration.model.split("/", 1)
-
         if provider == "openai":
-            formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
-            return await _call_openai_api(model, formatted_messages)
+            openai_formatted_messages = await _format_openai_messages(
+                messages, configuration.system_prompt
+            )
+            return await _call_openai_api(model, openai_formatted_messages)
         elif provider == "anthropic":
-            # Handle system prompt properly
-            has_system_message = any(msg["role"] == "system" for msg in messages)
+            # Check if a system message is already present
+            has_system_message: bool = any(msg["role"] == "system" for msg in messages)
 
-            formatted_messages = []
-            # Add system message if not already present in messages
-            if not has_system_message:
-                formatted_messages.append({"role": "system", "content": configuration.system_prompt})
+            # Create properly typed messages for Anthropic
+            anthropic_formatted_messages: List[Dict[str, str]] = []
 
-            # Process all messages, preserving their roles correctly
-            formatted_messages.extend(
-                (
-                    {"role": msg["role"], "content": msg["content"]}
-                    if msg["role"] == "system"
-                    else {
-                        "role": (
-                            "user" if msg["role"] == "user" else "assistant"
-                        ),
+            # Add system message if not already present
+            if not has_system_message and configuration.system_prompt:
+                # For Anthropic, we need to handle system messages differently
+                # as they have specific role requirements
+                anthropic_formatted_messages.append({
+                    "role": "user",  # Using user role as a workaround for system
+                    "content": f"System instruction: {configuration.system_prompt}",
+                })
+
+            for msg in messages:
+                # Anthropic only accepts user and assistant roles
+                if msg["role"] == "system":
+                    # Convert system messages to user messages with a prefix
+                    anthropic_formatted_messages.append({
+                        "role": "user",
+                        "content": f"System instruction: {msg['content']}",
+                    })
+                elif msg["role"] in ["user", "assistant"]:
+                    anthropic_formatted_messages.append({
+                        "role": msg["role"],
                         "content": msg["content"],
-                    }
-                )
-                for msg in messages
-                if msg["role"] in ["user", "assistant", "system"]
-            )
-            formatted_messages = [msg for msg in formatted_messages if msg is not None]
+                    })
 
-            response = await anthropic_client.messages.create(
-                model=model,
-                messages=[{"role": msg["role"], "content": msg["content"]} for msg in formatted_messages],
-                max_tokens=MAX_TOKENS,
-                temperature=0.7
-            )
-            return {"content": str(response.content[0])}
+            # Make the API call
+            try:
+                # Cast the messages to the expected type for Anthropic
+                typed_messages = cast(
+                    Iterable[MessageParam], anthropic_formatted_messages
+                )
+                response = await anthropic_client.messages.create(
+                    model=model,
+                    messages=typed_messages,
+                    max_tokens=MAX_TOKENS,
+                    temperature=0.7,
+                )
+                # Access the content correctly based on the response structure
+                content_block = response.content[0]
+                # Check the type of content block and extract text appropriately
+                if hasattr(content_block, "text"):
+                    return {"content": content_block.text}
+                else:
+                    return {"content": str(content_block)}
+            except Exception as e:
+                error_highlight(f"Error in Anthropic API call: {str(e)}")
+                raise
         else:
             error_highlight(f"Unsupported model provider: {provider}")
             return {}
-
     except Exception as e:
-        error_highlight(f"Error in call_model: {str(e)}")
-        return {}
+        error_highlight(f"Error in _call_model: {str(e)}")
+        raise
+
 
 async def _process_chunk(
     chunk: str,
-    previous_messages: List[Dict[str, str]],
-    config: Optional[RunnableConfig] = None,
-    model: Optional[str] = None
+    previous_messages: List[Message],
+    config: RunnableConfig | None = None,
+    model: str | None = None,
 ) -> Dict[str, Any]:
-    """Process a single chunk of content with enhanced error handling.
-    
+    """Process a single chunk of content with error handling.
+
     Args:
-        chunk: Content chunk to process
-        previous_messages: Previous messages in the conversation
-        config: Optional configuration
-        model: Optional model to use for processing
-        
+        chunk: The content chunk to process.
+        previous_messages: Previous conversation messages.
+        config: Optional configuration.
+        model: Optional model override.
+
     Returns:
-        Processed chunk result
+        A dictionary with the processed chunk result.
     """
     if not chunk or not previous_messages:
         return {}
-
     try:
-        # Create messages with chunk
-        messages = previous_messages + [{"role": "human", "content": chunk}]
-        
-        # Call model with retries
-        max_retries = 3
-        retry_delay = 1
-        
+        messages: List[Message] = previous_messages + [
+            {"role": "human", "content": chunk}
+        ]
+        max_retries: int = 3
+        retry_delay: int = 1
         for attempt in range(max_retries):
             try:
-                response = await call_model(messages, config)
+                # Convert dict to RunnableConfig if needed
+                runnable_config: RunnableConfig | None = config
+                if (
+                    config
+                    and not isinstance(config, dict)
+                    and not isinstance(config, RunnableConfig)
+                ):
+                    runnable_config = cast(RunnableConfig, config)
+
+                response = await _call_model(messages, runnable_config)
                 if not response or not response.get("content"):
                     error_highlight("Empty response from model")
                     return {}
-                    
-                # Parse JSON response with enhanced error handling
-                parsed = safe_json_parse(response["content"], "model_response")
-                return parsed or {}
-                
+                parsed: Dict[str, Any] = safe_json_parse(
+                    response["content"], "model_response"
+                )
+                return parsed if parsed is not None else {}
             except Exception as e:
                 if attempt < max_retries - 1:
-                    warning_highlight(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                    warning_highlight(
+                        f"Attempt {attempt + 1} failed: {str(e)}. Retrying..."
+                    )
                     await asyncio.sleep(retry_delay * (attempt + 1))
                 else:
                     error_highlight(f"All retry attempts failed: {str(e)}")
                     return {}
-                    
     except Exception as e:
         error_highlight(f"Error processing chunk: {str(e)}")
         return {}
-        
-    return {}  # Fallback return to satisfy type checker
+    return {}
 
-async def call_model_json(
-    messages: List[Dict[str, str]],
-    config: Optional[RunnableConfig] = None,
-    chunk_size: Optional[int] = None,
-    overlap: Optional[int] = None
+
+async def _call_model_json(
+    messages: List[Message],
+    config: RunnableConfig | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
 ) -> Dict[str, Any]:
-    """Call the model with JSON output format and enhanced chunking.
-    
-    This function handles large inputs by automatically chunking them and
-    merging the results. It expects and returns JSON-formatted data.
-    
+    """Call the model for JSON output, handling chunking if necessary.
+
     Args:
-        messages: List of message dictionaries. Each message should have 'role'
-                 and 'content' keys.
+        messages: List of message dictionaries.
         config: Optional configuration for the model call.
-        chunk_size: Optional custom chunk size in tokens. If not provided,
-                   uses default chunking configuration.
-        overlap: Optional overlap size between chunks in tokens.
+        chunk_size: Optional custom chunk size.
+        overlap: Optional token overlap between chunks.
 
     Returns:
-        Dict containing the merged JSON response from all chunks.
-
-    Examples:
-        ```python
-        # Simple query expecting JSON response
-        messages = [
-            {"role": "user", "content": "List 3 capitals in JSON format"}
-        ]
-        response = await call_model_json(messages)
-        # Returns: {
-        #     "capitals": [
-        #         {"city": "Paris", "country": "France"},
-        #         {"city": "Tokyo", "country": "Japan"},
-        #         {"city": "Rome", "country": "Italy"}
-        #     ]
-        # }
-
-        # Processing a large document with custom chunking
-        messages = [
-            {"role": "user", "content": "Analyze this document: " + large_text}
-        ]
-        response = await call_model_json(
-            messages,
-            chunk_size=2000,  # Process in 2000-token chunks
-            overlap=200       # 200-token overlap between chunks
-        )
-        # Returns merged analysis from all chunks:
-        # {
-        #     "main_topics": ["topic1", "topic2", ...],
-        #     "key_points": ["point1", "point2", ...],
-        #     "summary": "Overall summary of the document..."
-        # }
-        ```
+        A dictionary containing the merged JSON response.
     """
     try:
         if not messages:
-            error_highlight("No messages provided to call_model_json")
+            error_highlight("No messages provided to _call_model_json")
             return {}
-
-        # Process content in chunks if needed
-        content = messages[-1]["content"]
-
+        content: str = messages[-1]["content"]
         if estimate_tokens(content) <= MAX_TOKENS:
             return await _process_chunk(content, messages[:-1], config)
-
-        info_highlight(f"Content too large ({estimate_tokens(content)} tokens), chunking...")
-        chunks = chunk_text(
-            content,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            use_large_chunks=True
+        info_highlight(
+            f"Content too large ({estimate_tokens(content)} tokens), chunking..."
         )
-
+        chunks: List[str] = chunk_text(
+            content, chunk_size=chunk_size, overlap=overlap, use_large_chunks=True
+        )
         if len(chunks) <= 1:
             return await _process_chunk(content, messages[:-1], config)
-        # Process chunks in parallel with rate limiting
-        chunk_results = []
+        chunk_results: List[Dict[str, Any]] = []
         for chunk in chunks:
-            result = await _process_chunk(chunk, messages[:-1], config)
+            result: Dict[str, Any] = await _process_chunk(chunk, messages[:-1], config)
             if result:
                 chunk_results.append(result)
-
         if not chunk_results:
             error_highlight("No valid results from chunks")
             return {}
-
-        # Merge results with enhanced merging
         return merge_chunk_results(chunk_results, "model_response")
     except Exception as e:
-        error_highlight(f"Error in call_model_json: {str(e)}")
+        error_highlight(f"Error in _call_model_json: {str(e)}")
         return {}
 
-async def _process_chunked_content(
-    messages: List[Dict[str, str]],
-    content: str,
-    config: Optional[RunnableConfig]
-) -> Dict[str, Any]:
-    """Process content that exceeds token limit by chunking."""
-    try:
-        chunks = chunk_text(
-            content,
-            chunk_size=ChunkConfig.DEFAULT_CHUNK_SIZE,
-            overlap=ChunkConfig.DEFAULT_OVERLAP
-        )
-        chunk_results = []
-        
-        for i, chunk in enumerate(chunks):
-            chunk_messages = messages[:-1] + [{"role": "human", "content": chunk}]
-            try:
-                chunk_response = await call_model(chunk_messages, config)
-                if chunk_response and chunk_response.get("content"):
-                    chunk_results.append(chunk_response)
-            except Exception as e:
-                error_highlight(f"Error processing chunk {i+1}: {str(e)}")
-                continue
-        
-        if not chunk_results:
-            error_highlight("No valid results from chunks")
-            return {}
-            
-        return merge_chunk_results(chunk_results, "general")
-    except Exception as e:
-        error_highlight(f"Error in _process_chunked_content: {str(e)}")
-        return {}
 
 def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Parse and clean JSON response from model."""
+    """Parse and clean a JSON response from the model.
+
+    Args:
+        response: The raw response as a string or dictionary.
+
+    Returns:
+        A dictionary parsed from the JSON response.
+    """
+    if isinstance(response, dict):
+        return response
     try:
-        if isinstance(response, dict):
-            return response
-        return safe_json_parse(response, "model_response")
-    except Exception as e:
-        error_highlight(f"Error in _parse_json_response: {str(e)}")
+        cleaned: str = re.sub(r"```json\s*|\s*```", "", response)
+        return json.loads(cleaned)
+    except Exception:
         return {}
 
-__all__ = ["call_model_json", "call_model"]
+
+class LLMClient:
+    """Asynchronous LLM utility for chat, JSON output, and embeddings.
+
+    Provides a consolidated interface for calling language models,
+    abstracting away the details of message formatting, chunking, and error handling.
+
+    Attributes:
+        default_model: An optional default model to use for calls.
+    """
+
+    def __init__(self, default_model: str | None = None) -> None:
+        """Initialize the LLMClient.
+
+        Args:
+            default_model: Optional default model name (e.g., "openai/gpt-4").
+                If not provided, defaults from configuration are used.
+        """
+        self.default_model: str | None = default_model
+
+    async def llm_chat(
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
+    ) -> str:
+        """Get a chat completion as plain text.
+
+        Args:
+            prompt: The user prompt.
+            system_prompt: Optional system prompt.
+            **kwargs: Additional parameters (e.g., model, temperature).
+
+        Returns:
+            The model's response as a string.
+        """
+        messages: List[Message] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        config: Dict[str, Any] = kwargs.pop("config", {})
+        configurable: Dict[str, Any] = config.get("configurable", {})
+        if self.default_model and "model" not in configurable:
+            configurable["model"] = self.default_model
+        for key, value in kwargs.items():
+            configurable[key] = value
+        config = {**config, "configurable": configurable}
+
+        # Convert dict to RunnableConfig
+        runnable_config: RunnableConfig | None = (
+            cast(RunnableConfig | None, config) if config else None
+        )
+
+        response: Dict[str, Any] = await _call_model(messages, runnable_config)
+        return response.get("content", "")
+
+    async def llm_json(
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Get a structured JSON response as a Python dictionary.
+
+        Args:
+            prompt: The user prompt.
+            system_prompt: Optional system prompt.
+            **kwargs: Additional parameters (e.g., model, temperature, chunk_size, overlap).
+
+        Returns:
+            A dictionary containing the parsed JSON response.
+        """
+        chunk_size: int | None = kwargs.pop("chunk_size", None)
+        overlap: int | None = kwargs.pop("overlap", None)
+        messages: List[Message] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        config: Dict[str, Any] = kwargs.pop("config", {})
+        configurable: Dict[str, Any] = config.get("configurable", {})
+        if self.default_model and "model" not in configurable:
+            configurable["model"] = self.default_model
+        for key, value in kwargs.items():
+            configurable[key] = value
+        config = {**config, "configurable": configurable}
+
+        # Convert dict to RunnableConfig
+        runnable_config: RunnableConfig | None = (
+            cast(RunnableConfig | None, config) if config else None
+        )
+
+        return await _call_model_json(
+            messages=messages,
+            config=runnable_config,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+
+    async def llm_embed(self, text: str, **kwargs: Any) -> List[float]:
+        """Get embeddings for a given text.
+
+        Args:
+            text: The text to embed.
+            **kwargs: Additional parameters (e.g., model).
+
+        Returns:
+            A list of floats representing the embedding vector.
+        """
+        config: Dict[str, Any] = kwargs.pop("config", {})
+        configurable: Dict[str, Any] = config.get("configurable", {})
+        embedding_model: str | None = kwargs.pop("embedding_model", None)
+        if embedding_model:
+            configurable["model"] = embedding_model
+        elif self.default_model and "model" not in configurable:
+            configurable["model"] = self.default_model
+        for key, value in kwargs.items():
+            configurable[key] = value
+        config = {**config, "configurable": configurable}
+
+        try:
+            # Ensure config is properly typed for from_runnable_config
+            runnable_config = cast(RunnableConfig | None, config)
+            configuration: Configuration = Configuration.from_runnable_config(
+                runnable_config
+            )
+            provider, model = configuration.model.split("/", 1)
+            if provider == "openai":
+                response = await openai_client.embeddings.create(
+                    model=model, input=text
+                )
+                return response.data[0].embedding
+            else:
+                error_highlight(f"Embedding not supported for provider: {provider}")
+                return []
+        except Exception as e:
+            error_highlight(f"Error in llm_embed: {str(e)}")
+            return []
+
+
+__all__ = ["LLMClient"]
 </file>
 
 <file path="src/react_agent/utils/logging.py">

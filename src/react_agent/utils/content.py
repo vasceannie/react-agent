@@ -43,7 +43,7 @@ from react_agent.utils.logging import (
 logger = get_logger(__name__)
 
 # Initialize cache
-cache_result = ProcessorCache(thread_id="content")
+content_cache = ProcessorCache(thread_id="content")
 
 
 class ContentState(TypedDict):
@@ -95,7 +95,7 @@ PROBLEMATIC_SITES: List[str] = [
 ]
 
 
-@cache_result(ttl=3600)
+@content_cache.cache_result(ttl=3600)
 def chunk_text(
     text: str,
     chunk_size: int | None = None,
@@ -475,7 +475,7 @@ def preprocess_content(content: str, url: str) -> str:
     cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
     
     # Retrieve cached content if available and not expired.
-    cached_result = cache_result.get(cache_key)
+    cached_result = content_cache.get(cache_key)
     if cached_result and isinstance(cached_result, dict):
         log_performance_metrics(
             "Content preprocessing (cached)", 
@@ -528,7 +528,7 @@ def preprocess_content(content: str, url: str) -> str:
     log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
     # Cache the preprocessed content.
-    cache_result.put(
+    content_cache.put(
         cache_key,
         {"content": content},
         ttl=3600  # 1 hour TTL

@@ -91,6 +91,7 @@ class ProcessorCache:
         # First check memory cache for fallback
         if key in self.memory_cache:
             logger.info(f"Cache hit from memory for key: {key}")
+            self.cache_hits += 1
             return self.memory_cache[key]["data"]
         
         try:

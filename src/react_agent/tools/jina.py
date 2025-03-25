@@ -1,5 +1,4 @@
-"""
-Jina Tools - Production-Ready Implementation
+"""Jina Tools - Production-Ready Implementation
 
 Get your Jina AI API key for free: https://jina.ai/?sui=apikey
 
@@ -31,27 +30,34 @@ No complex chaining is implemented. Retries and error handling are
 provided for production robustness. Type safety is ensured via Pydantic v2.
 """
 
-import os
-import json
 import asyncio
-from typing import Any, Dict, List, Optional, Union, Literal, TypedDict, cast, Annotated
+import json
+import os
+from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict, Union
 
 import aiohttp
 from aiohttp.client_exceptions import ClientError
+from langchain.tools import BaseTool
+
 # Pydantic v2 imports
 from pydantic import (
-    BaseModel, Field, HttpUrl, field_validator, 
-    model_validator, ConfigDict, PositiveInt, PositiveFloat, 
-    AnyHttpUrl, StringConstraints
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    StringConstraints,
+    field_validator,
+    model_validator,
 )
-from langchain.tools import BaseTool
 
 # Utilities from src/react_agent/utils
 from react_agent.utils.logging import (
+    error_highlight,
     get_logger,
     info_highlight,
     warning_highlight,
-    error_highlight,
 )
 from react_agent.utils.validations import is_valid_url
 
@@ -77,8 +83,7 @@ ApiResponse = Dict[str, Any]
 # Global Retry Configuration
 # -------------------------------------------------------------------------
 class RetryConfig(BaseModel):
-    """
-    Basic configuration for retrying failed network requests.
+    """Basic configuration for retrying failed network requests.
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -113,8 +118,7 @@ async def _make_request_with_retry(
     json_data: Optional[Dict[str, Any]] = None,
     retry_config: Optional[RetryConfig] = None,
 ) -> ApiResponse:
-    """
-    Make an HTTP request with basic exponential backoff retries.
+    """Make an HTTP request with basic exponential backoff retries.
 
     Args:
         method: HTTP method (GET, POST, etc.)
@@ -189,8 +193,7 @@ async def _make_request_with_retry(
 # Common: Acquire JINA_API_KEY
 # -------------------------------------------------------------------------
 def _get_jina_api_key() -> str:
-    """
-    Fetch the JINA_API_KEY from environment variable.
+    """Fetch the JINA_API_KEY from environment variable.
 
     Returns:
         str: The API key
@@ -258,8 +261,7 @@ class EmbeddingsResponse(TypedDict):
 
 
 class EmbeddingsTool(BaseTool):
-    """
-    Tool for calling the Jina Embeddings API to generate embeddings for text/images.
+    """Tool for calling the Jina Embeddings API to generate embeddings for text/images.
     """
     name: str = "EmbeddingsTool"
     description: str = (
@@ -270,8 +272,7 @@ class EmbeddingsTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Embeddings API.
+        """Asynchronously call the Jina Embeddings API.
 
         Args:
             request: The embeddings request parameters
@@ -297,8 +298,7 @@ class EmbeddingsTool(BaseTool):
         return resp
 
     def run(self, request: EmbeddingsRequest) -> Union[EmbeddingsResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Embeddings API.
+        """Synchronous wrapper for calling the Jina Embeddings API.
 
         Args:
             request: The embeddings request parameters
@@ -353,8 +353,7 @@ class RerankerResponse(TypedDict):
 
 
 class RerankerTool(BaseTool):
-    """
-    Tool for calling the Jina Re-Ranker API to refine search results.
+    """Tool for calling the Jina Re-Ranker API to refine search results.
     """
     name: str = "RerankerTool"
     description: str = (
@@ -365,8 +364,7 @@ class RerankerTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Re-Ranker API.
+        """Asynchronously call the Jina Re-Ranker API.
 
         Args:
             request: The re-ranker request parameters
@@ -392,8 +390,7 @@ class RerankerTool(BaseTool):
         return resp
 
     def run(self, request: RerankerRequest) -> Union[RerankerResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Re-Ranker API.
+        """Synchronous wrapper for calling the Jina Re-Ranker API.
 
         Args:
             request: The re-ranker request parameters
@@ -409,8 +406,7 @@ class RerankerTool(BaseTool):
 #    Endpoint: https://r.jina.ai/
 # -------------------------------------------------------------------------
 class ReaderHeaders(BaseModel):
-    """
-    Custom headers for advanced usage with the Reader API.
+    """Custom headers for advanced usage with the Reader API.
     Note: All are optional, but can be used to refine scraping behaviors.
     """
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -462,8 +458,7 @@ class ReaderResponse(TypedDict):
 
 
 class ReaderTool(BaseTool):
-    """
-    Tool for calling the Jina Reader API to retrieve/parse web content.
+    """Tool for calling the Jina Reader API to retrieve/parse web content.
     """
     name: str = "ReaderTool"
     description: str = (
@@ -474,8 +469,7 @@ class ReaderTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Reader API.
+        """Asynchronously call the Jina Reader API.
 
         Args:
             request: The reader request parameters
@@ -514,8 +508,7 @@ class ReaderTool(BaseTool):
         return resp
 
     def run(self, request: ReaderRequest) -> Union[ReaderResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Reader API.
+        """Synchronous wrapper for calling the Jina Reader API.
 
         Args:
             request: The reader request parameters
@@ -576,8 +569,7 @@ class SearchResponse(TypedDict):
 
 
 class SearchTool(BaseTool):
-    """
-    Tool for calling the Jina Search API to retrieve web results.
+    """Tool for calling the Jina Search API to retrieve web results.
     """
     name: str = "SearchTool"
     description: str = (
@@ -588,8 +580,7 @@ class SearchTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Search API.
+        """Asynchronously call the Jina Search API.
 
         Args:
             request: The search request parameters
@@ -627,8 +618,7 @@ class SearchTool(BaseTool):
         return resp
 
     def run(self, request: SearchRequest) -> Union[SearchResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Search API.
+        """Synchronous wrapper for calling the Jina Search API.
 
         Args:
             request: The search request parameters
@@ -684,8 +674,7 @@ class GroundingResult(TypedDict):
 
 
 class GroundingTool(BaseTool):
-    """
-    Tool for calling the Jina Grounding API to verify statements.
+    """Tool for calling the Jina Grounding API to verify statements.
     """
     name: str = "GroundingTool"
     description: str = (
@@ -696,8 +685,7 @@ class GroundingTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Grounding API.
+        """Asynchronously call the Jina Grounding API.
 
         Args:
             request: The grounding request parameters
@@ -734,8 +722,7 @@ class GroundingTool(BaseTool):
         return resp
 
     def run(self, request: GroundingRequest) -> Union[GroundingResult, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Grounding API.
+        """Synchronous wrapper for calling the Jina Grounding API.
 
         Args:
             request: The grounding request parameters
@@ -820,8 +807,7 @@ class SegmenterResponse(TypedDict):
 
 
 class SegmenterTool(BaseTool):
-    """
-    Tool for calling the Jina Segmenter API to tokenize or chunk text.
+    """Tool for calling the Jina Segmenter API to tokenize or chunk text.
     """
     name: str = "SegmenterTool"
     description: str = (
@@ -832,8 +818,7 @@ class SegmenterTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Segmenter API.
+        """Asynchronously call the Jina Segmenter API.
 
         Args:
             request: The segmenter request parameters
@@ -859,8 +844,7 @@ class SegmenterTool(BaseTool):
         return resp
 
     def run(self, request: SegmenterRequest) -> Union[SegmenterResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Segmenter API.
+        """Synchronous wrapper for calling the Jina Segmenter API.
 
         Args:
             request: The segmenter request parameters
@@ -943,8 +927,7 @@ class ClassifierTool(BaseTool):
     retry_config: RetryConfig = Field(default_factory=RetryConfig)
 
     async def _arun(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
-        """
-        Asynchronously call the Jina Classifier API.
+        """Asynchronously call the Jina Classifier API.
 
         Args:
             request: The classifier request parameters
@@ -970,8 +953,7 @@ class ClassifierTool(BaseTool):
         return resp
 
     def run(self, request: ClassifierRequest) -> Union[ClassifierResponse, ErrorResponse, RawResponse]:
-        """
-        Synchronous wrapper for calling the Jina Classifier API.
+        """Synchronous wrapper for calling the Jina Classifier API.
 
         Args:
             request: The classifier request parameters

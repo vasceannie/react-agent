@@ -236,9 +236,40 @@ async def _call_anthropic_api(model: str, messages: List[Message]) -> Dict[str, 
 
 
 async def _call_model(
-    messages: List[Message], config: RunnableConfig | None = None
+    messages: List[Message], 
+    config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
-    """Call the language model using the appropriate provider based on configuration."""
+    """Call the language model using the appropriate provider based on configuration.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+        config: Optional RunnableConfig containing:
+            - configurable: Dict with model provider and parameters
+            - Other runtime configuration
+
+    Returns:
+        Dict containing:
+            - content: Generated text response
+            - metadata: Additional response details
+
+    Examples:
+        Basic call:
+        >>> messages = [{"role": "user", "content": "Hello"}]
+        >>> response = await _call_model(messages)
+
+        With configuration:
+        >>> config = {
+        ...     "configurable": {
+        ...         "model": "openai/gpt-4",
+        ...         "temperature": 0.7
+        ...     }
+        ... }
+        >>> response = await _call_model(messages, config)
+
+    Raises:
+        ValueError: If messages list is empty
+        RuntimeError: For provider-specific API errors
+    """
     if not messages:
         error_highlight("No messages provided to _call_model")
         return {}
@@ -351,7 +382,33 @@ def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]
 class LLMClient:
     """Asynchronous LLM utility for chat, JSON output, and embeddings.
 
-    Provides a unified interface for model calls.
+    Provides a unified interface for model calls with:
+    - Automatic retries and error handling
+    - Content chunking for large inputs
+    - Structured JSON output generation
+    - Embedding generation with caching
+
+    Attributes:
+        default_model (str | None): The default model to use if not specified per-call
+
+    Examples:
+        Basic initialization:
+        >>> client = LLMClient()
+
+        With default model:
+        >>> client = LLMClient(default_model="openai/gpt-4")
+
+        Making calls:
+        >>> response = await client.llm_chat("Hello world")
+        >>> json_data = await client.llm_json("Extract entities from...")
+        >>> embedding = await client.llm_embed("text to embed")
+
+    Note:
+        The client handles:
+        - Rate limiting
+        - Token counting
+        - Automatic chunking
+        - Error recovery
     """
 
     def __init__(self, default_model: str | None = None) -> None:
@@ -389,9 +446,44 @@ class LLMClient:
         return response.get("content", "")
 
     async def llm_json(
-        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
+        self, 
+        prompt: str, 
+        system_prompt: str | None = None, 
+        **kwargs: Any
     ) -> Dict[str, Any]:
-        """Get a structured JSON response as a Python dictionary."""
+        """Get a structured JSON response as a Python dictionary.
+
+        Args:
+            prompt: Input text/prompt for the LLM
+            system_prompt: Optional system message to guide the model
+            **kwargs: Additional parameters including:
+                - chunk_size: Max tokens per chunk (default: 2000)
+                - overlap: Token overlap between chunks (default: 100)
+                - model: Override default model
+                - temperature: Creativity control (0-1)
+                - max_tokens: Limit output length
+
+        Returns:
+            Dict containing parsed JSON response from the model
+
+        Examples:
+            Basic JSON extraction:
+            >>> data = await client.llm_json(
+            ...     "Extract names and dates from: John Doe, 2023-01-01...",
+            ...     system_prompt="Return JSON with {people: [{name, date}]}"
+            ... )
+
+            With chunking:
+            >>> data = await client.llm_json(
+            ...     long_text,
+            ...     chunk_size=1000,
+            ...     overlap=200
+            ... )
+
+        Raises:
+            ValueError: If prompt is empty
+            JSONDecodeError: If response cannot be parsed
+        """
         chunk_size: int | None = kwargs.pop("chunk_size", None)
         overlap: int | None = kwargs.pop("overlap", None)
         messages: List[Message] = []

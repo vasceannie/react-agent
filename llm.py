@@ -79,7 +79,18 @@ from dataclasses import dataclass
 class LLMResponse:
     """Container for LLM response data with metadata.
 
-    Example:
+    Attributes:
+        content (str): The generated text content from the LLM
+        model (str): The model identifier that generated the response
+        usage (Dict[str, int]): Token usage statistics including:
+            - prompt_tokens: Tokens used in the input
+            - completion_tokens: Tokens generated in output  
+            - total_tokens: Sum of prompt and completion tokens
+        finish_reason (str): Why generation stopped ("stop", "length", etc)
+        raw_response (Optional[Dict[str, Any]]): Raw API response if available
+
+    Examples:
+        Basic usage:
         >>> response = LLMResponse(
         ...     content="The capital of France is Paris.",
         ...     model="gpt-3.5-turbo",
@@ -92,6 +103,14 @@ class LLMResponse:
         ... )
         >>> print(response.content)
         The capital of France is Paris.
+
+        Handling streaming responses:
+        >>> if response.finish_reason == "length":
+        ...     print("Response was truncated due to token limit")
+
+        Accessing raw API details:
+        >>> if response.raw_response:
+        ...     print(response.raw_response.get("id"))
     """
     content: str
     model: str

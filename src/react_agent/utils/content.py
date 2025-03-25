@@ -17,32 +17,37 @@ Examples:
     >>> print(valid)
     True
 """
-import time
-from typing import List, Dict, Any, Optional, Union, Tuple, TypedDict, Set, Literal
-import re
-from urllib.parse import urlparse, unquote
-from datetime import datetime, timezone
-import json
 import contextlib
-import urllib.parse
+import json
+import re
+import time
+from typing import Any, Dict, List, Set, TypedDict
+from urllib.parse import unquote, urlparse
 
-from react_agent.utils.logging import (
-    get_logger,
-    info_highlight, 
-    warning_highlight,
-    error_highlight,
-    log_progress,
-    log_performance_metrics
+from react_agent.utils.cache import ProcessorCache
+from react_agent.utils.defaults import (
+    ChunkConfig,
+    get_category_merge_mapping,
+    get_default_extraction_result,
 )
-from react_agent.utils.defaults import ChunkConfig, get_default_extraction_result, get_category_merge_mapping
-from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    log_performance_metrics,
+    log_progress,
+    warning_highlight,
+)
 
 # Initialize logger
 logger = get_logger(__name__)
 
+# Initialize cache
+cache_result = ProcessorCache(thread_id="content")
+
+
 class ContentState(TypedDict):
-    """
-    Typed dictionary for content state used in the graph.
+    """Typed dictionary for content state used in the graph.
 
     Attributes:
         content (str): The actual text content.
@@ -58,6 +63,7 @@ class ContentState(TypedDict):
     chunks: List[str]
     metadata: Dict[str, Any]
     timestamp: str
+
 
 # Constants for chunking and token estimation.
 DEFAULT_CHUNK_SIZE: int = 40000
@@ -88,16 +94,16 @@ PROBLEMATIC_SITES: List[str] = [
     'academia.edu'
 ]
 
+
 @cache_result(ttl=3600)
 def chunk_text(
     text: str,
-    chunk_size: Optional[int] = None,
-    overlap: Optional[int] = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
     use_large_chunks: bool = False,
     min_chunk_size: int = 100
 ) -> List[str]:
-    """
-    Split text into overlapping chunks, returning a list of chunks.
+    """Split text into overlapping chunks, returning a list of chunks.
 
     Args:
         text (str): The text to be split.
@@ -172,9 +178,9 @@ def chunk_text(
     info_highlight(f"Created {len(chunks)} chunks", category="chunking")
     return chunks
 
-def detect_html(content: str) -> Optional[str]:
-    """
-    Determine whether the provided content is HTML.
+
+def detect_html(content: str) -> str | None:
+    """Determine whether the provided content is HTML.
 
     Args:
         content (str): The content string to be analyzed.
@@ -203,9 +209,9 @@ def detect_html(content: str) -> Optional[str]:
         return 'html'
     return None
 
-def detect_json(content: str) -> Optional[str]:
-    """
-    Determine whether the provided content is valid JSON.
+
+def detect_json(content: str) -> str | None:
+    """Determine whether the provided content is valid JSON.
 
     Args:
         content (str): The content string to analyze.
@@ -232,9 +238,9 @@ def detect_json(content: str) -> Optional[str]:
             return 'json'
     return None
 
-def detect_from_url_extension(url: str) -> Optional[str]:
-    """
-    Infer content type based on the file extension in the URL.
+
+def detect_from_url_extension(url: str) -> str | None:
+    """Infer content type based on the file extension in the URL.
 
     Args:
         url (str): The URL to analyze.
@@ -272,9 +278,9 @@ def detect_from_url_extension(url: str) -> Optional[str]:
     except IndexError:
         return None
 
-def detect_from_url_path(url: str) -> Optional[str]:
-    """
-    Infer content type from common URL path patterns.
+
+def detect_from_url_path(url: str) -> str | None:
+    """Infer content type from common URL path patterns.
 
     Args:
         url (str): The URL to be analyzed.
@@ -300,9 +306,9 @@ def detect_from_url_path(url: str) -> Optional[str]:
     )
     return 'html' if any(pattern in url.lower() for pattern in html_path_patterns) else None
 
-def detect_from_content_heuristics(content: str) -> Optional[str]:
-    """
-    Infer content type based on heuristics applied directly to the content.
+
+def detect_from_content_heuristics(content: str) -> str | None:
+    r"""Infer content type based on heuristics applied directly to the content.
 
     Args:
         content (str): The text content to analyze.
@@ -330,9 +336,9 @@ def detect_from_content_heuristics(content: str) -> Optional[str]:
         return 'data'
     return 'text' if '\n\n' in content and len(content) > 200 else None
 
-def detect_from_url_domain(url: str) -> Optional[str]:
-    """
-    Infer content type based on URL domain characteristics.
+
+def detect_from_url_domain(url: str) -> str | None:
+    """Infer content type based on URL domain characteristics.
 
     Args:
         url (str): The URL to analyze.
@@ -357,9 +363,9 @@ def detect_from_url_domain(url: str) -> Optional[str]:
         return 'html'
     return None
 
+
 def detect_content_type(url: str, content: str) -> str:
-    """
-    Determine the content type using multiple detection strategies.
+    r"""Determine the content type using multiple detection strategies.
 
     This function sequentially applies various detectors (HTML, JSON, URL extension/path,
     content heuristics, and domain analysis). If none succeed, a fallback detection is used.
@@ -405,9 +411,9 @@ def detect_content_type(url: str, content: str) -> str:
     info_highlight(f"Using fallback detection, type: {result}", category="content_type")
     return result
 
+
 def fallback_detection(url: str, content: str) -> str:
-    """
-    Fallback detection logic for content type.
+    """Fallback detection logic for content type.
 
     Args:
         url (str): The URL to analyze.
@@ -428,9 +434,9 @@ def fallback_detection(url: str, content: str) -> str:
         return 'text'
     return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
 
+
 def preprocess_content(content: str, url: str) -> str:
-    """
-    Clean and preprocess content prior to further processing or model ingestion.
+    r"""Clean and preprocess content prior to further processing or model ingestion.
 
     This includes removing boilerplate text, redundant whitespace, site-specific cleaning,
     and truncating overly long content. Results are cached for performance.
@@ -469,19 +475,16 @@ def preprocess_content(content: str, url: str) -> str:
     cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
     
     # Retrieve cached content if available and not expired.
-    if cached_state := load_checkpoint(cache_key):
-        cached_result = cached_state.get("result")
-        if isinstance(cached_result, dict) and cached_result:
-            timestamp = datetime.fromisoformat(cached_state.get("timestamp", ""))
-            if (datetime.now() - timestamp).total_seconds() < 3600:  # 1 hour TTL
-                log_performance_metrics(
-                    "Content preprocessing (cached)", 
-                    start_time, 
-                    time.time(), 
-                    "preprocessing",
-                    {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
-                )
-                return cached_result.get("content", "")
+    cached_result = cache_result.get(cache_key)
+    if cached_result and isinstance(cached_result, dict):
+        log_performance_metrics(
+            "Content preprocessing (cached)", 
+            start_time, 
+            time.time(), 
+            "preprocessing",
+            {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
+        )
+        return cached_result.get("content", "")
 
     # Define boilerplate removal regex patterns.
     boilerplate_patterns = [
@@ -525,12 +528,9 @@ def preprocess_content(content: str, url: str) -> str:
     log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
 
     # Cache the preprocessed content.
-    create_checkpoint(
+    cache_result.put(
         cache_key,
-        {
-            "result": {"content": content},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        },
+        {"content": content},
         ttl=3600  # 1 hour TTL
     )
     
@@ -543,7 +543,7 @@ def preprocess_content(content: str, url: str) -> str:
         {
             "original_length": original_length, 
             "final_length": len(content), 
-            "reduction_percent": round((1 - len(content)/max(1, original_length)) * 100, 2),
+            "reduction_percent": round((1 - len(content) / max(1, original_length)) * 100, 2),
             "cache_hit": False
         }
     )
@@ -551,9 +551,9 @@ def preprocess_content(content: str, url: str) -> str:
     info_highlight(f"Final content length: {len(content)}", category="preprocessing")
     return content
 
+
 def estimate_tokens(text: str) -> int:
-    """
-    Estimate the number of tokens in a text based on a fixed character-to-token ratio.
+    """Estimate the number of tokens in a text based on a fixed character-to-token ratio.
 
     Args:
         text (str): The text whose tokens are to be estimated.
@@ -574,9 +574,9 @@ def estimate_tokens(text: str) -> int:
     """
     return int(len(text) / TOKEN_CHAR_RATIO) if text else 0
 
+
 def should_skip_content(url: str) -> bool:
-    """
-    Determine if the content from a given URL should be skipped based on certain rules.
+    """Determine if the content from a given URL should be skipped based on certain rules.
 
     The function checks for problematic file extensions, MIME type patterns, and known problematic sites.
 
@@ -600,7 +600,7 @@ def should_skip_content(url: str) -> bool:
         True
     """
     try:
-        decoded_url = urllib.parse.unquote(url).lower()
+        decoded_url = unquote(url).lower()
     except Exception as e:
         error_highlight(f"Error decoding URL: {str(e)}", category="validation")
         decoded_url = url.lower()
@@ -643,9 +643,9 @@ def should_skip_content(url: str) -> bool:
 
     return False
 
+
 def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: str, operation: str, seen_items: set) -> None:
-    """
-    Helper function to merge a specific field from a list of result dictionaries into the merged dictionary.
+    """Merge a specific field from a list of result dictionaries into the merged dictionary.
 
     The operation can be:
       - 'extend': Append unique items to a list.
@@ -688,9 +688,9 @@ def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: s
             merged[field] = merged.get(field, [])
             merged[field].append(value)
 
-def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """
-    Merge multiple chunk extraction results into a single consolidated result.
+
+def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Dict[str, str] | None = None) -> Dict[str, Any]:
+    """Merge multiple chunk extraction results into a single consolidated result.
 
     The function uses a merge strategy (or a default one based on the category)
     to determine how to merge each field (e.g., 'extend' lists, 'update' dictionaries,
@@ -786,9 +786,9 @@ def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_stra
     
     return merged
 
+
 def validate_content(content: str) -> bool:
-    """
-    Validate that the provided content meets minimum requirements.
+    """Validate that the provided content meets minimum requirements.
 
     This function checks that the content is a string, is non-empty,
     and meets a minimum length requirement.
@@ -824,6 +824,7 @@ def validate_content(content: str) -> bool:
         return False
         
     return True
+
 
 __all__ = [
     "chunk_text",

@@ -10,47 +10,49 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, cast, Literal, Hashable, Tuple
+from typing import Any, Dict, Hashable, List, Literal, Optional, Sequence, Tuple, cast
 
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import Annotated, TypedDict
 
-from react_agent.prompts.query import (
-    optimize_query,
-    detect_vertical,
-    expand_acronyms
-)
+from react_agent.prompts.query import detect_vertical, expand_acronyms, optimize_query
 from react_agent.prompts.research import (
-    QUERY_ANALYSIS_PROMPT,
     CLARIFICATION_PROMPT,
+    QUERY_ANALYSIS_PROMPT,
     SEARCH_QUALITY_THRESHOLDS,
-    get_extraction_prompt
+    get_extraction_prompt,
 )
 from react_agent.prompts.synthesis import ENHANCED_REPORT_TEMPLATE
 from react_agent.tools.jina import search
 from react_agent.utils.cache import create_checkpoint, load_checkpoint
 from react_agent.utils.content import (
+    detect_content_type,
     should_skip_content,
     validate_content,
-    detect_content_type
 )
+from react_agent.utils.extraction import enrich_extracted_fact, extract_statistics
 from react_agent.utils.extraction import (
-    extract_statistics,
-    enrich_extracted_fact,
-    extract_category_information as extract_category_info
+    extract_category_information as extract_category_info,
 )
 from react_agent.utils.llm import call_model_json
-from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight, log_step
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    log_dict,
+    log_step,
+    warning_highlight,
+)
 from react_agent.utils.statistics import (
+    assess_synthesis_quality,
     calculate_category_quality_score,
     calculate_overall_confidence,
-    assess_synthesis_quality
 )
 
 # Initialize logger

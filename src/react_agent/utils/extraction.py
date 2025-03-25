@@ -6,13 +6,13 @@ with a particular emphasis on numerical data, trends, and statistical informatio
 Examples:
     Input text example:
         >>> text = '''
-        ... According to a recent survey by TechCorp, 75% of enterprises adopted cloud 
-        ... computing in 2023, up from 60% in 2022. The global cloud market reached 
-        ... $483.3 billion in revenue, with AWS maintaining a 32% market share. 
-        ... A separate study by MarketWatch revealed that cybersecurity spending 
+        ... According to a recent survey by TechCorp, 75% of enterprises adopted cloud
+        ... computing in 2023, up from 60% in 2022. The global cloud market reached
+        ... $483.3 billion in revenue, with AWS maintaining a 32% market share.
+        ... A separate study by MarketWatch revealed that cybersecurity spending
         ... increased by 15% year-over-year.
         ... '''
-    
+
     Extracting citations:
         >>> citations = extract_citations(text)
         >>> citations
@@ -26,7 +26,7 @@ Examples:
                 "context": "A separate study by MarketWatch revealed that cybersecurity"
             }
         ]
-    
+
     Extracting statistics:
         >>> stats = extract_statistics(text)
         >>> stats
@@ -55,28 +55,28 @@ Examples:
                 "year_mentioned": None
             }
         ]
-    
+
     Rating statistic quality:
         >>> quality = rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of Fortune 500 companies...")
         >>> quality
         0.95
-    
+
     Inferring statistic type:
         >>> infer_statistic_type("Market share increased to 45%")
         'percentage'
         >>> infer_statistic_type("$50 million in revenue")
         'financial'
-    
+
     Extracting year:
         >>> extract_year("In 2023, cloud adoption grew by 25%")
         2023
-    
+
     Finding JSON objects:
         >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
         >>> json_obj = find_json_object(text_with_json)
         >>> json_obj
         '{"key": "value", "nested": {"data": 123}}'
-    
+
     Enriching extracted facts:
         >>> fact = {
         ...     "text": "Cloud adoption grew by 25% in 2023",
@@ -97,7 +97,7 @@ Examples:
             "additional_citations": [...],
             "confidence_score": 0.9
         }
-    
+
     Full category information extraction (asynchronous):
         >>> facts, relevance = await extract_category_information(
         ...     content=text,
@@ -138,20 +138,29 @@ from urllib.parse import urlparse
 
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
-
-from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
-from react_agent.utils.validations import is_valid_url
-from react_agent.utils.content import chunk_text, preprocess_content, merge_chunk_results
-from react_agent.utils.defaults import get_default_extraction_result
-from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint, cache_result
 from langgraph.graph import StateGraph
+
+from react_agent.utils.cache import ProcessorCache
+from react_agent.utils.content import (
+    chunk_text,
+    merge_chunk_results,
+    preprocess_content,
+)
+from react_agent.utils.defaults import get_default_extraction_result
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
 
 # Import statistical utilities
 from react_agent.utils.statistics import (
-    calculate_category_quality_score,
+    HIGH_CREDIBILITY_TERMS,
     assess_authoritative_sources,
-    HIGH_CREDIBILITY_TERMS
+    calculate_category_quality_score,
 )
+from react_agent.utils.validations import is_valid_url
 
 # Initialize logger and JSON cache.
 logger = get_logger(__name__)
@@ -159,22 +168,23 @@ json_cache = ProcessorCache(thread_id="json_parser")
 
 # Regular expressions for identifying statistical content.
 STAT_PATTERNS: List[str] = [
-    r'\d+%',  # Percentage
-    r'\$\d+(?:,\d+)*(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Currency
-    r'\d+(?:\.\d+)?(?:\s?(?:million|billion|trillion))?',  # Numbers with scale
-    r'increased by|decreased by|grew by|reduced by|rose|fell',  # Trend language
-    r'majority|minority|fraction|proportion|ratio',  # Proportion language
-    r'survey|respondents|participants|study found',  # Research language
-    r'statistics show|data indicates|report reveals',  # Statistical citation
-    r'market share|growth rate|adoption rate|satisfaction score',  # Business metrics
-    r'average|mean|median|mode|range|standard deviation'  # Statistical terms
+    r"\d+%",  # Percentage
+    r"\$\d+(?:,\d+)*(?:\.\d+)?(?:\s?(?:million|billion|trillion))?",  # Currency
+    r"\d+(?:\.\d+)?(?:\s?(?:million|billion|trillion))?",  # Numbers with scale
+    r"increased by|decreased by|grew by|reduced by|rose|fell",  # Trend language
+    r"majority|minority|fraction|proportion|ratio",  # Proportion language
+    r"survey|respondents|participants|study found",  # Research language
+    r"statistics show|data indicates|report reveals",  # Statistical citation
+    r"market share|growth rate|adoption rate|satisfaction score",  # Business metrics
+    r"average|mean|median|mode|range|standard deviation",  # Statistical terms
 ]
-COMPILED_STAT_PATTERNS: List[re.Pattern] = [re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS]
+COMPILED_STAT_PATTERNS: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE) for pattern in STAT_PATTERNS
+]
 
 
 def extract_citations(text: str) -> List[Dict[str, str]]:
-    """
-    Extract citation information from a text.
+    """Extract citation information from a text.
 
     Searches for patterns such as "(Source: X)", "[X]", "cited from X", etc.
 
@@ -190,21 +200,23 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
     """
     citations: List[Dict[str, str]] = []
     citation_patterns = [
-        r'\(Source:?\s+([^)]+)\)',
-        r'\[([^]]+)\]',
-        r'cited\s+from\s+([^,.;]+)',
-        r'according\s+to\s+([^,.;]+)',
-        r'reported\s+by\s+([^,.;]+)',
-        r'([^,.;]+)\s+reports'
+        r"\(Source:?\s+([^)]+)\)",
+        r"\[([^]]+)\]",
+        r"cited\s+from\s+([^,.;]+)",
+        r"according\s+to\s+([^,.;]+)",
+        r"reported\s+by\s+([^,.;]+)",
+        r"([^,.;]+)\s+reports",
     ]
     for pattern in citation_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             citation = match.group(1).strip()
             # Skip if the citation appears to be a year.
-            if not re.match(r'^(19|20)\d{2}$', citation):
+            if not re.match(r"^(19|20)\d{2}$", citation):
                 citations.append({
                     "source": citation,
-                    "context": text[max(0, match.start() - 50):min(len(text), match.end() + 50)]
+                    "context": text[
+                        max(0, match.start() - 50) : min(len(text), match.end() + 50)
+                    ],
                 })
     return citations
 
@@ -225,19 +237,25 @@ def infer_statistic_type(text: str) -> str:
         >>> infer_statistic_type("Market share increased to 45%")
         'percentage'
     """
-    if re.search(r'%|percent|percentage', text, re.IGNORECASE):
+    if re.search(r"%|percent|percentage", text, re.IGNORECASE):
         return "percentage"
-    elif re.search(r'\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget', text, re.IGNORECASE):
+    elif re.search(
+        r"\$|\beuro\b|\beur\b|\bgbp\b|\bjpy\b|cost|price|spend|budget",
+        text,
+        re.IGNORECASE,
+    ):
         return "financial"
-    elif re.search(r'time|duration|period|year|month|week|day|hour', text, re.IGNORECASE):
+    elif re.search(
+        r"time|duration|period|year|month|week|day|hour", text, re.IGNORECASE
+    ):
         return "temporal"
-    elif re.search(r'ratio|proportion|fraction', text, re.IGNORECASE):
+    elif re.search(r"ratio|proportion|fraction", text, re.IGNORECASE):
         return "ratio"
-    elif re.search(r'increase|decrease|growth|decline|trend', text, re.IGNORECASE):
+    elif re.search(r"increase|decrease|growth|decline|trend", text, re.IGNORECASE):
         return "trend"
-    elif re.search(r'survey|respondent|participant', text, re.IGNORECASE):
+    elif re.search(r"survey|respondent|participant", text, re.IGNORECASE):
         return "survey"
-    elif re.search(r'market share|market size', text, re.IGNORECASE):
+    elif re.search(r"market share|market size", text, re.IGNORECASE):
         return "market"
     else:
         return "general"
@@ -261,15 +279,21 @@ def rate_statistic_quality(stat_text: str) -> float:
         0.95
     """
     score = 0.5  # Base score
-    if re.search(r'\d+(?:\.\d+)?%', stat_text):
+    if re.search(r"\d+(?:\.\d+)?%", stat_text):
         score += 0.15
-    elif re.search(r'\$\d+(?:,\d+)*(?:\.\d+)?', stat_text):
+    elif re.search(r"\$\d+(?:,\d+)*(?:\.\d+)?", stat_text):
         score += 0.15
-    if re.search(r'according to|reported by|cited from|source|study|survey', stat_text, re.IGNORECASE):
+    if re.search(
+        r"according to|reported by|cited from|source|study|survey",
+        stat_text,
+        re.IGNORECASE,
+    ):
         score += 0.2
     if extract_year(stat_text):
         score += 0.1
-    if re.search(r'may|might|could|possibly|potentially|estimated', stat_text, re.IGNORECASE):
+    if re.search(
+        r"may|might|could|possibly|potentially|estimated", stat_text, re.IGNORECASE
+    ):
         score -= 0.1
     return max(0.0, min(1.0, score))
 
@@ -288,7 +312,7 @@ def extract_year(text: str) -> Optional[int]:
         >>> extract_year("In 2023, cloud adoption grew.")
         2023
     """
-    year_match = re.search(r'\b(19\d{2}|20\d{2})\b', text)
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text)
     return int(year_match[1]) if year_match else None
 
 
@@ -327,19 +351,28 @@ def assess_source_quality(text: str) -> float:
         0.8
     """
     score = 0.5
-    credibility_count = sum(term.lower() in text.lower() for term in HIGH_CREDIBILITY_TERMS)
+    credibility_count = sum(
+        term.lower() in text.lower() for term in HIGH_CREDIBILITY_TERMS
+    )
     if credibility_count >= 2:
         score += 0.3
     elif credibility_count == 1:
         score += 0.15
-    if re.search(r'according to|reported by|cited from|source|study|survey', text, re.IGNORECASE):
+    if re.search(
+        r"according to|reported by|cited from|source|study|survey", text, re.IGNORECASE
+    ):
         score += 0.2
-    if any(domain in text.lower() for domain in ['.gov', '.edu', '.org', 'research', 'university']):
+    if any(
+        domain in text.lower()
+        for domain in [".gov", ".edu", ".org", "research", "university"]
+    ):
         score += 0.2
     return min(1.0, score)
 
 
-def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> Dict[str, Any]:
+def enrich_extracted_fact(
+    fact: Dict[str, Any], url: str, source_title: str
+) -> Dict[str, Any]:
     """
     Enrich an extracted fact with additional metadata and context.
 
@@ -368,9 +401,11 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
     fact["extraction_timestamp"] = datetime.now(timezone.utc).isoformat()
 
     if isinstance(fact.get("source_text"), str):
-        if (extracted_stats := extract_statistics(fact["source_text"], url, source_title)):
+        if extracted_stats := extract_statistics(
+            fact["source_text"], url, source_title
+        ):
             fact["statistics"] = extracted_stats
-        if (citations := extract_citations(fact["source_text"])):
+        if citations := extract_citations(fact["source_text"]):
             fact["additional_citations"] = citations
 
     # Normalize confidence to a float value.
@@ -387,7 +422,12 @@ def enrich_extracted_fact(fact: Dict[str, Any], url: str, source_title: str) -> 
 
     # Use assess_authoritative_sources to give a small extra boost if the URL is authoritative.
     if url and is_valid_url(url):
-        source_info = {"url": url, "title": source_title, "source": urlparse(url).netloc, "quality_score": 0.8}
+        source_info = {
+            "url": url,
+            "title": source_title,
+            "source": urlparse(url).netloc,
+            "quality_score": 0.8,
+        }
         if assess_authoritative_sources([source_info]):
             confidence_score = min(1.0, confidence_score + 0.05)
 
@@ -409,7 +449,7 @@ def find_json_object(text: str) -> Optional[str]:
         >>> find_json_object('Some text {"key": "value", "nested": {"data": 123}} more text')
         '{"key": "value", "nested": {"data": 123}}'
     """
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
         start_positions = [pos for pos, char in enumerate(text) if char == start_char]
         for start_pos in start_positions:
             level = 0
@@ -421,7 +461,7 @@ def find_json_object(text: str) -> Optional[str]:
                 elif char == end_char:
                     level -= 1
                     if level == 0:
-                        return text[start_pos:pos+1]
+                        return text[start_pos : pos + 1]
                 pos += 1
     return None
 
@@ -443,13 +483,13 @@ def _clean_json_string(text: str) -> str:
         >>> _clean_json_string("```json\\n{'key': 'value',}\\n```")
         '{"key": []}'
     """
-    text = re.sub(r'```(?:json)?\s*|\s*```', '', text)
+    text = re.sub(r"```(?:json)?\s*|\s*```", "", text)
     text = text.strip().replace("'", '"')
-    text = re.sub(r',(\s*[}\]])', r'\1', text)
-    if not text.startswith('{'):
-        text = '{' + text
-    if not text.endswith('}'):
-        text = text + '}'
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    if not text.startswith("{"):
+        text = "{" + text
+    if not text.endswith("}"):
+        text = text + "}"
     return re.sub(r'"(\w+)":\s*"', r'"\1": []', text)
 
 
@@ -477,7 +517,10 @@ def _merge_with_default(parsed: Dict[str, Any], category: str) -> Dict[str, Any]
         if isinstance(value, type(result[key])):
             if isinstance(value, (list, dict)):
                 result[key] = value
-            elif isinstance(value, (int, float)) and key in ['relevance_score', 'confidence_score']:
+            elif isinstance(value, (int, float)) and key in [
+                "relevance_score",
+                "confidence_score",
+            ]:
                 result[key] = float(value)
     return result
 
@@ -501,7 +544,11 @@ def _check_cache(response: str, category: str) -> Dict[str, Any]:
     """
     response = _clean_json_string(response)
     cache_key = f"json_parse_{hash(response)}"
-    if (cached_result := json_cache.get(cache_key)) and isinstance(cached_result, dict) and cached_result.get("data"):
+    if (
+        (cached_result := json_cache.get(cache_key))
+        and isinstance(cached_result, dict)
+        and cached_result.get("data")
+    ):
         return cached_result["data"]
     json_text = find_json_object(response)
     if not json_text:
@@ -513,14 +560,16 @@ def _check_cache(response: str, category: str) -> Dict[str, Any]:
         {
             "data": result,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ttl": 3600
-        }
+            "ttl": 3600,
+        },
     )
     return result
 
 
-@cache_result(ttl=3600)
-def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict[str, Any]:
+@json_cache.cache_result(ttl=3600)
+def safe_json_parse(
+    response: Union[str, Dict[str, Any]], category: str
+) -> Dict[str, Any]:
     """
     Safely parse a JSON response with enhanced error handling and cleanup.
 
@@ -548,7 +597,9 @@ def safe_json_parse(response: Union[str, Dict[str, Any]], category: str) -> Dict
         return get_default_extraction_result(category)
 
 
-def extract_statistics(text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
+def extract_statistics(
+    text: str, url: str = "", source_title: str = ""
+) -> List[Dict[str, Any]]:
     """
     Extract statistics and numerical data from text along with metadata.
 
@@ -568,7 +619,7 @@ def extract_statistics(text: str, url: str = "", source_title: str = "") -> List
         >>> extract_statistics("According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023.")
     """
     statistics: List[Dict[str, Any]] = []
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
     for sentence in sentences:
         for pattern in COMPILED_STAT_PATTERNS:
             if pattern.search(sentence):
@@ -581,10 +632,10 @@ def extract_statistics(text: str, url: str = "", source_title: str = "") -> List
                         "year_mentioned": extract_year(stat_text),
                         "source_quality": assess_source_quality(stat_text),
                         "quality_score": rate_statistic_quality(stat_text),
-                        "credibility_terms": extract_credibility_terms(stat_text)
+                        "credibility_terms": extract_credibility_terms(stat_text),
                     }
                     # Enrich the statistic with additional metadata.
-                    if (enriched := enrich_extracted_fact(statistic, url, source_title)):
+                    if enriched := enrich_extracted_fact(statistic, url, source_title):
                         statistic |= enriched
                     statistics.append(statistic)
                 break
@@ -599,7 +650,7 @@ async def extract_category_information(
     original_query: str,
     prompt_template: str,
     extraction_model: Any,
-    config: Optional[RunnableConfig] = None
+    config: Optional[RunnableConfig] = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
     """
     Extract information for a specific category with enhanced statistical focus.
@@ -647,11 +698,13 @@ async def extract_category_information(
             extraction_model=extraction_model,
             config=config,
             url=url,
-            title=title
+            title=title,
         )
         facts = _get_category_facts(category, extraction_result)
         enriched_facts = [enrich_extracted_fact(fact, url, title) for fact in facts]
-        sorted_facts = sorted(enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True)
+        sorted_facts = sorted(
+            enriched_facts, key=lambda x: x.get("confidence_score", 0), reverse=True
+        )
         return sorted_facts, extraction_result.get("relevance_score", 0.0)
     except Exception as e:
         error_highlight(f"Error extracting from {url}: {str(e)}")
@@ -686,7 +739,7 @@ async def _process_content(
     extraction_model: Any,
     config: Optional[RunnableConfig],
     url: str,
-    title: str
+    title: str,
 ) -> Dict[str, Any]:
     """
     Process content with the extraction model.
@@ -709,13 +762,14 @@ async def _process_content(
         >>> result = await _process_content("Some content", "Prompt here", "market", model, None, "https://example.com", "Report")
     """
     if len(content) > 40000:
-        return await _process_chunked_content(content, prompt, category, extraction_model, config, url, title)
+        return await _process_chunked_content(
+            content, prompt, category, extraction_model, config, url, title
+        )
     model_response = await extraction_model(
-        messages=[{"role": "human", "content": prompt}],
-        config=config
+        messages=[{"role": "human", "content": prompt}], config=config
     )
     extraction_result = safe_json_parse(model_response, category)
-    if (stats := extract_statistics(content, url, title)):
+    if stats := extract_statistics(content, url, title):
         extraction_result["statistics"] = stats
     return extraction_result
 
@@ -727,7 +781,7 @@ async def _process_chunked_content(
     extraction_model: Any,
     config: Optional[RunnableConfig],
     url: str,
-    title: str
+    title: str,
 ) -> Dict[str, Any]:
     """
     Process content in chunks when it exceeds a size limit.
@@ -757,10 +811,9 @@ async def _process_chunked_content(
         info_highlight(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
         chunk_prompt = prompt.format(content=chunk)
         chunk_response = await extraction_model(
-            messages=[{"role": "human", "content": chunk_prompt}],
-            config=config
+            messages=[{"role": "human", "content": chunk_prompt}], config=config
         )
-        if (chunk_result := safe_json_parse(chunk_response, category)):
+        if chunk_result := safe_json_parse(chunk_response, category):
             chunk_statistics = extract_statistics(chunk, url, title)
             all_statistics.extend(chunk_statistics)
             chunk_results.append(chunk_result)
@@ -770,7 +823,9 @@ async def _process_chunked_content(
     return result
 
 
-def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _get_category_facts(
+    category: str, extraction_result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     """
     Extract facts from the extraction result based on category structure.
 
@@ -793,28 +848,28 @@ def _get_category_facts(category: str, extraction_result: Dict[str, Any]) -> Lis
         "market_dynamics": [("fact", "extracted_facts")],
         "provider_landscape": [
             ("vendor", "extracted_vendors"),
-            ("relationship", "vendor_relationships")
+            ("relationship", "vendor_relationships"),
         ],
         "technical_requirements": [
             ("requirement", "extracted_requirements"),
-            ("standard", "standards")
+            ("standard", "standards"),
         ],
         "regulatory_landscape": [
             ("regulation", "extracted_regulations"),
-            ("compliance", "compliance_requirements")
+            ("compliance", "compliance_requirements"),
         ],
         "cost_considerations": [
             ("cost", "extracted_costs"),
-            ("pricing_model", "pricing_models")
+            ("pricing_model", "pricing_models"),
         ],
         "best_practices": [
             ("practice", "extracted_practices"),
-            ("methodology", "methodologies")
+            ("methodology", "methodologies"),
         ],
         "implementation_factors": [
             ("factor", "extracted_factors"),
-            ("challenge", "challenges")
-        ]
+            ("challenge", "challenges"),
+        ],
     }
     facts: List[Dict[str, Any]] = []
     for fact_type, key in category_mapping.get(category, [("fact", "extracted_facts")]):

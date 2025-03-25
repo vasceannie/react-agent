@@ -26,6 +26,7 @@ dependencies = [
     "langgraph-api==0.0.33",
     "langgraph-checkpoint-sqlite==2.0.6",
     "cursor-rules>=0.5.1",
+    "pytest>=8.0.0",
 ]
 
 
@@ -74,3 +75,9 @@ convention = "google"
 dev = [
     "langgraph-cli[inmem]>=0.1.71",
 ]
+
+[tool.pytest]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

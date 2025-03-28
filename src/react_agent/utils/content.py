@@ -35,9 +35,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, TypedDict
 from urllib.parse import unquote, urlparse
 
-import nltk.data
-import requests
-from docling.document_converter import DocumentConverter
+import nltk.data  # type: ignore[import]
+import requests  # type: ignore[import]
+from docling.document_converter import DocumentConverter  # type: ignore[import]
 
 from react_agent.utils.cache import ProcessorCache
 from react_agent.utils.defaults import (
@@ -186,7 +186,7 @@ def chunk_text(
             overlap: int,
             min_chunk_size: int,
             chunks: List[str],
-            tokenizer: nltk.data.load | None,
+            tokenizer: Any,
             expected_chunks: int,
         ) -> Tuple[int, List[str]]:
         text_length = len(text)
@@ -421,20 +421,21 @@ def create_temp_document_file(content: bytes, file_extension: str) -> Tuple[str,
         return temp_file.name, os.path.basename(temp_file.name)
 
 
-def extract_document_text(file_path: str, document_type: str, timeout: int = 60) -> str:
-    """Extract text from a document file using Docling with a timeout.
+def extract_document_text(file_path: str, document_type: str) -> str:
+    """Extract text from a document file using Docling.
 
     Args:
         file_path: Path to the document file
         document_type: Type of document (pdf, doc, etc.)
-        timeout: Timeout in seconds for document conversion
 
     Returns:
         Extracted text content
     """
     try:
         converter = DocumentConverter()
-        return converter.convert(file_path, timeout=timeout)
+        result = converter.convert(file_path)
+        # Handle the ConversionResult type by extracting the text content
+        return str(result)
     except Exception as e:
         error_highlight(
             f"Error extracting text from {document_type} document: {str(e)}",
@@ -660,12 +661,15 @@ def detect_content_type(url: str, content: str) -> str:
 
     for strategy_data in CONTENT_DETECTION_STRATEGIES:
         strategy = strategy_data["strategy"]
-        strategy_data["weight"]
         content_based = strategy_data["content_based"]
 
-        if result := strategy(content if content_based else url):
-            info_highlight(f"Detected content type: {result}", category="content_type")
-            return result
+        try:
+            if result := strategy(content if content_based else url):
+                info_highlight(f"Detected content type: {result}", category="content_type")
+                return result
+        except TypeError:
+            # Skip if strategy is not callable
+            continue
 
     return fallback_detection(url, content)
 

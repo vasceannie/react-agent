@@ -3,6 +3,11 @@
 This module improves the extraction of facts and statistics from search results,
 with a particular emphasis on numerical data, trends, and statistical information.
 
+DEPRECATION WARNING: Direct usage of functions in this module is deprecated.
+Please use the tool-based approach by importing from react_agent.tools instead:
+
+    from react_agent.tools import StatisticsExtractionTool, CitationExtractionTool, CategoryExtractionTool
+
 Examples:
     Input text example:
         >>> text = '''
@@ -14,7 +19,7 @@ Examples:
         ... '''
 
     Extracting citations:
-        >>> citations = extract_citations(text)
+        >>> citations = extract_citations(text)  # Deprecated: Use CitationExtractionTool instead
         >>> citations
         [
             {
@@ -28,7 +33,7 @@ Examples:
         ]
 
     Extracting statistics:
-        >>> stats = extract_statistics(text)
+        >>> stats = extract_statistics(text)  # Deprecated: Use StatisticsExtractionTool instead
         >>> stats
         [
             {
@@ -56,80 +61,15 @@ Examples:
             }
         ]
 
-    Rating statistic quality:
-        >>> quality = rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of Fortune 500 companies...")
-        >>> quality
-        0.95
-
-    Inferring statistic type:
-        >>> infer_statistic_type("Market share increased to 45%")
-        'percentage'
-        >>> infer_statistic_type("$50 million in revenue")
-        'financial'
-
-    Extracting year:
-        >>> extract_year("In 2023, cloud adoption grew by 25%")
-        2023
-
-    Finding JSON objects:
-        >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
-        >>> json_obj = find_json_object(text_with_json)
-        >>> json_obj
-        '{"key": "value", "nested": {"data": 123}}'
-
-    Enriching extracted facts:
-        >>> fact = {
-        ...     "text": "Cloud adoption grew by 25% in 2023",
-        ...     "confidence": 0.8,
-        ...     "source_text": "According to AWS, cloud adoption grew by 25% in 2023"
-        ... }
-        >>> enriched = enrich_extracted_fact(fact, url="https://example.com/report", source_title="Cloud Market Report")
-        >>> enriched
-        {
-            "text": "Cloud adoption grew by 25% in 2023",
-            "confidence": 0.8,
-            "source_text": "According to AWS, cloud adoption grew by 25% in 2023",
-            "source_url": "https://example.com/report",
-            "source_title": "Cloud Market Report",
-            "source_domain": "example.com",
-            "extraction_timestamp": "2024-03-14T10:30:00",
-            "statistics": [...],
-            "additional_citations": [...],
-            "confidence_score": 0.9
-        }
-
-    Full category information extraction (asynchronous):
-        >>> facts, relevance = await extract_category_information(
-        ...     content=text,
-        ...     url="https://example.com/cloud-report",
-        ...     title="Cloud Computing Trends 2023",
-        ...     category="market_dynamics",
-        ...     original_query="cloud computing adoption trends",
-        ...     prompt_template="Extract facts for {query} from {url}: {content}",
-        ...     extraction_model=model
-        ... )
-        >>> facts
-        [
-            {
-                "type": "fact",
-                "data": {
-                    "text": "Enterprise cloud adoption increased to 75% in 2023",
-                    "source_url": "https://example.com/cloud-report",
-                    "source_title": "Cloud Computing Trends 2023",
-                    "source_domain": "example.com",
-                    "extraction_timestamp": "2024-03-14T10:30:00",
-                    "confidence_score": 0.9,
-                    "statistics": [...],
-                    "additional_citations": [...]
-                }
-            }
-        ]
-        >>> relevance
-        0.95
+    Tool-based approach (recommended):
+        >>> from react_agent.tools import StatisticsExtractionTool
+        >>> tool = StatisticsExtractionTool()
+        >>> stats = tool.run(text=text, url="https://example.com", source_title="Cloud Report")
 """
 
 import json
 import re
+import warnings
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Tuple, Union
 from urllib.parse import urlparse
@@ -181,6 +121,8 @@ COMPILED_STAT_PATTERNS: List[re.Pattern] = [
 def extract_citations(text: str) -> List[Dict[str, str]]:
     """Extract citation information from a text.
 
+    DEPRECATED: Use CitationExtractionTool instead.
+
     Searches for patterns such as "(Source: X)", "[X]", "cited from X", etc.
 
     Args:
@@ -193,6 +135,11 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
         >>> extract_citations("According to a recent survey by TechCorp, 75%...")
         [{'source': 'TechCorp', 'context': '...survey by TechCorp, 75%...'}]
     """
+    warnings.warn(
+        "Direct use of extract_citations is deprecated. Use CitationExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     citations: List[Dict[str, str]] = []
     citation_patterns = [
         r"\(Source:?\s+([^)]+)\)",
@@ -696,6 +643,8 @@ def extract_statistics(
 ) -> List[Dict[str, Any]]:
     """Extract statistics and numerical data from text along with metadata.
 
+    DEPRECATED: Use StatisticsExtractionTool instead.
+
     Scans the text sentence by sentence and applies several regex patterns to detect statistical information.
     For each detected statistic, infers its type, extracts citations and a mentioned year, assesses source quality,
     rates its quality, and extracts credibility terms. The fact is then enriched with additional metadata.
@@ -711,6 +660,11 @@ def extract_statistics(
     Examples:
         >>> extract_statistics("According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023.")
     """
+    warnings.warn(
+        "Direct use of extract_statistics is deprecated. Use StatisticsExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     statistics: List[Dict[str, Any]] = []
     sentences = re.split(r"(?<=[.!?])\s+", text)
     for sentence in sentences:
@@ -747,6 +701,8 @@ async def extract_category_information(
 ) -> Tuple[List[Dict[str, Any]], float]:
     """Extract information for a specific category with enhanced statistical focus.
 
+    DEPRECATED: Use CategoryExtractionTool instead.
+
     Preprocesses the content, builds a prompt using a template, processes the content with the extraction model,
     extracts and enriches facts, and returns the facts sorted by confidence along with an overall relevance score.
 
@@ -776,6 +732,12 @@ async def extract_category_information(
         ...     extraction_model=model
         ... )
     """
+    warnings.warn(
+        "Direct use of extract_category_information is deprecated. Use CategoryExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    
     if not _validate_inputs(content, url):
         return [], 0.0
 
@@ -964,3 +926,27 @@ def _get_category_facts(
         items = extraction_result.get(key, [])
         facts.extend([{"type": fact_type, "data": item} for item in items])
     return facts
+
+# Import the new tools for backward compatibility
+try:
+    from react_agent.tools import (
+        StatisticsExtractionTool,
+        CitationExtractionTool,
+        CategoryExtractionTool,
+    )
+except ImportError:
+    warning_highlight("Could not import extraction tools. Some functionality may be limited.")
+    StatisticsExtractionTool = None
+    CitationExtractionTool = None
+    CategoryExtractionTool = None
+
+# Update the __all__ list to include both the original functions and the new tools
+__all__ = [
+    "extract_citations",
+    "extract_statistics",
+    "extract_category_information",
+    "enrich_extracted_fact",
+    "StatisticsExtractionTool",
+    "CitationExtractionTool",
+    "CategoryExtractionTool",
+]

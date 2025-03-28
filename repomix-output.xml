@@ -31,7 +31,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: src/react_agent/utils/*.py
+- Only files matching these patterns are included: src/react_agent/utils/*.py, src/react_agent/prompts/*.py, src/react_agent/tools/jina.py
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 </notes>
@@ -45,6 +45,18 @@ The content is organized as follows:
 <directory_structure>
 src/
   react_agent/
+    prompts/
+      __init__.py
+      analysis.py
+      market.py
+      query.py
+      reflection.py
+      research.py
+      synthesis.py
+      templates.py
+      validation.py
+    tools/
+      jina.py
     utils/
       __init__.py
       cache.py
@@ -59,6 +71,3109 @@ src/
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="src/react_agent/prompts/__init__.py">
+"""Prompt exports.
+
+This module provides functionality for prompt exports
+in the agent framework.
+"""
+
+from typing import Any, Dict, Final, List, Tuple
+
+from react_agent.prompts.analysis import (
+    ANALYSIS_PROMPT,
+    TOOL_SELECTION_PROMPT,
+)
+from react_agent.prompts.market import (
+    MARKET_DATA_PROMPT,
+    MARKET_PROMPT,
+)
+from react_agent.prompts.reflection import (
+    REFLECTION_PROMPT,
+)
+from react_agent.prompts.research import (
+    ADDITIONAL_TOPICS_PROMPT,
+    RESEARCH_AGENT_PROMPT,
+    RESEARCH_BASE_PROMPT,
+    TOPICS_PROMPT,
+    QUERY_ANALYSIS_PROMPT,
+    CLARIFICATION_PROMPT,
+)
+
+# Import all prompts from modules
+from react_agent.prompts.templates import (
+    ANALOGICAL_REASONING_PROMPT,
+    COUNTERFACTUAL_PROMPT,
+    CRITIQUE_PROMPT_TEMPLATE,
+    EVALUATION_PROMPT_TEMPLATE,
+    # Reflection prompts
+    FEEDBACK_PROMPT_TEMPLATE,
+    MAIN_PROMPT,
+    METACOGNITION_PROMPT,
+    NEWS_SEARCH_DESC,
+    SCRAPE_DESC,
+    STRUCTURED_OUTPUT_VALIDATION,
+    SUMMARIZER_DESC,
+    TOOL_INSTRUCTIONS,
+    VALIDATION_REQUIREMENTS,
+    WEB_SEARCH_DESC,
+)
+from react_agent.prompts.validation import (
+    VALIDATION_AGENT_PROMPT,
+    VALIDATION_BASE_PROMPT,
+)
+
+# Re-export everything for backward compatibility
+__all__ = [
+    # Templates
+    "STRUCTURED_OUTPUT_VALIDATION",
+    "VALIDATION_REQUIREMENTS",
+    "MAIN_PROMPT",
+    "WEB_SEARCH_DESC",
+    "SCRAPE_DESC",
+    "SUMMARIZER_DESC",
+    "NEWS_SEARCH_DESC",
+    "TOOL_INSTRUCTIONS",
+    # Research
+    "RESEARCH_BASE_PROMPT",
+    "RESEARCH_AGENT_PROMPT",
+    "MARKET_PROMPT",
+    "TOPICS_PROMPT",
+    "ADDITIONAL_TOPICS_PROMPT",
+    "QUERY_ANALYSIS_PROMPT",
+    "CLARIFICATION_PROMPT",
+    # Validation
+    "VALIDATION_BASE_PROMPT",
+    "VALIDATION_AGENT_PROMPT",
+    # Analysis
+    "ANALYSIS_PROMPT",
+    "TOOL_SELECTION_PROMPT",
+    # Reflection
+    "REFLECTION_PROMPT",
+    # Reflection Templates
+    "FEEDBACK_PROMPT_TEMPLATE",
+    "EVALUATION_PROMPT_TEMPLATE",
+    "CRITIQUE_PROMPT_TEMPLATE",
+    "ANALOGICAL_REASONING_PROMPT",
+    "COUNTERFACTUAL_PROMPT",
+    "METACOGNITION_PROMPT",
+    # Functions
+    "get_report_template",
+    "get_analysis_template",
+]
+
+
+# Common utility functions
+def get_report_template() -> Dict[str, Any]:
+    """Get the template for the final report."""
+    return {
+        "summary": "",
+        "research_findings": {},
+        "market_analysis": {},
+        "generated_at": "",
+    }
+
+
+def get_analysis_template() -> Dict[str, Any]:
+    """Get the template for research analysis."""
+    return {
+        "citations": [],
+        "porters_five_forces": {},
+        "swot_analysis": {},
+        "pestel_analysis": {},
+        "gap_analysis": {},
+        "cost_benefit_analysis": {},
+        "risk_assessment": {},
+        "tco_analysis": {},
+        "vendor_analysis": {},
+        "benchmarking": {},
+        "stakeholder_analysis": {},
+        "compliance_analysis": {},
+        "business_impact_analysis": {},
+    }
+
+
+# Required analysis topics
+REQUIRED_ANALYSIS_TOPICS: List[Tuple[str, str]] = [
+    ("Porter's Five Forces", "Analysis of competitive forces in the industry"),
+    ("SWOT Analysis", "Strengths, weaknesses, opportunities, and threats"),
+    (
+        "PESTEL Analysis",
+        "Political, economic, social, technological, environmental, and legal factors",
+    ),
+    ("GAP Analysis", "Current state vs desired state analysis"),
+    ("Cost-Benefit Analysis", "Analysis of costs and benefits"),
+    ("Risk Assessment", "Identification and analysis of potential risks"),
+    ("Total Cost of Ownership", "Complete cost analysis including indirect costs"),
+    ("Vendor Analysis", "Analysis of potential vendors and suppliers"),
+    ("Benchmarking", "Comparison with industry standards and best practices"),
+    ("Stakeholder Analysis", "Analysis of key stakeholders and their needs"),
+    ("Compliance Analysis", "Analysis of regulatory and compliance requirements"),
+    ("Business Impact Analysis", "Analysis of business impact and strategic alignment"),
+]
+
+# System prompts
+SYSTEM_PROMPT_ANALYST: Final[str] = "You are an expert market research analyst."
+
+# Finalization prompts
+FINALIZATION_BASE_PROMPT: Final[
+    str
+] = """You are a Finalization Agent for RFP market analysis.
+Your goal is to generate comprehensive reports and outputs from the validated research.
+
+{STRUCTURED_OUTPUT_VALIDATION}
+
+FINALIZATION REQUIREMENTS:
+1. Research Report
+   - Expand each analysis element into well-written sections
+   - Maintain professional and clear writing style
+   - Include supporting evidence and citations
+   - Organize content logically and cohesively
+   - Ensure all insights are actionable
+
+2. Analysis Sections
+   - Porter's 5 Forces analysis
+   - SWOT analysis
+   - PESTEL analysis
+   - GAP analysis
+   - Cost-benefit analysis
+   - Risk assessment
+   - Total cost of ownership
+   - Vendor analysis
+   - Benchmarking results
+   - Stakeholder analysis
+   - Compliance requirements
+   - Business impact assessment
+
+3. Market Basket Output
+   - Generate CSV format
+   - Include all line items
+   - Maintain data accuracy
+   - Format for easy review
+   - Include citations and sources
+
+4. Quality Requirements
+   - Professional writing style
+   - Clear section headings
+   - Consistent formatting
+   - Proper citation formatting
+   - Executive summary
+   - Recommendations section
+
+RESPONSE_FORMAT:
+{
+    "outputs": {
+        "research_report": {
+            "format": "markdown",
+            "content": "",
+            "sections": []
+        },
+        "market_basket": {
+            "format": "csv",
+            "headers": [],
+            "rows": []
+        },
+        "executive_summary": "",
+        "recommendations": [],
+        "confidence_scores": {},
+        "key_findings": []
+    },
+    "metadata": {
+        "generated_at": "",
+        "version": "1.0",
+        "validation_status": {
+            "is_valid": false,
+            "errors": [],
+            "warnings": []
+        }
+    }
+}
+
+Current state: {state}
+"""
+
+FINALIZATION_AGENT_PROMPT: Final[str] = FINALIZATION_BASE_PROMPT.replace(
+    "Your goal is to generate comprehensive reports and outputs from the validated research.\n",
+    "Your goal is to generate comprehensive reports and outputs from the validated research.\n\n{STRUCTURED_OUTPUT_VALIDATION}\n",
+)
+
+ENRICHMENT_AGENT_PROMPT: Final[
+    str
+] = """You are an Enrichment Agent for RFP market analysis.
+Enhance the following validated data while maintaining the JSON structure:
+Validated Data:
+{validated_data}
+Required Schema:
+{
+    "rfp_analysis": {
+        "analysis": {
+            "porters_5_forces": {
+                "competitive_rivalry": "",
+                "threat_of_new_entrants": "",
+                "threat_of_substitutes": "",
+                "bargaining_power_buyers": "",
+                "bargaining_power_suppliers": ""
+            },
+            "swot": {
+                "strengths": [],
+                "weaknesses": [],
+                "opportunities": [],
+                "threats": []
+            },
+            "recent_breakthroughs_and_disruptors": "",
+            "cost_trends_and_projections": "",
+            "typical_contract_clauses_and_pricing_nuances": "",
+            "competitive_landscape": "",
+            "citations": {
+                "porters_5_forces": [],
+                "swot": [],
+                "recent_breakthroughs_and_disruptors": [],
+                "cost_trends_and_projections": [],
+                "typical_contract_clauses_and_pricing_nuances": [],
+                "competitive_landscape": []
+            }
+        },
+        "market_basket": [
+            {
+                "manufacturer_or_distributor": "",
+                "item_number": "",
+                "item_description": "",
+                "uom": "",
+                "estimated_qty_per_uom": 0.0,
+                "unit_cost": 0.0,
+                "citation": ""
+            }
+        ]
+    },
+    "confidence_score": 0.0
+}
+Enrichment Focus Areas:
+1. Market Intelligence
+   - Add emerging technology trends with citations
+   - Include regulatory impact analysis with sources
+   - Highlight market consolidation trends with references
+   - Ensure at least 2 citations per section
+
+2. Supplier Intelligence
+   - Add supplier financial health indicators with sources
+   - Include supplier innovation capabilities with citations
+   - Note supplier market share trends with references
+   - Validate supplier information from multiple sources
+
+3. Pricing Intelligence
+   - Add volume discount structures with citations
+   - Include regional pricing variations with sources
+   - Note seasonal pricing factors with references
+   - Verify pricing data from reliable sources
+
+4. Risk Analysis
+   - Add supply chain risk factors with citations
+   - Include mitigation strategies with sources
+   - Note alternative sourcing options with references
+   - Cross-reference risk data from multiple sources
+
+5. Citation Requirements
+   - Each analysis section must have at least 2 citations
+   - Market basket items must each have a valid citation
+   - Citations must be from reliable industry sources
+   - Avoid using the same citation across multiple sections
+
+CONFIDENCE_SCORING:
+- Start with a base score of 0.5
+- Add 0.1 for each section with 2+ unique citations
+- Add 0.1 for each market basket item with verified pricing
+- Subtract 0.1 for any section with fewer than 2 citations
+- Maximum score is 0.95 until all data is fully verified
+
+RESPONSE_REQUIREMENTS:
+1. Output must be valid JSON only
+2. All fields must be populated with enriched data
+3. No explanatory text or comments
+4. Include enrichment notes in "enrichment_details" if needed
+5. Ensure complete, untruncated JSON output
+6. Every section must have multiple citations
+7. Market basket items must have verified sources
+
+Current enrichment state: {current_state}
+Conversation history:
+{chat_history}
+"""
+
+# Export finalization prompts
+__all__.extend(
+    [
+        "FINALIZATION_BASE_PROMPT",
+        "FINALIZATION_AGENT_PROMPT",
+        "ENRICHMENT_AGENT_PROMPT",
+        "REQUIRED_ANALYSIS_TOPICS",
+        "SYSTEM_PROMPT_ANALYST",
+    ]
+)
+</file>
+
+<file path="src/react_agent/prompts/analysis.py">
+"""Analysis-specific prompts.
+
+This module provides functionality for analysis-specific prompts
+in the agent framework.
+"""
+
+from typing import Final
+
+# Prompt for tool selection
+TOOL_SELECTION_PROMPT: Final[str] = (
+    """What information do we need to research about {current_topic}?"""
+)
+
+# Prompt for analysis of tool results
+ANALYSIS_PROMPT: Final[str] = """
+Based on the following research about {current_topic}, provide a comprehensive analysis:
+
+{formatted_results}
+
+Your analysis should include:
+1. Key insights from the research
+2. Patterns or trends identified
+3. Implications for the business
+4. Recommendations based on the findings
+"""
+
+# Prompt for analysis plan formulation
+ANALYSIS_PLAN_PROMPT: Final[str] = """
+Analysis Task: {task}
+Available Data:
+{data_summary}
+
+Create a comprehensive plan for analyzing this data that will address the task.
+Your plan should include:
+1. Data preparation steps needed (e.g., cleaning, transformation)
+2. Analysis methods to apply (e.g., descriptive statistics, correlation, regression)
+3. Visualizations to create (e.g., histograms, scatter plots, bar charts)
+4. Hypotheses to test (if applicable)
+5. Statistical methods to use (e.g., t-tests, ANOVA, chi-squared)
+6. Expected insights (what do you expect to learn from the analysis?)
+
+Format your response as a JSON object with these sections.
+"""
+
+# Prompt for results interpretation
+INTERPRET_RESULTS_PROMPT: Final[str] = """
+Analysis Task: {task}
+Analysis Results:
+{analysis_results}
+Analysis Plan:
+{analysis_plan}
+
+Interpret these results in the context of the original task.
+Your interpretation should include:
+1. Key findings and insights
+2. Patterns and trends identified
+3. Anomalies or unexpected results
+4. Limitations of the analysis
+5. Answers to specific questions in the task (if any)
+6. Business implications (if applicable)
+
+Format your response as a JSON object with these sections.
+"""
+
+# Prompt for report compilation
+COMPILE_REPORT_PROMPT: Final[str] = """
+Analysis Task: {task}
+Analysis Results:
+{analysis_results}
+Interpretations:
+{interpretations}
+Visualizations:
+{visualization_metadata}
+
+Compile a comprehensive analysis report addressing the original task.
+The report should:
+1. Start with an executive summary of key findings.
+2. Include an introduction explaining the context and objectives.
+3. Describe the methodology and data sources.
+4. Present the detailed findings with references to visualizations.
+5. Discuss implications and recommendations.
+6. Note limitations and potential future analysis.
+
+Format the report as markdown with proper headings, lists, and sections.
+"""
+</file>
+
+<file path="src/react_agent/prompts/market.py">
+"""Market-specific prompts.
+
+This module provides functionality for market data processing prompts
+in the agent framework.
+"""
+
+from typing import Final
+
+# Market data processing prompt
+MARKET_DATA_PROMPT: Final[str] = """You are a Market Data Processor specialized in extracting pricing and sourcing information.
+
+Your task is to analyze the following item and identify potential market sources, pricing, and manufacturer information.
+
+INSTRUCTIONS:
+1. Analyze the provided item description
+2. Identify potential manufacturers or distributors
+3. Find item numbers, descriptions, and pricing information
+4. Format the response as a structured JSON object
+
+RESPONSE FORMAT:
+{
+    "market_items": [
+        {
+            "manufacturer": "Name of manufacturer or distributor",
+            "item_number": "Product/catalog number",
+            "item_description": "Detailed description of the item",
+            "unit_of_measure": "Each, Box, Case, etc.",
+            "unit_cost": 0.00,
+            "source": "Where this information was found"
+        }
+    ],
+    "confidence_score": 0.0,
+    "notes": "Any additional information or context"
+}
+
+IMPORTANT:
+- Include multiple sources if available
+- Provide accurate pricing information
+- Include detailed item descriptions
+- Assign a confidence score (0.0-1.0) based on data reliability
+- Only include items that match the original description
+
+Item to process: {state}
+""" 
+
+# Market research prompt
+MARKET_PROMPT: Final[str] = """You are a Market Research Agent focused on building comprehensive market baskets.
+
+Your task is to analyze the market for the following items and provide detailed market research information.
+
+INSTRUCTIONS:
+1. Analyze the market for each item
+2. Identify market trends and dynamics
+3. Research pricing and availability
+4. Find potential suppliers and manufacturers
+5. Analyze market competition
+6. Identify regulatory requirements
+7. Provide market forecasts and insights
+
+RESPONSE FORMAT:
+{
+    "market_analysis": {
+        "market_size": "Total market size with units",
+        "growth_rate": "Annual growth rate",
+        "trends": ["Key market trends"],
+        "competition": ["Major competitors"],
+        "regulations": ["Relevant regulations"]
+    },
+    "items": [
+        {
+            "item_name": "Name of item",
+            "market_price": "Price range",
+            "suppliers": ["List of suppliers"],
+            "availability": "Supply status",
+            "quality_metrics": ["Quality indicators"]
+        }
+    ],
+    "confidence_score": 0.0,
+    "notes": "Additional market insights"
+}
+
+IMPORTANT:
+- Provide accurate market data with sources
+- Include recent market trends and forecasts
+- Consider both local and global market factors
+- Note any market risks or uncertainties
+- Assign confidence scores based on data reliability
+"""
+</file>
+
+<file path="src/react_agent/prompts/query.py">
+"""Enhanced query optimization to improve search relevance.
+
+This enhances the query optimization to include more procurement-specific terms
+and domain-specific vocabularies to increase search precision.
+"""
+
+from typing import Dict, List, Set, Optional
+import re
+
+# Domain-specific keyword repositories
+PROCUREMENT_TERMS = {
+    "sourcing": ["strategic sourcing", "supplier selection", "supplier qualification", "vendor selection"],
+    "contracts": ["contract terms", "contract management", "agreement", "obligations", "SLAs", "KPIs"],
+    "pricing": ["volume discounts", "rebates", "bulk discounts", "pricing models", "cost-plus", "fixed price"],
+    "rfp": ["request for proposal", "request for information", "request for quote", "bid", "tender"],
+    "procurement": ["procurement strategy", "procurement process", "buying", "purchasing"],
+    "payment": ["invoicing", "payment terms", "purchase orders", "net-30", "net-60"],
+    "suppliers": ["vendors", "distributors", "manufacturers", "providers", "supply base"],
+    "strategy": ["category strategy", "category management", "spend analysis", "cost reduction"],
+    "risk": ["risk management", "risk mitigation", "compliance", "qualifications", "certifications"],
+    "process": ["auction", "reverse auction", "e-procurement", "p2p", "procure to pay"]
+}
+
+# Industry vertical specializations - can be expanded as needed
+INDUSTRY_VERTICALS = {
+    "education": ["university", "college", "campus", "academic", "educational"],
+    "healthcare": ["hospital", "clinic", "medical", "patient care", "healthcare"],
+    "manufacturing": ["factory", "industrial", "production", "assembly", "plant"],
+    "government": ["public sector", "government agency", "municipal", "federal", "state"],
+    "retail": ["retail operations", "store", "outlet", "retail chain", "merchandising"],
+    "utilities": ["energy", "water", "electricity", "gas", "utility provider"]
+}
+
+# Maintenance categories
+MAINTENANCE_CATEGORIES = {
+    "preventive": ["preventive maintenance", "scheduled maintenance", "routine service"],
+    "corrective": ["corrective maintenance", "repair", "fix", "troubleshooting"],
+    "predictive": ["predictive maintenance", "condition monitoring", "predictive analytics"],
+    "supplies": ["consumables", "disposables", "tools", "equipment", "spare parts"]
+}
+
+def detect_vertical(query: str) -> str:
+    """Detect the industry vertical from the query."""
+    query_lower = query.lower()
+
+    return next(
+        (
+            vertical
+            for vertical, keywords in INDUSTRY_VERTICALS.items()
+            if any(keyword in query_lower for keyword in keywords)
+        ),
+        "general",
+    )
+
+def expand_acronyms(query: str) -> str:
+    """Expand common industry acronyms in the query."""
+    acronyms = {
+        "mro": "maintenance repair operations",
+        "rfp": "request for proposal",
+        "rfq": "request for quote",
+        "rfi": "request for information",
+        "eam": "enterprise asset management",
+        "cmms": "computerized maintenance management system",
+        "kpi": "key performance indicator",
+        "sla": "service level agreement",
+        "tcoo": "total cost of ownership",
+        "p2p": "procure to pay"
+    }
+    
+    words = query.split()
+    for i, word in enumerate(words):
+        word_lower = word.lower().strip(",.;:()[]{}\"'")
+        if word_lower in acronyms:
+            # Replace acronym with expansion while preserving original casing and punctuation
+            prefix = ""
+            suffix = ""
+            if not word.isalnum():
+                prefix = word[:len(word) - len(word.lstrip(",.;:()[]{}\"'"))]
+                suffix = word[len(word.rstrip(",.;:()[]{}\"'")):]
+            words[i] = prefix + acronyms[word_lower] + " (" + word.strip(",.;:()[]{}\"'") + ")" + suffix
+    
+    return " ".join(words)
+
+def optimize_query(
+    original_query: str, 
+    category: str, 
+    vertical: Optional[str] = None,
+    include_all_keywords: bool = False
+) -> str:
+    """Create optimized queries for specific research categories with enhanced domain-specific terms."""
+    # Clean the original query
+    original_query = original_query.split("Additional context:")[0].strip()
+    
+    # Expanded acronyms for better search results
+    expanded_query = expand_acronyms(original_query)
+    
+    # Detect vertical if not provided
+    if vertical is None:
+        vertical = detect_vertical(original_query)
+    
+    # Get vertical-specific terms
+    vertical_terms = INDUSTRY_VERTICALS.get(vertical, [""])
+    
+    # Define enhanced category-specific query templates with keyword banks
+    query_templates = {
+        "market_dynamics": {
+            "template": "{primary_terms} market trends",
+            "keyword_groups": ["contracts", "procurement", "strategy"]
+        },
+        "provider_landscape": {
+            "template": "{primary_terms} vendors suppliers",
+            "keyword_groups": ["suppliers", "rfp", "strategy"]
+        },
+        "technical_requirements": {
+            "template": "{primary_terms} technical specifications",
+            "keyword_groups": ["rfp", "procurement", "risk"]
+        },
+        "regulatory_landscape": {
+            "template": "{primary_terms} regulations compliance",
+            "keyword_groups": ["contracts", "risk", "process"]
+        },
+        "cost_considerations": {
+            "template": "{primary_terms} pricing cost budget",
+            "keyword_groups": ["pricing", "payment", "strategy"]
+        },
+        "best_practices": {
+            "template": "{primary_terms} best practices",
+            "keyword_groups": ["strategy", "risk", "process"]
+        },
+        "implementation_factors": {
+            "template": "{primary_terms} implementation factors",
+            "keyword_groups": ["procurement", "suppliers", "risk"]
+        }
+    }
+    
+    # Extract primary terms from the query (filter out common words)
+    words = expanded_query.split()
+    stop_words = ["help", "me", "research", "find", "information", "about", "on", "for", 
+                  "the", "and", "or", "in", "to", "with", "by", "is", "are"]
+    
+    primary_terms = []
+    for word in words:
+        if word.lower() not in stop_words and len(word) > 3:
+            primary_terms.append(word)
+            # Limit to first 3-4 meaningful terms
+            if len(primary_terms) >= 4:
+                break
+    
+    # If no primary terms found, use the whole query up to a limit
+    if not primary_terms:
+        primary_terms = words[:3]
+    
+    # Get template for this category
+    if category not in query_templates:
+        return " ".join(primary_terms)
+    
+    template = query_templates[category]["template"]
+    
+    # Get procurement terms for this category (but use fewer to keep query simple)
+    procurement_terms = []
+    if include_all_keywords:
+        # Include more keywords for comprehensive searches but still limit
+        for group, terms in PROCUREMENT_TERMS.items():
+            if group in query_templates[category]["keyword_groups"]:
+                procurement_terms.append(terms[0])  # Just top 1 term from each group
+    else:
+        # Include only minimal keyword groups
+        keyword_groups = query_templates[category]["keyword_groups"]
+        if keyword_groups:
+            top_group = keyword_groups[0]
+            if top_group in PROCUREMENT_TERMS:
+                procurement_terms.append(PROCUREMENT_TERMS[top_group][0])  # Just top term
+    
+    # Format the template with just essential terms
+    primary_terms_str = " ".join(primary_terms)
+    
+    optimized_query = template.format(
+        primary_terms=primary_terms_str
+    )
+    
+    # Add at most one procurement term if we need to for context
+    if procurement_terms:
+        optimized_query += " " + procurement_terms[0]
+        
+    # Add at most one vertical term if needed
+    if vertical != "general" and vertical_terms:
+        optimized_query += " " + vertical_terms[0]
+    
+    # Ensure the query isn't too long for search engines
+    if len(optimized_query) > 100:
+        optimized_query = optimized_query[:100].rsplit(' ', 1)[0]
+    
+    return optimized_query
+</file>
+
+<file path="src/react_agent/prompts/reflection.py">
+"""Reflection and critique prompts.
+
+This module provides functionality for reflection and critique prompts
+in the agent framework.
+"""
+
+from typing import Final
+
+# Reflection prompt
+# Parameters:
+#   current_state: The current state of the agent
+#   validation_targets: List of targets to validate
+REFLECTION_PROMPT: Final[
+    str
+] = """You are a Reflection Agent responsible for validating research findings and preventing hallucinations.
+Your tasks include:
+
+1. Citation Validation
+- Check all URLs for validity (no 404s)
+- Verify source credibility
+- Ensure citation dates are recent
+
+2. Confidence Scoring
+- Evaluate research findings confidence (threshold: 98%)
+- Score market data reliability
+- Assess source quality
+
+3. Structured Output Validation
+- Verify all required fields are populated
+- Check data format consistency
+- Validate numerical values
+
+4. Quality Control
+- Flag potential hallucinations
+- Identify data gaps
+- Request additional research if needed
+
+Current state: {current_state}
+Validation targets: {validation_targets}
+"""
+</file>
+
+<file path="src/react_agent/prompts/research.py">
+"""Enhanced research-specific prompts.
+
+This module provides specialized prompts for different research categories
+to improve extraction quality and relevance.
+"""
+
+from typing import Final, Dict, List, Any, Optional, Union
+import json
+from datetime import datetime
+
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight
+from react_agent.utils.defaults import get_default_extraction_result
+
+# Initialize logger
+logger = get_logger(__name__)
+
+# Base templates for common validation requirements
+STRUCTURED_OUTPUT_VALIDATION: Final[str] = """CRITICAL: All responses MUST:
+1. Be valid JSON only - no additional text or comments
+2. Follow the exact schema provided
+3. Never return empty or null values - use empty strings or arrays instead
+4. Include all required fields
+5. Use proper data types (strings, numbers, arrays)
+6. Maintain proper JSON syntax
+7. Include citations for all data points
+8. Pass JSON schema validation
+
+Any response that fails these requirements will be rejected."""
+
+# Enhanced query analysis prompt with improved categorization and structure
+QUERY_ANALYSIS_PROMPT: Final[str] = """Analyze the following research query to generate targeted search terms.
+
+Query: {query}
+
+TASK:
+Break down this query into precise search components following these rules:
+1. Use the UNSPSC taxonomy to identify relevant procurement categories
+2. Extract no more than 3-5 focused keywords per category
+3. Prioritize specificity over quantity
+4. Identify the specific industry verticals, markets, and sectors
+5. Determine geographical scope if relevant
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+    "unspsc_categories": [
+        {{"code": "code", "name": "category name", "relevance": 0.0-1.0}}
+    ],
+    "search_components": {{
+        "primary_topic": "", 
+        "industry": "",
+        "product_type": "",
+        "geographical_focus": ""
+    }},
+    "search_terms": {{
+        "market_dynamics": [],
+        "provider_landscape": [],
+        "technical_requirements": [],
+        "regulatory_landscape": [],
+        "cost_considerations": [],
+        "best_practices": [],
+        "implementation_factors": []
+    }},
+    "boolean_query": "",
+    "missing_context": []
+}}
+
+IMPORTANT: 
+- Keep each category to a MAXIMUM of 5 focused search terms
+- Only include truly essential items in "missing_context" - make reasonable assumptions
+- For "boolean_query" create a precise search string using AND/OR operators
+- Assign relevance scores (0.0-1.0) to each UNSPSC category
+- Your response must be valid JSON with all fields present
+- Do not include any comments or additional text in the JSON response
+"""
+
+# Specialized extraction prompts for different research categories
+EXTRACTION_PROMPTS: Dict[str, str] = {
+    "market_dynamics": """Extract factual information about MARKET DYNAMICS from this content about {query}.
+
+URL: {url}
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about market size, growth rates, trends, forecasts, competitive dynamics, and procurement patterns
+2. Format each fact with:
+   - The fact statement
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If the document doesn't contain relevant market data, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_facts": [
+    {{
+      "fact": "Clear factual statement about market dynamics",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low",
+      "data_type": "market_size/growth_rate/trend/forecast/competitive/procurement_pattern"
+    }}
+  ],
+  "market_metrics": {{
+    "market_size": null,  // Include if available with units
+    "growth_rate": null,  // Include if available with time period
+    "forecast_period": null,  // Include if available
+    "procurement_volume": null,  // Include if available
+    "contract_value": null  // Include if available
+  }},
+  "relevance_score": 0.0-1.0
+}}
+""",
+
+    "provider_landscape": """Extract factual information about PROVIDERS/VENDORS from this content about {query}.
+
+URL: {url}
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about vendors, suppliers, service providers, manufacturers, distributors, and market players
+2. Format each fact with:
+   - The vendor name and specific details
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no vendor information is found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_vendors": [
+    {{
+      "vendor_name": "Name of vendor",
+      "description": "What they provide",
+      "market_position": "leader/challenger/niche",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low",
+      "contract_status": "active/expired/pending",
+      "contract_terms": "Key contract terms if available",
+      "pricing_model": "Pricing structure if available"
+    }}
+  ],
+  "vendor_relationships": [
+    {{
+      "relationship_type": "partnership/competition/acquisition/contract",
+      "entities": ["vendor1", "vendor2"],
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low",
+      "contract_details": "Contract details if available"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+""",
+
+    "technical_requirements": """Extract factual information about TECHNICAL REQUIREMENTS from this content about {query}.
+
+URL: {url}
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about specifications, standards, technologies, and requirements
+2. Format each fact with:
+   - The technical requirement or specification
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no technical information is found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_requirements": [
+    {{
+      "requirement": "Specific technical requirement",
+      "category": "hardware/software/compliance/integration/performance",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "standards": [
+    {{
+      "standard_name": "Name of standard or protocol",
+      "description": "Brief description",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+""",
+
+    "regulatory_landscape": """Extract factual information about REGULATIONS & COMPLIANCE from this content about {query}.
+
+URL: {url}
+
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about regulations, laws, compliance requirements, and standards
+2. Format each regulation with:
+   - The regulation name and jurisdiction
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no regulatory information is found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_regulations": [
+    {{
+      "regulation": "Name of regulation/law/standard",
+      "jurisdiction": "Geographical or industry scope",
+      "description": "Brief description of requirement",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "compliance_requirements": [
+    {{
+      "requirement": "Specific compliance requirement",
+      "description": "What must be done",
+      "source_text": "Direct quote from content", 
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every regulation and requirement
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
+11. Ensure all JSON objects are properly closed with matching braces
+12. Do not include any line breaks or whitespace outside the JSON structure
+13. Do not include any markdown code block markers (```)
+14. Do not include any explanatory text before or after the JSON
+15. The response must start with '{{' and end with '}}' only
+16. Do not include any text that would make the JSON invalid
+17. Do not include any text that would make the JSON parsing fail
+18. Do not include any text that would make the JSON validation fail
+19. Do not include any text that would make the JSON schema validation fail
+20. Do not include any text that would make the JSON structure invalid
+
+EXAMPLE OF VALID RESPONSE:
+{{
+  "extracted_regulations": [
+    {{
+      "regulation": "Example Regulation",
+      "jurisdiction": "Example Jurisdiction",
+      "description": "Example description",
+      "source_text": "Example quote",
+      "confidence": "high"
+    }}
+  ],
+  "compliance_requirements": [
+    {{
+      "requirement": "Example requirement",
+      "description": "Example description",
+      "source_text": "Example quote",
+      "confidence": "high"
+    }}
+  ],
+  "relevance_score": 0.8
+}}
+
+CRITICAL: Your response must be ONLY the JSON object above, with no additional text, comments, or formatting. The response must start with '{{' and end with '}}' only.""",
+
+    "cost_considerations": """Extract factual information about COSTS & PRICING from this content about {query}.
+
+URL: {url}
+
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about pricing, costs, budgets, TCO, ROI, and financial considerations
+2. Format each fact with:
+   - The specific cost information
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no cost information is found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_costs": [
+    {{
+      "cost_item": "Specific cost element",
+      "amount": null,  // Include if available with currency
+      "context": "Description of pricing context",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "pricing_models": [
+    {{
+      "model_type": "subscription/one-time/usage-based/etc",
+      "description": "How the pricing works",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every cost and pricing model
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
+""",
+
+    "best_practices": """Extract factual information about BEST PRACTICES from this content about {query}.
+
+URL: {url}
+
+CRITICAL: Your response must be a valid JSON object starting with '{{' and ending with '}}'. Do not include any additional text, explanations, or markdown formatting.
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED best practices, methodologies, and success factors
+2. Format each practice with:
+   - The specific practice or methodology
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no best practices are found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_practices": [
+    {{
+      "practice": "Specific best practice or methodology",
+      "description": "Detailed description",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "methodologies": [
+    {{
+      "methodology": "Name of methodology",
+      "description": "How it works",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+
+CRITICAL REQUIREMENTS:
+1. Response must be a valid JSON object
+2. All fields must be present (even if empty)
+3. Use proper data types (strings, numbers, arrays)
+4. Never use null values - use empty arrays instead
+5. Include source_text for every practice and methodology
+6. Assign confidence ratings for every item
+7. Calculate relevance_score based on content quality
+8. Do not include any text outside the JSON object
+9. Do not include comments or trailing commas
+10. Use double quotes for all strings
+""",
+
+    "implementation_factors": """Extract factual information about IMPLEMENTATION FACTORS from this content about {query}.
+
+URL: {url}
+
+INSTRUCTIONS:
+1. ONLY extract VERIFIED facts about implementation challenges, success factors, and considerations
+2. Format each factor with:
+   - The specific implementation factor
+   - Direct quote from the content supporting the fact
+   - Confidence rating (high/medium/low)
+3. If no implementation information is found, indicate this
+
+CONTENT:
+{content}
+
+FORMAT YOUR RESPONSE AS JSON:
+{{
+  "extracted_factors": [
+    {{
+      "factor": "Specific implementation factor",
+      "description": "Detailed description",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "challenges": [
+    {{
+      "challenge": "Specific implementation challenge",
+      "description": "What makes it challenging",
+      "source_text": "Direct quote from content",
+      "confidence": "high/medium/low"
+    }}
+  ],
+  "relevance_score": 0.0-1.0
+}}
+"""
+}
+
+# Enhanced synthesis prompt with better structure
+SYNTHESIS_PROMPT: Final[str] = """Create a comprehensive synthesis of research findings for: {query}
+
+REQUIREMENTS:
+1. Structure your synthesis with these EXACT sections:
+   - Domain Overview: Essential context and background
+   - Market Dynamics: Size, growth, trends, competition, procurement patterns
+   - Provider Landscape: Key vendors, manufacturers, distributors, and their positioning
+   - Technical Requirements: Specifications, standards, and procurement requirements
+   - Regulatory Landscape: Compliance, legal requirements, and procurement regulations
+   - Implementation Factors: Resources, process, challenges, and procurement considerations
+   - Cost Analysis: Pricing, ROI, financial factors, volume discounts, and contract terms
+   - Best Practices: Recommended approaches for procurement and sourcing
+   - Contract & Procurement Strategy: Contract terms, negotiation strategies, and procurement processes
+
+2. For EACH section:
+   - Synthesize insights from multiple sources when available
+   - Address inconsistencies and note knowledge gaps
+   - Include SPECIFIC facts with proper citations
+   - Present balanced perspectives where there are differences
+   - Prioritize VERIFIED information from authoritative sources
+   - If information is missing for any section, explicitly note this
+
+3. For "Confidence Assessment":
+   - Evaluate information completeness for each section
+   - Identify potential biases in the sources
+   - Note limitations in the research
+   - Assign justified confidence scores by section
+
+AVAILABLE RESEARCH:
+{research_json}
+
+FORMAT RESPONSE AS JSON:
+{{
+  "synthesis": {{
+    "domain_overview": {{ "content": "", "citations": [] }},
+    "market_dynamics": {{ "content": "", "citations": [] }},
+    "provider_landscape": {{ "content": "", "citations": [] }},
+    "technical_requirements": {{ "content": "", "citations": [] }},
+    "regulatory_landscape": {{ "content": "", "citations": [] }},
+    "implementation_factors": {{ "content": "", "citations": [] }},
+    "cost_considerations": {{ "content": "", "citations": [] }},
+    "best_practices": {{ "content": "", "citations": [] }},
+    "contract_procurement_strategy": {{ "content": "", "citations": [] }}
+  }},
+  "confidence_assessment": {{
+    "overall_score": 0.0-1.0,
+    "section_scores": {{
+      "domain_overview": 0.0-1.0,
+      "market_dynamics": 0.0-1.0,
+      "provider_landscape": 0.0-1.0,
+      "technical_requirements": 0.0-1.0,
+      "regulatory_landscape": 0.0-1.0,
+      "implementation_factors": 0.0-1.0,
+      "cost_considerations": 0.0-1.0,
+      "best_practices": 0.0-1.0,
+      "contract_procurement_strategy": 0.0-1.0
+    }},
+    "limitations": [],
+    "knowledge_gaps": []
+  }}
+}}
+
+REMEMBER:
+- Prioritize factual accuracy over comprehensiveness
+- Only include claims that are supported by the research
+- Use clear, concise language focused on business impact
+- Highlight conflicting information when present
+- Pay special attention to procurement and sourcing-related insights
+"""
+
+# Enhanced validation prompt with adaptive thresholds
+VALIDATION_PROMPT: Final[str] = """Validate the research synthesis against these criteria:
+
+VALIDATION CRITERIA:
+1. Factual Accuracy
+   - Does each claim have proper citation?
+   - Are the citations from credible sources?
+   - Are claims consistent with the source material?
+
+2. Comprehensive Coverage
+   - Are all required sections populated?
+   - Is the depth appropriate for each section?
+   - Are there any significant knowledge gaps?
+
+3. Source Quality
+   - Are sources diverse and authoritative?
+   - Are recent sources used where appropriate?
+   - Is there over-reliance on any single source?
+
+4. Overall Quality
+   - Is confidence assessment realistic?
+   - Are limitations properly acknowledged?
+   - Is the synthesis balanced and objective?
+
+RESEARCH SYNTHESIS TO VALIDATE:
+{synthesis_json}
+
+FORMAT RESPONSE AS JSON:
+{{
+  "validation_results": {{
+    "is_valid": true/false,
+    "validation_score": 0.0-1.0,
+    "section_validations": {{
+      "domain_overview": {{ "is_valid": true/false, "issues": [] }},
+      "market_dynamics": {{ "is_valid": true/false, "issues": [] }},
+      "provider_landscape": {{ "is_valid": true/false, "issues": [] }},
+      "technical_requirements": {{ "is_valid": true/false, "issues": [] }},
+      "regulatory_landscape": {{ "is_valid": true/false, "issues": [] }},
+      "implementation_factors": {{ "is_valid": true/false, "issues": [] }},
+      "cost_considerations": {{ "is_valid": true/false, "issues": [] }},
+      "best_practices": {{ "is_valid": true/false, "issues": [] }}
+    }},
+    "critical_issues": [],
+    "improvement_suggestions": []
+  }},
+  "adaptive_threshold": {{
+    "minimum_valid_sections": 0-8,
+    "required_sections": [],
+    "section_weights": {{
+      "domain_overview": 0.0-1.0,
+      "market_dynamics": 0.0-1.0,
+      "provider_landscape": 0.0-1.0,
+      "technical_requirements": 0.0-1.0,
+      "regulatory_landscape": 0.0-1.0,
+      "implementation_factors": 0.0-1.0,
+      "cost_considerations": 0.0-1.0,
+      "best_practices": 0.0-1.0
+    }}
+  }}
+}}
+
+IMPORTANT:
+- Calculate "minimum_valid_sections" based on query complexity and available data
+- Identify critical sections as "required_sections" based on query intent
+- Assign weights to sections based on importance to the query
+- A synthesis can be valid even with some sections incomplete if priority sections are solid
+- Flag fabricated or unsupported claims as critical issues
+"""
+
+# Enhanced report template with executive summary format
+REPORT_TEMPLATE: Final[str] = """
+# Research Report: {query}
+
+## Executive Summary
+{executive_summary}
+
+## Key Findings
+{key_findings}
+
+## Detailed Analysis
+
+### Market Dynamics
+{market_dynamics}
+
+### Provider Landscape
+{provider_landscape}
+
+### Technical Requirements
+{technical_requirements}
+
+### Regulatory Landscape
+{regulatory_landscape}
+
+### Implementation Considerations
+{implementation_factors}
+
+### Cost Analysis
+{cost_considerations}
+
+### Best Practices
+{best_practices}
+
+### Contract & Procurement Strategy
+{contract_procurement_strategy}
+
+## Recommendations
+{recommendations}
+
+## Sources and Citations
+{sources}
+
+---
+Confidence Score: {confidence_score}
+Generated: {generation_date}
+"""
+
+# Enhanced clarity request prompt
+CLARIFICATION_PROMPT: Final[str] = """I'm analyzing your research request: "{query}"
+
+Based on my initial analysis, I need some additional context to provide you with the most relevant research.
+
+What I understand so far:
+- Product/Service Focus: {product_vs_service}
+- Industry Context: {industry_context}
+- Geographical Scope: {geographical_focus}
+
+To deliver more precise and comprehensive research, I need clarification on:
+
+{missing_sections}
+
+Could you please provide these additional details? This will help me focus the research on your specific needs rather than making assumptions.
+
+Even with partial clarification, I can begin the research process and refine as we go."""
+
+# Category-specific search quality thresholds
+SEARCH_QUALITY_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "market_dynamics": {
+        "min_sources": 3,
+        "min_facts": 5,
+        "recency_threshold_days": 180,  # Market data needs to be recent
+        "authoritative_source_ratio": 0.5  # At least half from authoritative sources
+    },
+    "provider_landscape": {
+        "min_sources": 3,
+        "min_facts": 3,
+        "recency_threshold_days": 365,
+        "authoritative_source_ratio": 0.3
+    },
+    "technical_requirements": {
+        "min_sources": 2,
+        "min_facts": 3,
+        "recency_threshold_days": 730,  # Technical specs can be older
+        "authoritative_source_ratio": 0.7  # Need highly authoritative sources
+    },
+    "regulatory_landscape": {
+        "min_sources": 2,
+        "min_facts": 2,
+        "recency_threshold_days": 730,
+        "authoritative_source_ratio": 0.8  # Regulatory info needs official sources
+    },
+    "cost_considerations": {
+        "min_sources": 2,
+        "min_facts": 3,
+        "recency_threshold_days": 365,  # Pricing should be recent
+        "authoritative_source_ratio": 0.4
+    },
+    "best_practices": {
+        "min_sources": 2,
+        "min_facts": 3,
+        "recency_threshold_days": 730,
+        "authoritative_source_ratio": 0.5
+    },
+    "implementation_factors": {
+        "min_sources": 2,
+        "min_facts": 3,
+        "recency_threshold_days": 730,
+        "authoritative_source_ratio": 0.4
+    }
+}
+
+# Helper function for creating category-specific search prompts
+def get_extraction_prompt(category: str, query: str, url: str, content: str) -> str:
+    """Get the appropriate extraction prompt for a specific category."""
+    if category in EXTRACTION_PROMPTS:
+        prompt = EXTRACTION_PROMPTS[category]
+        return prompt.format(
+            query=query,
+            url=url,
+            content=content
+        )
+    else:
+        # Fallback to general extraction prompt
+        prompt = EXTRACTION_PROMPTS["market_dynamics"]
+        return prompt.format(
+            query=query,
+            url=url,
+            content=content
+        )
+
+# Prompt for identifying additional research topics
+ADDITIONAL_TOPICS_PROMPT: Final[str] = """Based on the current research findings, identify additional topics that would enhance the analysis.
+
+Current Research:
+{current_research}
+
+Consider:
+1. Related market segments or industries
+2. Emerging technologies or trends
+3. Regulatory or compliance areas
+4. Implementation considerations
+5. Cost factors
+6. Best practices
+
+Format your response as JSON:
+{
+    "additional_topics": [
+        {
+            "topic": "Topic name",
+            "relevance": 0.0-1.0,
+            "rationale": "Why this topic is important"
+        }
+    ],
+    "priority_order": ["topic1", "topic2", ...],
+    "estimated_effort": {
+        "topic1": "high/medium/low",
+        "topic2": "high/medium/low",
+        ...
+    }
+}"""
+
+# Base research prompt
+RESEARCH_BASE_PROMPT: Final[str] = """You are a Research Agent focused on gathering comprehensive market intelligence.
+
+Your task is to analyze the following query and provide detailed research findings.
+
+Query: {query}
+
+INSTRUCTIONS:
+1. Break down the query into research components
+2. Identify key areas for investigation
+3. Gather relevant market data
+4. Analyze trends and patterns
+5. Synthesize findings
+
+RESPONSE FORMAT:
+{
+    "research_components": ["Component 1", "Component 2"],
+    "key_findings": ["Finding 1", "Finding 2"],
+    "sources": ["Source 1", "Source 2"],
+    "confidence_score": 0.0
+}"""
+
+# Research agent prompt
+RESEARCH_AGENT_PROMPT: Final[str] = """You are an advanced Research Agent specialized in market analysis.
+
+Your task is to conduct comprehensive research on the following topic.
+
+Topic: {topic}
+
+INSTRUCTIONS:
+1. Identify key research areas
+2. Gather market intelligence
+3. Analyze trends and patterns
+4. Evaluate sources and credibility
+5. Synthesize findings
+
+RESPONSE FORMAT:
+{
+    "research_areas": ["Area 1", "Area 2"],
+    "findings": ["Finding 1", "Finding 2"],
+    "sources": ["Source 1", "Source 2"],
+    "confidence_score": 0.0
+}"""
+
+# Topics prompt
+TOPICS_PROMPT: Final[str] = """Analyze the following query to identify key research topics.
+
+Query: {query}
+
+INSTRUCTIONS:
+1. Break down the query into main topics
+2. Identify subtopics for each main topic
+3. Prioritize topics by relevance
+4. Consider industry context
+5. Note any specialized areas
+
+RESPONSE FORMAT:
+{
+    "main_topics": ["Topic 1", "Topic 2"],
+    "subtopics": {
+        "Topic 1": ["Subtopic 1", "Subtopic 2"],
+        "Topic 2": ["Subtopic 1", "Subtopic 2"]
+    },
+    "priority_order": ["Topic 1", "Topic 2"],
+    "specialized_areas": ["Area 1", "Area 2"]
+}"""
+
+# Export all prompts and utilities
+__all__ = [
+    "STRUCTURED_OUTPUT_VALIDATION",
+    "QUERY_ANALYSIS_PROMPT",
+    "EXTRACTION_PROMPTS",
+    "SYNTHESIS_PROMPT",
+    "VALIDATION_PROMPT",
+    "REPORT_TEMPLATE",
+    "CLARIFICATION_PROMPT",
+    "SEARCH_QUALITY_THRESHOLDS",
+    "get_extraction_prompt",
+    "ADDITIONAL_TOPICS_PROMPT",
+    "RESEARCH_BASE_PROMPT",
+    "RESEARCH_AGENT_PROMPT",
+    "TOPICS_PROMPT"
+]
+</file>
+
+<file path="src/react_agent/prompts/synthesis.py">
+"""Enhanced synthesis and output module.
+
+This module provides improved synthesis and output formatting capabilities
+to create more thorough, insightful and verbose research reports with 
+better statistics integration and citation handling.
+"""
+
+from typing import Dict, List, Any, Optional, Union, Tuple
+import json
+from datetime import datetime, timezone
+import re
+
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
+
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
+from react_agent.utils.llm import call_model_json
+from react_agent.utils.extraction import extract_statistics
+from react_agent.utils.defaults import get_default_extraction_result
+from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
+
+# Initialize logger
+logger = get_logger(__name__)
+
+# Initialize processor cache for synthesis
+synthesis_cache = ProcessorCache(thread_id="synthesis")
+
+# Initialize memory saver for caching
+memory_saver = MemorySaver()
+
+# Enhanced synthesis prompt template
+ENHANCED_SYNTHESIS_PROMPT = """Create a comprehensive synthesis of research findings for: {query}
+
+REQUIREMENTS:
+1. Structure your synthesis with these EXACT sections:
+   - Executive Summary: Concise overview of key findings with critical statistics
+   - Domain Overview: Essential context and background with industry statistics
+   - Market Dynamics: Size, growth, trends, competition, procurement patterns with market statistics
+   - Provider Landscape: Key vendors, manufacturers, distributors, and their positioning with market share data
+   - Technical Requirements: Specifications, standards, and procurement requirements with technical statistics
+   - Regulatory Landscape: Compliance, legal requirements, and procurement regulations with compliance data
+   - Implementation Factors: Resources, process, challenges, and procurement considerations with implementation statistics
+   - Cost Analysis: Pricing, ROI, financial factors, volume discounts, and contract terms with financial metrics
+   - Best Practices: Recommended approaches for procurement and sourcing with adoption statistics
+   - Contract & Procurement Strategy: Contract terms, negotiation strategies, and procurement processes with benchmarks
+
+2. For EACH section:
+   - Synthesize insights from multiple sources when available
+   - Prioritize STATISTICAL information and NUMERICAL data
+   - Include specific PERCENTAGES, AMOUNTS, and METRICS
+   - Address inconsistencies and note knowledge gaps
+   - Include SPECIFIC facts with proper citations
+   - Present balanced perspectives where there are differences
+   - Prioritize VERIFIED information from authoritative sources
+   - If information is missing for any section, explicitly note this
+
+3. For "Confidence Assessment":
+   - Evaluate information completeness for each section
+   - Identify potential biases in the sources
+   - Note limitations in the research
+   - Assign justified confidence scores by section
+   - Provide specific reasons for confidence ratings
+
+AVAILABLE RESEARCH:
+{research_json}
+
+FORMAT RESPONSE AS JSON:
+{{
+  "synthesis": {{
+    "executive_summary": {{ "content": "", "citations": [], "statistics": [] }},
+    "domain_overview": {{ "content": "", "citations": [], "statistics": [] }},
+    "market_dynamics": {{ "content": "", "citations": [], "statistics": [] }},
+    "provider_landscape": {{ "content": "", "citations": [], "statistics": [] }},
+    "technical_requirements": {{ "content": "", "citations": [], "statistics": [] }},
+    "regulatory_landscape": {{ "content": "", "citations": [], "statistics": [] }},
+    "implementation_factors": {{ "content": "", "citations": [], "statistics": [] }},
+    "cost_considerations": {{ "content": "", "citations": [], "statistics": [] }},
+    "best_practices": {{ "content": "", "citations": [], "statistics": [] }},
+    "contract_procurement_strategy": {{ "content": "", "citations": [], "statistics": [] }}
+  }},
+  "confidence_assessment": {{
+    "overall_score": 0.0-1.0,
+    "section_scores": {{
+      "executive_summary": 0.0-1.0,
+      "domain_overview": 0.0-1.0,
+      "market_dynamics": 0.0-1.0,
+      "provider_landscape": 0.0-1.0,
+      "technical_requirements": 0.0-1.0,
+      "regulatory_landscape": 0.0-1.0,
+      "implementation_factors": 0.0-1.0,
+      "cost_considerations": 0.0-1.0,
+      "best_practices": 0.0-1.0,
+      "contract_procurement_strategy": 0.0-1.0
+    }},
+    "limitations": [],
+    "knowledge_gaps": [],
+    "confidence_justifications": {{
+      "executive_summary": "",
+      "domain_overview": "",
+      "market_dynamics": "",
+      "provider_landscape": "",
+      "technical_requirements": "",
+      "regulatory_landscape": "",
+      "implementation_factors": "",
+      "cost_considerations": "",
+      "best_practices": "",
+      "contract_procurement_strategy": ""
+    }}
+  }}
+}}
+
+REMEMBER:
+- Prioritize statistical data and numerical findings
+- Include specific numbers, percentages, and metrics
+- Emphasize recent studies, surveys, and market reports
+- Highlight data from industry-leading sources
+- Only include claims that are supported by the research
+- Use clear, concise language focused on business impact
+- Highlight conflicting information when present
+- Pay special attention to procurement and sourcing-related insights
+"""
+
+# Enhanced report template with better statistics and citations
+ENHANCED_REPORT_TEMPLATE = """
+# {title}
+
+## Executive Summary
+{executive_summary}
+
+## Key Findings & Statistics
+{key_statistics}
+
+## Domain Overview
+{domain_overview}
+
+## Market Analysis
+### Market Size & Growth
+{market_size}
+
+### Competitive Landscape
+{competitive_landscape}
+
+### Trends & Developments
+{market_trends}
+
+## Provider Landscape
+### Key Vendors
+{key_vendors}
+
+### Vendor Comparison
+{vendor_comparison}
+
+## Technical Requirements
+{technical_requirements}
+
+## Regulatory Considerations
+{regulatory_landscape}
+
+## Implementation Strategy
+{implementation_factors}
+
+## Cost Analysis
+### Cost Structure
+{cost_structure}
+
+### Pricing Models
+{pricing_models}
+
+### ROI Considerations
+{roi_considerations}
+
+## Best Practices
+{best_practices}
+
+## Procurement Strategy
+{procurement_strategy}
+
+## Recommendations
+{recommendations}
+
+## Sources & Citations
+{sources}
+
+---
+**Research Confidence:** {confidence_score}/1.0  
+**Date Generated:** {generation_date}  
+{confidence_notes}
+"""
+
+def extract_all_statistics(synthesis: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract all statistics from synthesis results."""
+    all_stats = []
+    
+    for section_name, section_data in synthesis.items():
+        if isinstance(section_data, dict) and "statistics" in section_data:
+            stats = section_data.get("statistics", [])
+            if stats and isinstance(stats, list):
+                for stat in stats:
+                    if isinstance(stat, dict):
+                        # Add section name to statistic
+                        stat["section"] = section_name
+                        all_stats.append(stat)
+    
+    # Sort by quality score if available
+    sorted_stats = sorted(
+        all_stats,
+        key=lambda x: x.get("quality_score", 0),
+        reverse=True
+    )
+    
+    return sorted_stats
+
+def format_citation(citation: Dict[str, Any]) -> str:
+    """Format a citation for inclusion in the report."""
+    if not citation or not isinstance(citation, dict):
+        return ""
+        
+    title = citation.get("title", "")
+    source = citation.get("source", "")
+    url = citation.get("url", "")
+    date = citation.get("date", "")
+    
+    if title and source:
+        return f"{title} ({source}{', ' + date if date else ''})"
+    elif title:
+        return title
+    elif source:
+        return source
+    elif url:
+        return url
+    else:
+        return "Unnamed source"
+
+def format_statistic(stat: Dict[str, Any]) -> str:
+    """Format a statistic for inclusion in the report."""
+    if not stat or not isinstance(stat, dict):
+        return ""
+        
+    text = stat.get("text", "")
+    citation = ""
+    
+    # Add citation if available
+    citations = stat.get("citations", [])
+    if citations and isinstance(citations, list) and len(citations) > 0:
+        first_citation = citations[0]
+        if isinstance(first_citation, dict):
+            source = first_citation.get("source", "")
+            if source:
+                citation = f" ({source})"
+    
+    return f"{text}{citation}"
+
+def highlight_statistics_in_content(content: str, statistics: List[Dict[str, Any]]) -> str:
+    """Highlight statistics in content with bold formatting."""
+    if not content or not statistics:
+        return content
+        
+    highlighted_content = content
+    
+    for stat in statistics:
+        if isinstance(stat, dict) and "text" in stat:
+            text = stat.get("text", "")
+            if text and text in highlighted_content:
+                # Highlight the statistic with bold formatting
+                highlighted_content = highlighted_content.replace(text, f"**{text}**")
+    
+    return highlighted_content
+
+async def synthesize_research(
+    state: Dict[str, Any],
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Synthesize all research data into a comprehensive result with enhanced statistics focus."""
+    info_highlight("Synthesizing research results with enhanced statistics focus")
+    
+    try:
+        # Check cache with TTL
+        cache_key = f"synthesize_research_{hash(str(state))}"
+        if cached_state := synthesis_cache.get(cache_key):
+            if cached_state.get("data"):
+                return cached_state["data"]
+        
+        categories = state["categories"]
+        original_query = state["original_query"]
+        
+        # Prepare research data for synthesis
+        research_data = {}
+        for category, category_state in categories.items():
+            # Extract statistics from facts
+            statistics = []
+            for fact in category_state.get("extracted_facts", []):
+                if "statistics" in fact:
+                    statistics.extend(fact["statistics"])
+                elif "source_text" in fact:
+                    # Extract statistics from source text
+                    extracted_stats = extract_statistics(fact["source_text"])
+                    statistics.extend(extracted_stats)
+            
+            research_data[category] = {
+                "facts": category_state["extracted_facts"],
+                "sources": category_state["sources"],
+                "quality_score": category_state["quality_score"],
+                "statistics": statistics  # Add extracted statistics
+            }
+        
+        # Generate prompt
+        synthesis_prompt = ENHANCED_SYNTHESIS_PROMPT.format(
+            query=original_query,
+            research_json=json.dumps(research_data, indent=2)
+        )
+        
+        # Call model for synthesis
+        synthesis_result = await call_model_json(
+            messages=[{"role": "human", "content": synthesis_prompt}],
+            config=config
+        )
+        
+        # Extract key statistics for reference
+        synthesis_sections = synthesis_result.get("synthesis", {})
+        all_statistics = extract_all_statistics(synthesis_sections)
+        synthesis_result["key_statistics"] = all_statistics[:10]  # Top 10 statistics
+        
+        overall_score = synthesis_result.get("confidence_assessment", {}).get("overall_score", 0.0)
+        info_highlight(f"Research synthesis complete with confidence score: {overall_score:.2f}")
+        
+        result = {
+            "synthesis": synthesis_result,
+            "status": "synthesized"
+        }
+        
+        # Cache result with TTL
+        synthesis_cache.put(
+            cache_key,
+            {
+                "data": result,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            ttl=3600  # 1 hour TTL
+        )
+        
+        return result
+        
+    except Exception as e:
+        error_highlight(f"Error in research synthesis: {str(e)}")
+        return {"error": {"message": f"Error in research synthesis: {str(e)}", "phase": "synthesis"}}
+
+async def prepare_enhanced_response(
+    state: Dict[str, Any],
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Prepare an enhanced final response with detailed statistics and citations."""
+    info_highlight("Preparing enhanced final response")
+    
+    synthesis = state.get("synthesis", {})
+    validation = state.get("validation_result", {})
+    original_query = state["original_query"]
+    
+    # Get synthesis content
+    synthesis_content = synthesis.get("synthesis", {}) if synthesis else {}
+    confidence = synthesis.get("confidence_assessment", {}) if synthesis else {}
+    
+    # Get all statistics
+    all_statistics = synthesis.get("key_statistics", []) if synthesis else []
+    
+    # Format the title with proper capitalization
+    title = "Research Results: " + original_query.capitalize()
+    
+    # Format each section with highlighted statistics
+    sections = {}
+    for section_name, section_data in synthesis_content.items():
+        if isinstance(section_data, dict) and "content" in section_data:
+            content = section_data.get("content", "")
+            statistics = section_data.get("statistics", [])
+            
+            # Highlight statistics in content
+            highlighted_content = highlight_statistics_in_content(content, statistics)
+            
+            # Add citations
+            citations = section_data.get("citations", [])
+            if citations and isinstance(citations, list) and len(citations) > 0:
+                citation_text = "\n\n**Sources:** " + ", ".join(
+                    format_citation(citation) for citation in citations if citation
+                )
+                sections[section_name] = highlighted_content + citation_text
+            else:
+                sections[section_name] = highlighted_content
+    
+    # Format key statistics section
+    key_stats_formatted = []
+    for stat in all_statistics:
+        formatted_stat = format_statistic(stat)
+        if formatted_stat:
+            key_stats_formatted.append(f"- {formatted_stat}")
+    
+    key_statistics_section = "\n".join(key_stats_formatted) if key_stats_formatted else "No key statistics available."
+    
+    # Format sources section
+    sources_set = set()
+    for section_data in synthesis_content.values():
+        if isinstance(section_data, dict) and "citations" in section_data:
+            citations = section_data.get("citations", [])
+            for citation in citations:
+                if isinstance(citation, dict):
+                    formatted = format_citation(citation)
+                    if formatted:
+                        sources_set.add(formatted)
+    
+    sources_list = sorted(list(sources_set))
+    sources_section = "\n".join(f"- {source}" for source in sources_list) if sources_list else "No sources available."
+    
+    # Get confidence information
+    confidence_score = confidence.get("overall_score", 0.0)
+    limitations = confidence.get("limitations", [])
+    knowledge_gaps = confidence.get("knowledge_gaps", [])
+    
+    # Format confidence notes
+    confidence_notes = []
+    if limitations:
+        confidence_notes.append("**Limitations:** " + ", ".join(limitations))
+    if knowledge_gaps:
+        confidence_notes.append("**Knowledge Gaps:** " + ", ".join(knowledge_gaps))
+    
+    confidence_notes_text = "\n".join(confidence_notes)
+    
+    # Generate recommendations based on synthesis
+    recommendations = await generate_recommendations(synthesis_content, original_query, config)
+    
+    # Fill in the template
+    report_content = ENHANCED_REPORT_TEMPLATE.format(
+        title=title,
+        executive_summary=sections.get("executive_summary", "No executive summary available."),
+        key_statistics=key_statistics_section,
+        domain_overview=sections.get("domain_overview", "No domain overview available."),
+        market_size=sections.get("market_dynamics", "No market dynamics information available."),
+        competitive_landscape=sections.get("provider_landscape", "No provider landscape information available."),
+        market_trends=sections.get("market_dynamics", "No market trends information available."),
+        key_vendors=sections.get("provider_landscape", "No vendor information available."),
+        vendor_comparison=sections.get("provider_landscape", "No vendor comparison available."),
+        technical_requirements=sections.get("technical_requirements", "No technical requirements information available."),
+        regulatory_landscape=sections.get("regulatory_landscape", "No regulatory information available."),
+        implementation_factors=sections.get("implementation_factors", "No implementation information available."),
+        cost_structure=sections.get("cost_considerations", "No cost structure information available."),
+        pricing_models=sections.get("cost_considerations", "No pricing models information available."),
+        roi_considerations=sections.get("cost_considerations", "No ROI considerations available."),
+        best_practices=sections.get("best_practices", "No best practices information available."),
+        procurement_strategy=sections.get("contract_procurement_strategy", "No procurement strategy information available."),
+        recommendations=recommendations,
+        sources=sources_section,
+        confidence_score=f"{confidence_score:.2f}",
+        generation_date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        confidence_notes=confidence_notes_text
+    )
+    
+    # Create the response message
+    response_message = AIMessage(content=report_content)
+    
+    return {
+        "messages": [response_message],
+        "status": "complete",
+        "complete": True
+    }
+
+async def generate_recommendations(
+    synthesis_content: Dict[str, Any],
+    query: str,
+    config: Optional[RunnableConfig] = None
+) -> str:
+    """Generate recommendations based on synthesis content."""
+    info_highlight("Generating recommendations based on synthesis")
+    
+    if not synthesis_content:
+        return "No recommendations available due to insufficient data."
+    
+    # Create a prompt for recommendations
+    recommendations_prompt = f"""
+    Based on the research synthesis for "{query}", generate 5-7 specific, actionable recommendations.
+    Each recommendation should:
+    1. Be specific and actionable
+    2. Reference relevant statistics or findings when available
+    3. Address a key need or gap identified in the research
+    4. Be practical and implementable
+    5. Include expected benefits or outcomes
+    
+    Synthesis data:
+    {json.dumps(synthesis_content, indent=2)}
+    
+    FORMAT:
+    Return a markdown list of recommendations with brief explanations.
+    """
+    
+    try:
+        response = await call_model_json(
+            messages=[{"role": "human", "content": recommendations_prompt}],
+            config=config
+        )
+        
+        if isinstance(response, dict) and "recommendations" in response:
+            return response["recommendations"]
+        elif isinstance(response, dict) and "content" in response:
+            return response["content"]
+        elif isinstance(response, str):
+            return response
+        else:
+            # Default format if response structure is unexpected
+            return "Recommendations could not be generated due to unexpected response format."
+    except Exception as e:
+        error_highlight(f"Error generating recommendations: {str(e)}")
+        return "Recommendations could not be generated due to an error."
+
+__all__ = [
+    "chunk_text",
+    "preprocess_content",
+    "estimate_tokens",
+    "should_skip_content",
+    "merge_chunk_results",
+    "validate_content",
+    "detect_content_type"
+]
+</file>
+
+<file path="src/react_agent/prompts/templates.py">
+"""Main prompt templates.
+
+This module provides functionality for main prompt templates
+in the agent framework.
+"""
+
+from typing import Final
+
+# Common validation template used across multiple prompts
+STRUCTURED_OUTPUT_VALIDATION: Final[str] = """CRITICAL: All responses MUST:
+1. Be valid JSON only - no additional text or comments
+2. Follow the exact schema provided
+3. Never return empty or null values
+4. Include all required fields
+5. Use proper data types (strings, numbers, arrays)
+6. Maintain proper JSON syntax
+7. Include citations for all data points
+8. Pass JSON schema validation
+
+Any response that fails these requirements will be rejected."""
+
+# Validation requirements component - reusable across prompts
+VALIDATION_REQUIREMENTS: Final[str] = """VALIDATION REQUIREMENTS:
+1. Structural Validation
+   - Verify JSON syntax is valid
+   - Check all required fields are present
+   - Ensure no empty or null values
+   - Validate data types match schema
+   - Check array elements follow required format
+
+2. Citation Validation
+   - Verify each citation URL exists and is accessible
+   - Ensure at least 2 citations per analysis section
+   - Validate source credibility and relevance
+   - Cross-reference data points across sources"""
+
+# Main prompt for the primary agent
+MAIN_PROMPT: Final[
+    str
+] = """You are conducting web research for RFP category analysis and market basket development.
+Your goal is to produce a structured JSON response following this exact schema:
+{
+    "rfp_analysis": {
+        "analysis": {
+            "porters_5_forces": {
+                "competitive_rivalry": "",
+                "threat_of_new_entrants": "",
+                "threat_of_substitutes": "",
+                "bargaining_power_buyers": "",
+                "bargaining_power_suppliers": ""
+            },
+            "swot": {
+                "strengths": [],
+                "weaknesses": [],
+                "opportunities": [],
+                "threats": []
+            },
+            "recent_breakthroughs_and_disruptors": "",
+            "cost_trends_and_projections": "",
+            "typical_contract_clauses_and_pricing_nuances": "",
+            "competitive_landscape": ""
+        },
+        "market_basket": [
+            {
+                "manufacturer_or_distributor": "",
+                "item_number": "",
+                "item_description": "",
+                "uom": "",
+                "estimated_qty_per_uom": 0.0,
+                "unit_cost": 0.0
+            }
+        ]
+    },
+    "confidence_score": 0.0
+}
+Category to analyze: {topic}
+IMPORTANT INSTRUCTIONS:
+1. Your response must be ONLY valid JSON - no additional text, comments or explanations
+2. Every field must be populated - no empty strings or null values
+3. If you cannot structure some information, include it under a "raw_findings" key
+4. Do not truncate or leave responses incomplete
+5. Ensure all JSON syntax is valid (quotes, commas, brackets)
+Available tools:
+1. Search: Query search engines for industry and market information
+2. ScrapeWebsite: Extract structured data from industry sources
+3. SummarizeResearch: Generate AI-powered summaries for complex topics
+4. SearchNews: Find recent news articles and industry developments
+5. Info: Compile and format final findings
+"""
+
+# Tool descriptions
+WEB_SEARCH_DESC: Final[str] = """Search the web for information about a topic.
+Input should be a search query string.
+Returns up to 3 search results with titles, URLs, and snippets."""
+
+SCRAPE_DESC: Final[str] = """Scrape content from a website URL.
+Input should be a valid URL.
+Returns the scraped content and metadata."""
+
+# New tool descriptions for Brave Summarizer and News APIs
+SUMMARIZER_DESC: Final[
+    str
+] = """Generate an AI-powered summary of search results for a topic.
+Input should be a search query string.
+Returns a comprehensive summary along with key topics and 5 source articles."""
+
+NEWS_SEARCH_DESC: Final[str] = """Search for recent news articles related to a topic.
+Input should be a search query string.
+Returns 5 news articles with titles, URLs, descriptions, and sources."""
+
+# Tool instructions for reuse across agent nodes
+TOOL_INSTRUCTIONS: Final[str] = """
+IMPORTANT:
+1. Use the search_web tool to find relevant information (returns 3 results per query)
+2. Use the search_news tool for recent developments and news (returns 5 results per query)
+3. Use the scrape_website tool to extract detailed content from websites
+4. Use the summarize_research tool to get AI-powered summaries of complex topics (returns 5 sources per query)
+5. Always include proper citations for all information
+6. Follow all research requirements in the prompt
+"""
+
+# Evaluation prompt template for content evaluation
+EVALUATION_PROMPT_TEMPLATE: Final[
+    str
+] = """You are an evaluation system that assesses the quality of AI responses.
+Review the following response and provide scores and feedback.
+
+Task description: {task_description}
+
+Response to evaluate:
+{response}
+
+Please evaluate this response on these criteria: {criteria}.
+For each criterion, provide a score from 0.0 to 1.0 and brief feedback."""
+
+# Reflection prompt templates
+FEEDBACK_PROMPT_TEMPLATE: Final[str] = """You are an AI improvement coach.
+Based on the critique and evaluation of a previous response, generate actionable feedback 
+to help improve future responses.
+
+Original task: {task}
+
+Previous response: {response}
+
+Critique: {critique}
+
+Evaluation scores: {scores}
+
+Generate specific, actionable feedback with examples of how to improve."""
+
+CRITIQUE_PROMPT_TEMPLATE: Final[str] = """You are an expert evaluator providing critique.
+Review the following response and provide detailed feedback.
+
+Task: {task}
+Response: {response}
+Evaluation criteria: {criteria}
+
+Provide specific critique points and actionable suggestions for improvement."""
+
+ANALOGICAL_REASONING_PROMPT: Final[str] = """You are an expert at improving solutions through analogical reasoning.
+
+Current task: {task}
+Current response: {response}
+Similar examples:
+{examples}
+
+Based on these examples, suggest improvements to the current response."""
+
+COUNTERFACTUAL_PROMPT: Final[str] = """You are an expert at generating counterfactual improvements.
+Consider 'what if' scenarios that could lead to better outcomes.
+
+Current response: {response}
+Areas for improvement: {areas}
+
+Generate counterfactual scenarios and corresponding improvements."""
+
+METACOGNITION_PROMPT: Final[str] = """You are an expert at analyzing thinking processes and cognitive patterns.
+Identify patterns, biases, and potential improvements in the reasoning process.
+
+Conversation history: {history}
+Current scores: {scores}
+Improvement areas: {areas}
+
+Analyze the thinking process and suggest meta-level improvements."""
+
+# Detailed feedback prompt templates
+DETAILED_FEEDBACK_PROMPT: Final[str] = """You are an AI improvement coach providing detailed feedback.
+Review the following response and generate specific, actionable feedback.
+
+CONTEXT:
+Original task: {task}
+Previous response: {response}
+Critique points: {critique}
+Current scores: {scores}
+
+REQUIREMENTS:
+1. Provide specific examples of what could be improved
+2. Suggest concrete implementation steps
+3. Reference similar successful approaches
+4. Highlight both strengths and areas for improvement
+5. Maintain constructive and actionable tone
+
+Generate detailed, actionable feedback that addresses:
+1. Content quality and accuracy
+2. Structure and organization
+3. Completeness and depth
+4. Implementation and practicality
+5. Overall effectiveness"""
+
+REFLECTION_FEEDBACK_PROMPT: Final[str] = """You are an AI reflection coach.
+Help improve responses through structured reflection and feedback.
+
+CONTEXT:
+Task description: {task}
+Current response: {response}
+Evaluation scores: {scores}
+Areas for improvement: {areas}
+
+REFLECTION POINTS:
+1. What worked well in the current approach?
+2. What could have been done differently?
+3. How can we apply lessons from similar successful cases?
+4. What specific steps would lead to better outcomes?
+
+Provide actionable feedback focusing on:
+1. Strategic improvements
+2. Tactical adjustments
+3. Process refinements
+4. Quality enhancements"""
+
+STRUCTURED_SYSTEM_PROMPT: Final[str] = """You are a helpful assistant that can answer questions and help with tasks."""
+
+SYSTEM_PROMPT: Final[str] = """You are a helpful assistant that can answer questions and help with tasks."""
+</file>
+
+<file path="src/react_agent/prompts/validation.py">
+"""Validation-specific prompts.
+
+This module provides functionality for validation-specific prompts
+in the agent framework.
+"""
+
+from typing import Final
+
+# Validation base prompt
+VALIDATION_BASE_PROMPT: Final[
+    str
+] = """You are a Validation Agent for RFP market analysis.
+Your goal is to prevent hallucinations and ensure data quality.
+
+{VALIDATION_REQUIREMENTS}
+
+3. Content Validation
+   - Verify all required fields are populated
+   - Check for data consistency across sections
+   - Validate numerical data and calculations
+   - Ensure analysis conclusions are supported by data
+
+4. Market Basket Validation
+   - Verify product information accuracy
+   - Cross-check pricing against multiple sources
+   - Validate manufacturer/distributor details
+   - Ensure proper unit of measure conversions
+
+5. Analysis Quality
+   - Verify PESTEL factors are comprehensive
+   - Check GAP analysis identifies clear needs
+   - Validate cost-benefit calculations
+   - Review risk assessment completeness
+   - Cross-check TCO components
+   - Verify vendor analysis objectivity
+   - Check benchmarking methodology
+   - Validate stakeholder identification
+   - Ensure compliance requirements are current
+   - Verify business impact assessments
+
+CONFIDENCE SCORING:
+- Start with base score of 0.4
+- Add 0.1 for each validated section with 2+ citations
+- Add 0.1 for each verified market basket item
+- Add 0.1 for comprehensive analysis coverage
+- Subtract 0.1 for each validation failure
+- Reject if final score < 0.98
+
+RESPONSE_FORMAT:
+{
+    "validation_results": {
+        "is_valid": false,
+        "errors": [],
+        "warnings": [],
+        "confidence_score": 0.0,
+        "section_scores": {
+            "structural": 0.0,
+            "citations": 0.0,
+            "content": 0.0,
+            "market_basket": 0.0
+        },
+        "failed_validations": [],
+        "required_fixes": []
+    }
+}
+
+Current state: {state}
+"""
+
+# Validation agent prompt with structured output validation
+VALIDATION_AGENT_PROMPT: Final[str] = VALIDATION_BASE_PROMPT.replace(
+    "Your goal is to prevent hallucinations and ensure data quality.\n",
+    "Your goal is to prevent hallucinations and ensure data quality.\n\n{STRUCTURED_OUTPUT_VALIDATION}\n",
+)
+
+# Prompt for generating validation criteria
+VALIDATION_CRITERIA_PROMPT: Final[str] = """
+Content Type: {content_type}
+Generate appropriate validation criteria for content of this type.
+The criteria should be comprehensive and tailored to the specific content type.
+For example:
+- For research content: factual accuracy, source credibility, logical consistency
+- For analysis content: methodological soundness, statistical validity, interpretative accuracy
+- For code: functional correctness, efficiency, security, readability
+
+Format your response as a JSON object with these fields:
+- primary_criteria: List of primary validation criteria (string[])
+- secondary_criteria: List of secondary validation criteria (string[])
+- critical_requirements: List of must-have elements (string[])
+- disqualifying_factors: List of automatic disqualifiers (string[])
+- scoring_weights: Dictionary mapping criteria to weights (0.0 to 1.0)
+"""
+
+# Prompt for fact checking
+FACT_CHECK_CLAIMS_PROMPT: Final[str] = """
+Content Type: {content_type}
+Analyze the following content for factual accuracy of claims:
+{content}
+
+1. Identify claims that are factual, opinion-based, unclear, or contradictory.
+2. Provide source citations for each claim.
+3. Evaluate the credibility of sources.
+4. Verify the accuracy of each claim.
+5. Determine if the content as a whole is factually accurate.
+6. Identify any potential biases or conflicts of interest.
+7. Note any areas where more research is needed.
+
+Respond in JSON format with these fields:
+- factually_accurate_claims: string[] (list of factual claims)
+- opinion_based_claims: string[] (list of opinion-based claims)
+- unclear_claims: string[] (list of unclear claims)
+- source_citations: string[] (list of source URLs for each claim)
+- source_credibility: string[] (list of source credibility scores)
+- verification_results: string[] (list of verification results)
+- overall_accuracy: number from 0-10
+- potential_biases: string[] (list of potential biases)
+- areas_for_future_research: string[] (list of areas for future research)
+- issues: string[] (summarizing all critical issues)
+"""
+
+# Prompt for validating individual claims
+VALIDATE_CLAIM_PROMPT: Final[str] = """
+Fact check the following claim:
+CLAIM: {claim}
+
+Respond in JSON format with these fields:
+- accuracy: number from 0-10
+- confidence: number from 0-10
+- issues: string[] (empty if no issues)
+- verification_notes: string
+"""
+
+# Prompt for logic validation
+LOGIC_VALIDATION_PROMPT: Final[str] = """
+Content Type: {content_type}
+Validate the logical consistency, reasoning quality, and argument structure of the following content:
+{content}
+
+Analyze for:
+1. Valid argument structure (premises, conclusions)
+2. Logical fallacies (e.g., circular reasoning, false cause)
+3. Consistency between claims
+4. Quality of evidence and reasoning
+5. Appropriate conclusions
+
+Respond in JSON format with these fields:
+- logical_structure_score: number from 0-10
+- fallacies_found: string[] (empty if none)
+- consistency_issues: string[] (empty if none)
+- reasoning_quality: number from 0-10
+- conclusion_validity: number from 0-10
+- overall_score: number from 0-10
+- issues: string[] (summarizing all critical issues)
+"""
+
+# Prompt for consistency checking
+CONSISTENCY_CHECK_PROMPT: Final[str] = """
+Content Type: {content_type}
+Check the internal consistency and coherence of the following content:
+{content}
+
+Analyze for:
+1. Consistency between different sections
+2. Coherence of narrative or explanation
+3. Presence of contradictions
+4. Logical flow and structure
+5. Completeness (no missing pieces in the reasoning)
+
+Respond in JSON format with these fields:
+- section_consistency: number from 0-10
+- coherence_score: number from 0-10
+- contradictions: string[] (empty if none)
+- flow_quality: number from 0-10
+- completeness: number from 0-10
+- overall_score: number from 0-10
+- issues: string[] (summarizing all critical issues)
+- needs_human_review: boolean (true if human review is recommended)
+"""
+
+# Prompt for human feedback request
+HUMAN_FEEDBACK_PROMPT: Final[str] = """
+Content Type: {content_type}
+Based on automated validation, the following issues were identified:
+{issues}
+
+Generate 3-5 specific questions for human reviewers to address these issues.
+Questions should be clear, focused, and help improve the quality of the content.
+Additionally, suggest specific sections or aspects that need human attention.
+
+Format your response as JSON with these fields:
+- questions: string[] (list of questions)
+- focus_areas: string[] (specific aspects needing review)
+- content_summary: string (brief summary of the content)
+"""
+</file>
+
+<file path="src/react_agent/tools/jina.py">
+"""Enhanced Jina AI Search Integration.
+
+This module provides a more robust integration with Jina AI's search API
+with improved error handling, result validation, and search strategies.
+"""
+
+
+import asyncio
+import contextlib
+import json
+import os
+import random
+import re
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from urllib.parse import quote, urljoin, urlparse
+
+import aiohttp
+from langchain.tools import BaseTool
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import InjectedToolArg, ToolException
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph
+from pydantic import BaseModel, Field
+from typing_extensions import Annotated
+
+from react_agent.configuration import Configuration
+from react_agent.prompts.query import detect_vertical, expand_acronyms, optimize_query
+from react_agent.utils.cache import (
+    ProcessorCache,
+    cache_result,
+    create_checkpoint,
+    load_checkpoint,
+)
+from react_agent.utils.extraction import safe_json_parse
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    log_dict,
+    warning_highlight,
+)
+from react_agent.utils.validations import is_valid_url
+
+# Initialize logger
+logger = get_logger(__name__)
+
+# Define search types for specialized search strategies
+SearchType = Literal["general", "authoritative", "recent", "comprehensive", "technical"]
+
+# Initialize memory saver for caching
+processor_cache = ProcessorCache(thread_id="jina-search")
+
+# Add at module level after imports
+_query_cache: Dict[str, Tuple[List[Document], datetime]] = {}
+
+class RetryConfig(BaseModel):
+    """Configuration for retry behavior."""
+    max_retries: int = Field(default=3, description="Maximum number of retries")
+    base_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
+    max_delay: float = Field(default=10.0, description="Maximum delay between retries in seconds")
+    
+    def get_delay(self, attempt: int) -> float:
+        """Calculate delay with exponential backoff."""
+        return min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
+
+class SearchParams(BaseModel):
+    """Parameters for search operations."""
+    query: str = Field(..., description="Search query")
+    search_type: SearchType = Field(default="general", description="Type of search to perform")
+    max_results: Optional[int] = Field(default=None, description="Maximum number of results to return")
+    min_quality_score: Optional[float] = Field(default=0.5, description="Minimum quality score for results")
+    recency_days: Optional[int] = Field(default=None, description="Maximum age of results in days")
+    domains: Optional[List[str]] = Field(default=None, description="List of domains to search")
+    category: Optional[str] = Field(default=None, description="Category to search in")
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API request."""
+        result = {
+            "q": self.query,
+            "limit": self.max_results or 10,
+            "min_score": self.min_quality_score or 0.5
+        }
+        
+        if self.recency_days:
+            result["recency_days"] = self.recency_days
+            
+        if self.domains:
+            result["domains"] = ",".join(self.domains)
+            
+        if self.category:
+            result["category"] = self.category
+            
+        return result
+
+class JinaSearchClient:
+    """Enhanced client for Jina AI search with retry and validation."""
+    
+    def __init__(
+        self,
+        api_key: str,
+        base_url: Optional[str] = None,
+        retry_config: Optional[RetryConfig] = None,
+    ):
+        """Initialize Jina search client.
+        
+        Args:
+            api_key: Jina AI API key
+            base_url: Optional base URL for self-hosted instances
+            retry_config: Configuration for retry behavior
+        """
+        self.api_key = api_key
+        self.base_url = base_url.rstrip('/') if base_url else "https://s.jina.ai"
+        self.retry_config = retry_config or RetryConfig()
+        self.session: Optional[aiohttp.ClientSession] = None
+        
+    async def __aenter__(self):
+        """Create aiohttp session."""
+        self.session = aiohttp.ClientSession(
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+        )
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Close aiohttp session."""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    def _get_endpoint(self, endpoint: str) -> str:
+        """Get endpoint URL."""
+        base = self.base_url.rstrip('/')
+        if not endpoint.startswith('/'):
+            endpoint = f'/{endpoint}'
+        return f"{base}{endpoint}"
+
+    async def _make_request_with_retry(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Make HTTP request to Jina API with retry logic and better error handling."""
+        if not self.session:
+            raise ValueError("Session not initialized")
+
+        last_exception = None
+        for attempt in range(1, self.retry_config.max_retries + 1):
+            try:
+                url = self._get_endpoint(endpoint)
+                info_highlight(f"Making request to: {url} with params: {params}")
+                
+                async with self.session.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_data
+                ) as response:
+                    # Check for no results error (422)
+                    if response.status == 422:
+                        error_text = await response.text()
+                        if "No search results available" in error_text:
+                            warning_highlight("No search results available for this query")
+                            return {"results": []}  # Return empty results rather than raising an error
+                    
+                    # Handle other errors
+                    if response.status != 200:
+                        error_text = await response.text()
+                        error_highlight(f"Request failed with status {response.status}: {error_text}")
+                        raise aiohttp.ClientError(f"Request failed with status {response.status}: {error_text}")
+                    
+                    return await response.json()
+            except Exception as e:
+                last_exception = e
+                if attempt < self.retry_config.max_retries:
+                    delay = self.retry_config.get_delay(attempt)
+                    warning_highlight(
+                        f"Request failed (attempt {attempt}/{self.retry_config.max_retries}): {str(last_exception)}. Retrying in {delay:.2f}s"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    error_highlight(
+                        f"Request failed after {self.retry_config.max_retries} attempts: {str(last_exception)}"
+                    )
+                    raise
+
+        # This should never be reached as the last failure should raise
+        assert last_exception is not None
+        raise last_exception
+
+    async def search(
+        self,
+        params: SearchParams
+    ) -> List[Document]:
+        """Search with improved parameters and result validation.
+        
+        Args:
+            params: Search parameters
+            
+        Returns:
+            List of documents from search results
+        """
+        request_params = params.to_dict()
+        info_highlight(f"Executing {params.search_type} search with query: {params.query}")
+        
+        try:
+            # Use the search endpoint
+            data = await self._make_request_with_retry(
+                method="GET",
+                endpoint="/search",  # Use the search endpoint
+                params=request_params
+            )
+            
+            results = self._parse_search_results(data)
+            info_highlight(f"Retrieved {len(results)} search results")
+            
+            # If no results, try simplified query
+            if not results:
+                # Extract main keywords (first 3 words or up to 30 chars)
+                simplified_query = " ".join(params.query.split()[:3])
+                if len(simplified_query) > 30:
+                    simplified_query = simplified_query[:30]
+                
+                info_highlight(f"No results found, trying simplified query: {simplified_query}")
+                request_params["query"] = simplified_query
+                
+                data = await self._make_request_with_retry(
+                    method="GET",
+                    endpoint="/search",
+                    params=request_params
+                )
+                
+                results = self._parse_search_results(data)
+                info_highlight(f"Retrieved {len(results)} results with simplified query")
+            
+            # Convert results to Documents
+            documents = self._convert_to_documents(results)
+            
+            # Apply quality filtering
+            min_score: float = float(params.min_quality_score or 0.5)  # Explicit type conversion
+            filtered_docs = self._filter_documents(documents, min_score)
+            info_highlight(f"Filtered to {len(filtered_docs)} high-quality results")
+            
+            return filtered_docs
+        except Exception as e:
+            error_highlight(f"Search failed: {str(e)}")
+            return []
+
+    def _parse_search_results(self, raw_results: Union[str, List[Dict], Dict]) -> List[Dict]:
+        """Parse raw results with improved error handling."""
+        try:
+            # Convert raw_results to string if it's not already
+            if isinstance(raw_results, (list, dict)):
+                raw_results = json.dumps(raw_results)
+            parsed = safe_json_parse(raw_results, "search_results")
+            return self._extract_results_list(parsed)
+        except Exception as e:
+            error_highlight(f"Error parsing search results: {str(e)}")
+            return []
+
+    def _extract_results_list(self, data: Union[List[Dict], Dict]) -> List[Dict]:
+        """Extract results list from various response formats."""
+        try:
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                # Try common response formats
+                for key in ['results', 'data', 'items', 'hits', 'matches', 'documents', 'response']:
+                    if key in data:
+                        if isinstance(data[key], list):
+                            return data[key]
+                        elif isinstance(data[key], dict):
+                            # Try to extract from nested structure
+                            for nested_key in ['results', 'data', 'items', 'hits', 'matches']:
+                                if nested_key in data[key] and isinstance(data[key][nested_key], list):
+                                    return data[key][nested_key]
+
+                # If no list found, try to extract single result
+                if 'result' in data:
+                    return [data['result']]
+
+                # If still no results, try to extract from nested structure
+                for value in data.values():
+                    if isinstance(value, list):
+                        return value
+                    elif isinstance(value, dict):
+                        if nested_results := self._extract_results_list(value):
+                            return nested_results
+
+                # If still no results, return empty list
+                return []
+            return []
+        except Exception as e:
+            error_highlight(f"Error extracting results list: {str(e)}")
+            return []
+
+    def _extract_content(self, result: Dict) -> Optional[str]:
+        """Extract content from result with fallbacks."""
+        content_fields = ['snippet', 'content', 'text', 'description', 'summary', 'body', 'raw']
+        for field in content_fields:
+            if content := result.get(field):
+                return content.strip().strip('```json').strip('```')
+        return None
+
+    def _build_metadata(self, result: Dict, content: str) -> Dict:
+        """Build metadata dictionary from result."""
+        field_mapping = {
+            'url': ['url', 'link', 'href', 'source_url', 'web_url'],
+            'title': ['title', 'name', 'heading', 'subject', 'headline'],
+            'source': ['source', 'domain', 'site', 'provider', 'publisher'],
+            'published_date': ['published_date', 'date', 'timestamp', 'published', 'created_at', 'publication_date']
+        }
+        
+        metadata = {
+            'quality_score': self._calculate_quality_score(result, content),
+            'extraction_status': 'success',
+            'extraction_timestamp': datetime.now().isoformat(),
+            'original_result': result
+        }
+        
+        for field_type, fields in field_mapping.items():
+            for field in fields:
+                if value := result.get(field):
+                    metadata[field_type] = value
+                    break
+        
+        if url := metadata.get('url'):
+            try:
+                metadata['domain'] = urlparse(url).netloc
+            except Exception:
+                metadata['domain'] = ""
+                
+        return metadata
+
+    def _convert_to_documents(self, results: List[Dict]) -> List[Document]:
+        """Convert search results to Document objects with improved metadata."""
+        documents = []
+        for idx, result in enumerate(results, 1):
+            if not isinstance(result, dict):
+                continue
+                
+            if not (content := self._extract_content(result)):
+                warning_highlight(f"No content found for result {idx}")
+                continue
+                
+            try:
+                metadata = self._build_metadata(result, content)
+                documents.append(Document(page_content=content, metadata=metadata))
+                info_highlight(f"Successfully converted result {idx} to Document")
+            except Exception as e:
+                warning_highlight(f"Error converting result {idx} to Document: {str(e)}")
+                continue
+                
+        return documents
+
+    @cache_result(ttl=3600)
+    def _calculate_quality_score(self, result: Dict[str, Any], content: str) -> float:
+        """Calculate quality score for a search result."""
+        score = 0.5  # Base score
+
+        # Add points for authoritative domains
+        authoritative_domains = [
+            '.gov', '.edu', '.org', 'wikipedia.org', 
+            'research', 'journal', 'university', 'association'
+        ]
+        url = result.get('url', '')
+        if any(domain in url.lower() for domain in authoritative_domains):
+            score += 0.2
+
+        # Add points for content length (substantive content)
+        if len(content) > 500:
+            score += 0.1
+
+        # Add points for having title/publication date
+        if result.get('title'):
+            score += 0.05
+        if result.get('published_date') or result.get('date'):
+            score += 0.05
+
+        if date_field := result.get('published_date', result.get('date', '')):
+            with contextlib.suppress(Exception):
+                # Try to parse date
+                from dateutil import parser
+                published_date = parser.parse(date_field)
+                current_date = datetime.now(timezone.utc)
+                days_old = (current_date - published_date).days
+
+                # Fresher content gets higher score
+                if days_old < 30:  # Last month
+                    score += 0.1
+                elif days_old < 180:  # Last 6 months
+                    score += 0.05
+        return min(1.0, score)  # Cap at 1.0
+
+    @cache_result(ttl=3600)
+    def _filter_documents(self, documents: List[Document], min_score: float) -> List[Document]:
+        """Filter documents based on quality score."""
+        return [
+            doc for doc in documents 
+            if doc.metadata.get('quality_score', 0) >= min_score
+        ]
+
+class JinaSearchTool(BaseTool):
+    """Enhanced Jina AI search integration with caching and parallel processing."""
+    
+    name: str = "jina_search"
+    description: str = "Search for information using Jina AI's search engine with enhanced caching and parallel processing"
+    
+    config: Configuration = Field(default_factory=Configuration)
+    
+    def __init__(self, config: Optional[Configuration] = None):
+        """Initialize the Jina search tool.
+        
+        Args:
+            config: Optional configuration for the search tool
+        """
+        super().__init__()
+        if config:
+            self.config = config
+        if not self.config.jina_api_key:
+            raise ValueError("Jina API key is required")
+            
+    async def _arun(
+        self,
+        query: str,
+        search_type: Optional[SearchType] = None,
+        max_results: Optional[int] = None,
+        min_quality_score: Optional[float] = None,
+        recency_days: Optional[int] = None,
+        domains: Optional[List[str]] = None,
+        category: Optional[str] = None
+    ) -> List[Document]:
+        """Execute search with caching and parallel processing."""
+        config = RunnableConfig(configurable={"jina_api_key": self.config.jina_api_key})
+        return await search(
+            query=query,
+            search_type=search_type,
+            max_results=max_results,
+            min_quality=min_quality_score,
+            recency_days=recency_days,
+            domains=domains,
+            category=category,
+            config=config
+        )
+
+async def _execute_search_strategy(
+    client: JinaSearchClient,
+    params: SearchParams,
+    category: Optional[str] = None
+) -> List[List[Document]]:
+    """Execute search with optional category-specific search."""
+    search_tasks = [client.search(params)]
+
+    if not category:
+        if vertical := detect_vertical(params.query):
+            category_params = SearchParams(**params.model_dump())
+            category_params.category = vertical
+            search_tasks.append(client.search(category_params))
+
+    return await asyncio.gather(*search_tasks)
+
+@cache_result(ttl=3600)
+def _merge_and_filter_results(
+    results_list: List[List[Document]],
+    min_quality: float
+) -> List[Document]:
+    """Merge, deduplicate and filter search results."""
+    seen_urls = set()
+    all_results = []
+    
+    for results in results_list:
+        for doc in results:
+            url = doc.metadata.get("url", "")
+            if url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append(doc)
+    
+    all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
+    return [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_quality]
+
+async def _load_cached_results(cache_key: str) -> Optional[List[Document]]:
+    """Load and validate cached search results."""
+    try:
+        if cached := load_checkpoint(cache_key):
+            if not isinstance(cached, dict) or "results" not in cached or "timestamp" not in cached:
+                return None
+                
+            if (datetime.now() - datetime.fromisoformat(cached["timestamp"])).total_seconds() >= 86400:
+                return None
+                
+            results = cached["results"]
+            if not isinstance(results, list) or not all(isinstance(doc, Document) for doc in results):
+                return None
+                
+            info_highlight(f"Retrieved {len(results)} results from cache")
+            return results
+    except Exception as e:
+        warning_highlight(f"Error loading from cache: {str(e)}")
+    return None
+
+async def _perform_search(
+    configuration: Configuration,
+    params: SearchParams,
+    cache_key: str
+) -> List[Document]:
+    """Execute search and cache results."""
+    async with JinaSearchClient(
+        api_key=configuration.jina_api_key or "",
+        base_url=configuration.jina_url,
+        retry_config=RetryConfig()
+    ) as client:
+        results_list = await _execute_search_strategy(client, params, params.category)
+        all_results = _merge_and_filter_results(results_list, params.min_quality_score or 0.5)
+        
+        try:
+            create_checkpoint(
+                cache_key,
+                {
+                    "results": all_results,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "params": params.to_dict()
+                },
+                ttl=86400
+            )
+            info_highlight(f"Cached {len(all_results)} results")
+        except Exception as e:
+            warning_highlight(f"Error caching results: {str(e)}")
+        
+        return all_results
+
+async def search(
+    query: str,
+    search_type: Optional[SearchType] = None,
+    max_results: Optional[int] = None,
+    min_quality: Optional[float] = None,
+    recency_days: Optional[int] = None,
+    domains: Optional[List[str]] = None,
+    category: Optional[str] = None,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg]
+) -> List[Document]:
+    """Enhanced search with multiple strategies, quality filters, and improved caching."""
+    configuration = Configuration.from_runnable_config(config)
+    if not configuration.jina_api_key:
+        error_highlight("Jina API key is required")
+        return []
+
+    os.environ["JINA_API_KEY"] = configuration.jina_api_key
+    if configuration.jina_url:
+        os.environ["JINA_URL"] = configuration.jina_url
+
+    params = SearchParams(
+        query=query,
+        search_type=search_type or "general",
+        max_results=max_results or configuration.max_search_results,
+        min_quality_score=min_quality or 0.5,
+        recency_days=recency_days,
+        domains=domains or (['.edu', '.gov', '.org'] if search_type in ["authoritative", None] else None),
+        category=category
+    )
+
+    cache_key = f"jina_search_{params.query}_{params.search_type}_{params.max_results}"
+    
+    if cached_results := await _load_cached_results(cache_key):
+        return cached_results
+
+    try:
+        return await _perform_search(configuration, params, cache_key)
+    except Exception as e:
+        error_highlight(f"Error in Jina search: {str(e)}")
+        return []
+
+# Export available tools
+TOOLS = [search]
+</file>
 
 <file path="src/react_agent/utils/__init__.py">
 from react_agent.utils.validations import is_valid_url
@@ -121,13 +3236,18 @@ import json
 import time
 from datetime import UTC, datetime
 from functools import wraps
-from typing import Any, Callable, Dict, TypeVar, cast, Optional
+from typing import Any, Callable, Dict, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
 
-from .logging import get_logger, log_performance_metrics, info_highlight, warning_highlight
+from .logging import (
+    get_logger,
+    info_highlight,
+    log_performance_metrics,
+    warning_highlight,
+)
 
 # Get module logger
 logger = get_logger(__name__)
@@ -984,7 +4104,8 @@ def load_checkpoint(key: str) -> Any:
 """Content processing utilities for the research agent.
 
 This module provides utilities for processing and validating content,
-including chunking, preprocessing, content type detection, and merging extraction results.
+including chunking, preprocessing, content type detection, document processing,
+and merging extraction results.
 
 Examples:
     >>> text = "This is a sample text that will be split into chunks."
@@ -999,23 +4120,41 @@ Examples:
     >>> valid = validate_content("This is valid content")
     >>> print(valid)
     True
-"""
-import contextlib
-import json
-import re
-import time
-from typing import Any, Dict, List, Set, TypedDict, Optional, Tuple
-from urllib.parse import unquote, urlparse
-import os
-import tempfile
-import requests
-import io
-from pathlib import Path
-from docling.document_converter import DocumentConverter
 
+    >>> document_text, doc_type = process_document("document.pdf", document_content)
+    >>> print(doc_type)
+    pdf
+"""
+
+import contextlib
+import hashlib
+import json
+import math
+import os
+import re
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Set, Tuple, TypedDict
+from urllib.parse import unquote, urlparse
+
+import nltk.data
+import requests
+from docling.document_converter import DocumentConverter
 
 from react_agent.utils.cache import ProcessorCache
 from react_agent.utils.defaults import (
+    DATA_PATH_PATTERNS,
+    DOCUMENT_PATTERNS,
+    DOCUMENT_TYPE_MAPPING,
+    HTML_PATH_PATTERNS,
+    MARKETPLACE_PATTERNS,
+    MAX_CONTENT_LENGTH,
+    PROBLEMATIC_PATTERNS,
+    PROBLEMATIC_SITES,
+    PROCUREMENT_HTML_PATTERNS,
+    REPORT_PATTERNS,
+    TOKEN_CHAR_RATIO,
     ChunkConfig,
     get_category_merge_mapping,
     get_default_extraction_result,
@@ -1047,6 +4186,7 @@ class ContentState(TypedDict):
         metadata (Dict[str, Any]): Additional metadata about the content.
         timestamp (str): ISO formatted timestamp when the content was processed.
     """
+
     content: str
     url: str
     content_type: str
@@ -1055,41 +4195,28 @@ class ContentState(TypedDict):
     timestamp: str
 
 
-# Constants for chunking and token estimation.
-DEFAULT_CHUNK_SIZE: int = 40000
-DEFAULT_OVERLAP: int = 5000
-MAX_CONTENT_LENGTH: int = 100000
-TOKEN_CHAR_RATIO: float = 4.0
+class DocumentProcessingResult(TypedDict):
+    """Typed dictionary for document processing results.
 
-# Problematic content patterns to skip certain file types.
-PROBLEMATIC_PATTERNS: List[str] = [
-    r'\.zip$',
-    r'\.rar$',
-    r'\.exe$',
-    r'\.dmg$',
-    r'\.iso$',
-    r'\.tar$',
-    r'\.gz$'
-]
+    Attributes:
+        text (str): The extracted text content.
+        content_type (str): The document type (e.g., 'pdf', 'doc', 'excel').
+        metadata (Dict[str, Any]): Additional metadata about the document.
+    """
 
-# Document file patterns that can be processed with Docling
-DOCUMENT_PATTERNS: List[str] = [
-    r'\.pdf(\?|$)',  # Catch PDF URLs with query params.
-    r'\.docx?$',
-    r'\.xlsx?$',
-    r'\.ppt$',
-    r'\.pptx$',
-    r'\.odt$',
-    r'\.rtf$'
-]
+    text: str
+    content_type: str
+    metadata: Dict[str, Any]
 
-# Known problematic sites to avoid.
-PROBLEMATIC_SITES: List[str] = [
-    'iaeme.com',
-    'scribd.com',
-    'slideshare.net',
-    'academia.edu'
-]
+
+# Load the Punkt sentence tokenizer (moved outside the function)
+try:
+    tokenizer = nltk.data.load("tokenizers/punkt/english.pickle")
+except LookupError:
+    error_highlight(
+        "NLTK Punkt tokenizer not found. Please download it.", category="nltk"
+    )
+    tokenizer = None
 
 
 @content_cache.cache_result(ttl=3600)
@@ -1098,417 +4225,443 @@ def chunk_text(
     chunk_size: int | None = None,
     overlap: int | None = None,
     use_large_chunks: bool = False,
-    min_chunk_size: int = 100
+    min_chunk_size: int = 100,
 ) -> List[str]:
     """Split text into overlapping chunks, returning a list of chunks.
 
     Args:
-        text (str): The text to be split.
-        chunk_size (Optional[int]): Desired size for each chunk. If None, defaults are taken from ChunkConfig.
-        overlap (Optional[int]): Overlap length between chunks. If None, defaults are taken from ChunkConfig.
-        use_large_chunks (bool): Flag to indicate if larger chunk sizes should be used.
-        min_chunk_size (int): Minimum acceptable chunk size to avoid very small chunks.
+        text: The text to be split.
+        chunk_size: Desired size for each chunk. If None, defaults are taken from ChunkConfig.
+        overlap: Overlap length between chunks. If None, defaults are taken from ChunkConfig.
+        use_large_chunks: Flag to indicate if larger chunk sizes should be used.
+        min_chunk_size: Minimum acceptable chunk size to avoid very small chunks.
 
     Returns:
-        List[str]: A list of text chunks.
+        A list of text chunks.
 
     Examples:
         >>> text = "This is a sample text that needs to be chunked into smaller pieces."
         >>> chunk_text(text, chunk_size=20, overlap=5)
         ['This is a sample', 'sample text that', 'that needs to be', 'be chunked into', 'into smaller pieces.']
-        
-        >>> # Using large chunks
-        >>> chunk_text(text, use_large_chunks=True)
-        ['This is a sample text that needs to be chunked into smaller pieces.']
-        
-        >>> # Empty input returns an empty list
-        >>> chunk_text("")
-        []
     """
     if not text or text.isspace():
         warning_highlight("Empty or whitespace-only text provided")
         return []
 
     # Set chunk parameters based on defaults if not provided.
-    chunk_size = max(min_chunk_size, chunk_size or (
-        ChunkConfig.LARGE_CHUNK_SIZE if use_large_chunks 
-        else ChunkConfig.DEFAULT_CHUNK_SIZE
-    ))
-    overlap = min(chunk_size - 1, max(0, overlap or (
-        ChunkConfig.LARGE_OVERLAP if use_large_chunks 
-        else ChunkConfig.DEFAULT_OVERLAP
-    )))
+    chunk_size = max(
+        min_chunk_size,
+        chunk_size
+        or (
+            ChunkConfig.LARGE_CHUNK_SIZE
+            if use_large_chunks
+            else ChunkConfig.DEFAULT_CHUNK_SIZE
+        ),
+    )
+    overlap = min(
+        chunk_size - 1,
+        max(
+            0,
+            overlap
+            or (
+                ChunkConfig.LARGE_OVERLAP
+                if use_large_chunks
+                else ChunkConfig.DEFAULT_OVERLAP
+            ),
+        ),
+    )
+
+    if overlap >= chunk_size:
+        raise ValueError("Overlap must be less than chunk size.")
 
     chunks: List[str] = []
     start = 0
     text_length = len(text)
-    
+    expected_chunks = math.ceil(text_length / (chunk_size - overlap))
+
     # Track chunking performance
-    import time
     start_time = time.time()
 
-    while start < text_length:
+    def _create_chunks(
+            text: str,
+            start: int,
+            chunk_size: int,
+            overlap: int,
+            min_chunk_size: int,
+            chunks: List[str],
+            tokenizer: nltk.data.load | None,
+            expected_chunks: int,
+        ) -> Tuple[int, List[str]]:
+        text_length = len(text)
         end = min(start + chunk_size, text_length)
-        # Attempt to find a natural break point.
-        if end < text_length:
-            end = text.rfind(' ', start + min_chunk_size, end) or end
-
+        if tokenizer and end < text_length:
+            sentences = tokenizer.tokenize(text[start:end])
+            end = start + len(sentences[-2]) if len(sentences) > 1 else end
         if chunk := text[start:end].strip():
             if chunks and len(chunk) < min_chunk_size:
                 chunks[-1] = f"{chunks[-1]} {chunk}"
             else:
                 chunks.append(chunk)
-                # Log progress every 5 chunks
-                if len(chunks) % 5 == 0:
-                    log_progress(len(chunks), text_length // chunk_size + 1, "chunking", "Creating chunks")
+                total_chunks = math.ceil(text_length / chunk_size)
+                log_frequency = max(1, total_chunks // 20)
+                if len(chunks) % log_frequency == 0:
+                    log_progress(
+                        len(chunks), expected_chunks, "chunking", "Creating chunks"
+                    )
         start = end - overlap
+        return start, chunks
+
+    create_chunks_func = _create_chunks if tokenizer else _create_chunks
+
+    while start < text_length:
+        start, chunks = create_chunks_func(
+            text,
+            start,
+            chunk_size,
+            overlap,
+            min_chunk_size,
+            chunks,
+            tokenizer or None,
+            expected_chunks,
+        )
 
     end_time = time.time()
     log_performance_metrics(
-        "Text chunking", 
-        start_time, 
-        end_time, 
+        "Text chunking",
+        start_time,
+        end_time,
         "chunking",
-        {"text_length": text_length, "chunks_created": len(chunks), "avg_chunk_size": text_length / max(1, len(chunks))}
+        {
+            "text_length": text_length,
+            "chunks_created": len(chunks),
+            "avg_chunk_size": text_length / max(1, len(chunks)),
+        },
     )
-    
+
     info_highlight(f"Created {len(chunks)} chunks", category="chunking")
     return chunks
 
 
+# Content type detection functions
 def detect_html(content: str) -> str | None:
-    """Determine whether the provided content is HTML.
-
-    Args:
-        content (str): The content string to be analyzed.
-
-    Returns:
-        Optional[str]: Returns 'html' if HTML is detected; otherwise, returns None.
-
-    Examples:
-        >>> detect_html("<html><body>Hello</body></html>")
-        'html'
-        
-        >>> detect_html("<!doctype html><div>Content</div>")
-        'html'
-        
-        >>> detect_html("Plain text content")
-        None
-    """
+    """Determine whether the provided content is HTML."""
     if not content:
         return None
-    content_lower = content.strip().lower()
-    if content_lower.startswith('<!doctype html') or content_lower.startswith('<html'):
-        return 'html'
-    if '<body' in content_lower and '</body>' in content_lower:
-        return 'html'
-    if '<div' in content_lower and '</div>' in content_lower:
-        return 'html'
+    if re.search(r"<!DOCTYPE html>|<html|<body|<div", content, re.IGNORECASE):
+        return "html"
     return None
 
 
-def detect_json(content: str) -> str | None:
-    """Determine whether the provided content is valid JSON.
-
-    Args:
-        content (str): The content string to analyze.
-
-    Returns:
-        Optional[str]: Returns 'json' if the content is valid JSON; otherwise, returns None.
-
-    Examples:
-        >>> detect_json('{"key": "value"}')
-        'json'
-        
-        >>> detect_json('[1, 2, 3]')
-        'json'
-        
-        >>> detect_json('Invalid content')
-        None
-    """
+def detect_json(content: str) -> dict | None:
+    """Determine whether the provided content is valid JSON."""
     if not content:
         return None
     content = content.strip()
-    if (content.startswith('{') and content.endswith('}')) or (content.startswith('[') and content.endswith(']')):
+    if not content:
+        return None
+    if (content.startswith("{") and content.endswith("}")) or (
+        content.startswith("[") and content.endswith("]")
+    ):
         with contextlib.suppress(json.JSONDecodeError):
             json.loads(content)
-            return 'json'
+            return {"type": "json"}
     return None
 
 
 def detect_from_url_extension(url: str) -> str | None:
-    """Infer content type based on the file extension in the URL.
-
-    Args:
-        url (str): The URL to analyze.
-
-    Returns:
-        Optional[str]: The inferred content type (e.g., 'pdf', 'html', 'json') based on the extension;
-                       None if the extension is not recognized.
-
-    Examples:
-        >>> detect_from_url_extension('document.pdf')
-        'pdf'
-        
-        >>> detect_from_url_extension('page.html')
-        'html'
-        
-        >>> detect_from_url_extension('data.json')
-        'json'
-        
-        >>> detect_from_url_extension('noextension')
-        None
-    """
+    """Infer content type based on the file extension in the URL."""
     if not url:
         return None
-        
-    extensions = {
-        '.pdf': 'pdf', '.doc': 'doc', '.docx': 'doc', '.xls': 'excel', '.xlsx': 'excel',
-        '.ppt': 'presentation', '.pptx': 'presentation', '.txt': 'text', '.md': 'text',
-        '.rst': 'text', '.html': 'html', '.htm': 'html', '.json': 'json', '.xml': 'xml',
-        '.csv': 'data'
-    }
-    
+
     try:
         ext = f".{url.lower().split('.')[-1]}"
-        return extensions.get(ext)
+        return DOCUMENT_TYPE_MAPPING.get(ext)
     except IndexError:
         return None
 
 
 def detect_from_url_path(url: str) -> str | None:
-    """Infer content type from common URL path patterns.
-
-    Args:
-        url (str): The URL to be analyzed.
-
-    Returns:
-        Optional[str]: Returns 'html' if known HTML path patterns are found; otherwise, None.
-
-    Examples:
-        >>> detect_from_url_path('https://example.com/wiki/Article_Title')
-        'html'
-        
-        >>> detect_from_url_path('https://example.com/api/data')
-        None
-    """
+    """Infer content type from common URL path patterns."""
     if not url:
         return None
-        
-    html_path_patterns = (
-        '/wiki/', '/articles/', '/blog/', '/news/',
-        '/docs/', '/help/', '/support/', '/pages/',
-        '/product/', '/service/', '/consumers/',
-        '/detail/', '/view/', '/content/'
-    )
-    return 'html' if any(pattern in url.lower() for pattern in html_path_patterns) else None
+
+    parsed_url = urlparse(url)
+    url_path = parsed_url.path.lower()
+
+    # Check patterns in priority order
+    # 1. Data feeds have highest priority
+    if any(pattern in url_path for pattern in DATA_PATH_PATTERNS):
+        return "data"
+
+    # 2. Procurement HTML content
+    if any(pattern in url_path for pattern in PROCUREMENT_HTML_PATTERNS):
+        return "html"
+
+    # 3. Marketplace/catalogue pages (overlap with procurement)
+    if any(pattern in url_path for pattern in MARKETPLACE_PATTERNS):
+        return "html"
+
+    # 4. Documents (file downloads, reports, etc.)
+    if any(pattern in url_path for pattern in DOCUMENT_PATTERNS):
+        return "document"
+
+    # 5. Reports or research-oriented content
+    if any(pattern in url_path for pattern in REPORT_PATTERNS):
+        return "report"
+
+    # 6. General HTML content (lowest priority)
+    if any(pattern in url_path for pattern in HTML_PATH_PATTERNS):
+        return "html"
+
+    return None
 
 
 def detect_from_content_heuristics(content: str) -> str | None:
-    r"""Infer content type based on heuristics applied directly to the content.
-
-    Args:
-        content (str): The text content to analyze.
-
-    Returns:
-        Optional[str]: Returns 'xml', 'data', or 'text' based on content patterns; otherwise, None.
-
-    Examples:
-        >>> detect_from_content_heuristics("<?xml version='1.0'?><data>123</data>")
-        'xml'
-        
-        >>> detect_from_content_heuristics('{"key": "value"}')
-        'data'
-        
-        >>> detect_from_content_heuristics("This is a simple text with multiple paragraphs.\n\nNew paragraph.")
-        'text'
-    """
+    r"""Infer content type based on heuristics applied directly to the content."""
     if not content or len(content) < 50:
         return None
 
     content = content.strip()
-    if content.startswith('<?xml') or (content.startswith('<') and '>' in content):
-        return 'xml'
-    if '{' in content and '}' in content and '"' in content and ':' in content:
-        return 'data'
-    return 'text' if '\n\n' in content and len(content) > 200 else None
+    if content.startswith("<?xml") or (content.startswith("<") and ">" in content):
+        return "xml"
+    if "{" in content and "}" in content and '"' in content and ":" in content:
+        return "data"
+    return "text" if "\n\n" in content and len(content) > 200 else None
 
 
 def detect_from_url_domain(url: str) -> str | None:
-    """Infer content type based on URL domain characteristics.
-
-    Args:
-        url (str): The URL to analyze.
-
-    Returns:
-        Optional[str]: Returns 'html' if the domain indicates a typical web page; otherwise, None.
-
-    Examples:
-        >>> detect_from_url_domain('https://www.example.com/path')
-        'html'
-        
-        >>> detect_from_url_domain('ftp://example.org/resource')
-        None
-    """
+    """Infer content type based on URL domain characteristics."""
     if not url:
         return None
-        
-    common_web_domains = ('.gov', '.org', '.edu', '.com', '.net', '.io')
+
+    common_web_domains = (".gov", ".org", ".edu", ".com", ".net", ".io")
     parsed_url = urlparse(url)
     domain = parsed_url.netloc.lower()
-    if any(domain.endswith(d) for d in common_web_domains) and (parsed_url.path and '.' not in parsed_url.path.split('/')[-1]):
-        return 'html'
+    if any(domain.endswith(d) for d in common_web_domains) and (
+        parsed_url.path and "." not in parsed_url.path.split("/")[-1]
+    ):
+        return "html"
     return None
 
 
-def process_document_with_docling(url: str, content: Optional[bytes] = None) -> Tuple[str, str]:
-    """Process document files (PDF, DOCX, etc.) using Docling.
-    
-    Args:
-        url (str): The URL of the document to process
-        content (Optional[bytes]): Binary content if already available
-    
-    Returns:
-        Tuple[str, str]: A tuple containing (extracted text, content type)
-    
-    Raises:
-        ValueError: If Docling is not available or document processing fails
-    """   
-    start_time = time.time()
-    info_highlight(f"Processing document at {url}", category="document_processing")
-
-    # Generate a cache key
-    cache_key = f"docling_extraction_{hash(url)}"
-    cached_result = content_cache.get(cache_key)
-    if cached_result and isinstance(cached_result, dict):
-        info_highlight(f"Using cached document extraction for {url}", category="document_processing")
-        log_performance_metrics(
-            "Document processing (cached)", 
-            start_time, 
-            time.time(), 
-            "document_processing",
-            {"cache_hit": True}
-        )
-        return cached_result.get("text", ""), cached_result.get("content_type", "document")
-
-    try:
-        file_ext = Path(urlparse(url).path).suffix.lower()
-        content_type = {
-            '.pdf': 'pdf',
-            '.doc': 'doc',
-            '.docx': 'doc',
-            '.xls': 'excel',
-            '.xlsx': 'excel',
-            '.ppt': 'presentation',
-            '.pptx': 'presentation',
-            '.odt': 'document',
-            '.rtf': 'document'
-        }.get(file_ext, 'document')
-
-        # If content wasn't provided, download it
-        if content is None:
-            info_highlight(f"Downloading document from {url}", category="document_processing")
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            content = response.content
-
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
-            if content:
-                temp_file.write(content)
-            temp_file_path = temp_file.name
-
-        try:
-            return _create_temp_file(
-                temp_file_path, cache_key, content_type, start_time
-            )
-        finally:
-            # Clean up the temporary file
-            os.unlink(temp_file_path)
-
-    except Exception as e:
-        error_highlight(f"Error processing document: {str(e)}", category="document_processing")
-        raise ValueError(f"Failed to process document: {str(e)}") from e
+def fallback_detection(url: str, content: str) -> str:
+    """Fallback detection logic for content type."""
+    if content and content.strip():
+        return "text"
+    return "html" if url and url.startswith(("http://", "https://")) else "unknown"
 
 
-# TODO Rename this here and in `process_document_with_docling`
-def _create_temp_file(temp_file_path, cache_key, content_type, start_time):
-    # Extract text using docling
-    converter = DocumentConverter()
-    extracted_text = converter.convert(temp_file_path)
-
-    # Cache the result
-    content_cache.put(
-        cache_key,
-        {"text": extracted_text, "content_type": content_type},
-        ttl=3600  # 1 hour TTL
-    )
-
-    end_time = time.time()
-    log_performance_metrics(
-        "Document processing", 
-        start_time, 
-        end_time, 
-        "document_processing",
-        {"content_type": content_type, "text_length": len(extracted_text)}
-    )
-
-    return extracted_text, content_type
-
+# Document processing functions
 def detect_document_type(url: str) -> str | None:
     """Detect if the URL points to a document file that can be processed by Docling.
-    
+
     Args:
-        url (str): The URL to check
-        
+        url: The URL to check
+
     Returns:
-        Optional[str]: The document type if detectable, None otherwise
+        The document type if detectable, None otherwise
     """
     if not url:
         return None
-    
+
     url_lower = url.lower()
     file_ext = Path(urlparse(url_lower).path).suffix.lower()
-    
-    document_types = {
-        '.pdf': 'pdf',
-        '.doc': 'doc',
-        '.docx': 'doc',
-        '.xls': 'excel',
-        '.xlsx': 'excel',
-        '.ppt': 'presentation',
-        '.pptx': 'presentation',
-        '.odt': 'document',
-        '.rtf': 'document'
-    }
-    
-    return document_types.get(file_ext)
 
-def should_skip_content(url: str) -> bool:
-    """Determine if the content from a given URL should be skipped based on certain rules.
+    return DOCUMENT_TYPE_MAPPING.get(file_ext)
 
-    The function checks for problematic file extensions, MIME type patterns, and known problematic sites.
-    If Docling is available, document formats like PDF, DOCX are not skipped since they can be processed.
+
+def is_document_url(url: str) -> bool:
+    """Check if the URL points to a document that can be processed.
 
     Args:
-        url (str): The URL to evaluate.
+        url: The URL to check
 
     Returns:
-        bool: True if the content should be skipped; False otherwise.
-
-    Examples:
-        >>> should_skip_content("http://example.com/document.pdf")
-        False  # If Docling is available, otherwise True
-        
-        >>> should_skip_content("http://example.com/page.html")
-        False
-        
-        >>> should_skip_content("http://scribd.com/document")
-        True  # Due to problematic site.
-        
-        >>> should_skip_content("")
-        True
+        True if the URL points to a processable document, False otherwise
     """
+    return detect_document_type(url) is not None
+
+
+def download_document(url: str, timeout: int = 30) -> bytes | None:
+    """Download document content from the provided URL.
+
+    Args:
+        url: The URL to download from
+        timeout: Request timeout in seconds
+
+    Returns:
+        Document content as bytes if successful, None otherwise
+
+    Raises:
+        requests.RequestException: If the download fails
+    """
+    try:
+        info_highlight(
+            f"Downloading document from {url}", category="document_processing"
+        )
+        response = requests.get(url, stream=True, timeout=timeout)
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as e:
+        error_highlight(
+            f"Error downloading document: {str(e)}", category="document_processing"
+        )
+        raise
+
+
+def create_temp_document_file(content: bytes, file_extension: str) -> Tuple[str, str]:
+    """Create a temporary file for document processing.
+
+    Args:
+        content: The document content as bytes
+        file_extension: The file extension (including dot)
+
+    Returns:
+        Tuple containing the temporary file path and name
+    """
+    with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as temp_file:
+        temp_file.write(content)
+        return temp_file.name, os.path.basename(temp_file.name)
+
+
+def extract_document_text(file_path: str, document_type: str, timeout: int = 60) -> str:
+    """Extract text from a document file using Docling with a timeout.
+
+    Args:
+        file_path: Path to the document file
+        document_type: Type of document (pdf, doc, etc.)
+        timeout: Timeout in seconds for document conversion
+
+    Returns:
+        Extracted text content
+    """
+    try:
+        converter = DocumentConverter()
+        return converter.convert(file_path, timeout=timeout)
+    except Exception as e:
+        error_highlight(
+            f"Error extracting text from {document_type} document: {str(e)}",
+            category="document_processing",
+        )
+        return f"Failed to extract text from {document_type} document: {str(e)}"
+
+
+def process_document(url: str, content: bytes | None = None) -> Tuple[str, str]:
+    """Process a document file and extract its text content.
+
+    Args:
+        url: The URL of the document
+        content: The document content as bytes, if already available
+
+    Returns:
+        Tuple containing (extracted text, content type)
+
+    Raises:
+        ValueError: If document processing fails
+    """
+    start_time = time.time()
+    document_type = detect_document_type(url) or "document"
+
+    try:
+        # Check if result is already cached
+
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        cache_key = f"document_processing_{url_hash}"
+        cached_result = content_cache.get(cache_key)
+
+        if cached_result and isinstance(cached_result, dict):
+            info_highlight(
+                f"Using cached document extraction for {url}",
+                category="document_processing",
+            )
+            log_performance_metrics(
+                "Document processing (cached)",
+                start_time,
+                time.time(),
+                "document_processing",
+                {"cache_hit": True},
+            )
+            return cached_result.get("text", ""), cached_result.get(
+                "content_type", document_type
+            )
+
+        # Download content if not provided
+        if content is None:
+            content = download_document(url)
+            if not content:
+                raise ValueError(f"Failed to download document from {url}")
+
+        # Create temporary file
+        file_ext = os.path.splitext(Path(urlparse(url).path).name)[1].lower()
+        temp_file_path, temp_file_name = create_temp_document_file(content, file_ext)
+
+        try:
+            # Extract text using Docling
+            extracted_text = extract_document_text(temp_file_path, document_type)
+
+            # Cache the result
+            result: DocumentProcessingResult = {
+                "text": extracted_text,
+                "content_type": document_type,
+                "metadata": {
+                    "url": url,
+                    "file_type": file_ext,
+                    "processing_time": time.time() - start_time,
+                },
+            }
+
+            content_cache.put(
+                cache_key,
+                result,
+                ttl=3600,  # 1 hour TTL
+            )
+
+            log_performance_metrics(
+                "Document processing",
+                start_time,
+                time.time(),
+                "document_processing",
+                {"content_type": document_type, "text_length": len(extracted_text)},
+            )
+
+            return extracted_text, document_type
+
+        finally:
+            # Clean up the temporary file
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                warning_highlight(
+                    f"Error removing temporary file: {str(e)}",
+                    category="document_processing",
+                )
+
+    except Exception as e:
+        error_highlight(
+            f"Error processing document: {str(e)}", category="document_processing"
+        )
+        raise ValueError(f"Failed to process document: {str(e)}") from e
+
+
+def process_document_with_docling(
+    url: str, content: bytes | None = None
+) -> Tuple[str, str]:
+    """Legacy wrapper for process_document function.
+
+    This function maintains backward compatibility with existing code.
+
+    Args:
+        url: The URL of the document to process
+        content: Binary content if already available
+
+    Returns:
+        Tuple containing (extracted text, content type)
+    """
+    return process_document(url, content)
+
+
+def should_skip_content(url: str) -> bool:
+    """Determine if the content from a given URL should be skipped based on certain rules."""
     try:
         decoded_url = unquote(url).lower()
     except Exception as e:
@@ -1516,312 +4669,91 @@ def should_skip_content(url: str) -> bool:
         decoded_url = url.lower()
 
     # Check if it's a document format that Docling can handle
-    if detect_document_type(url) is not None:
-        info_highlight(f"Document format detected, will process with Docling: {url}", category="validation")
+    if is_document_url(url):
+        info_highlight(
+            f"Document format detected, will process with Docling: {url}",
+            category="validation",
+        )
         return False
     else:
         # Enhanced PDF detection when Docling is not available
-        if any(p in decoded_url for p in ('.pdf', '%2Fpdf', '%3Fpdf')):
-            info_highlight(f"Skipping PDF content (Docling not available): {url}", category="validation")
+        if any(p in decoded_url for p in (".pdf", "%2Fpdf", "%3Fpdf")):
+            info_highlight(
+                f"Skipping PDF content (Docling not available): {url}",
+                category="validation",
+            )
             return True
 
-        # MIME-type pattern detection.
+        # MIME-type pattern detection
         mime_patterns = [
-            r'application/pdf',
-            r'application/\w+?pdf',
-            r'content-type:.*pdf'
+            r"application/pdf",
+            r"application/\w+?pdf",
+            r"content-type:.*pdf",
         ]
         if any(re.match(p, decoded_url) for p in mime_patterns):
-            info_highlight(f"Skipping PDF MIME-type pattern (Docling not available): {url}", category="validation")
+            info_highlight(
+                f"Skipping PDF MIME-type pattern (Docling not available): {url}",
+                category="validation",
+            )
             return True
 
     url_lower = url.lower()
 
-    # Check for problematic file types.
+    # Check for problematic file types
     for pattern in PROBLEMATIC_PATTERNS:
         if re.search(pattern, url_lower):
-            info_highlight(f"Skipping content with pattern {pattern}: {url}", category="validation")
+            info_highlight(
+                f"Skipping content with pattern {pattern}: {url}", category="validation"
+            )
             return True
 
-    # Check for problematic sites.
+    # Check for problematic sites
     domain = urlparse(url).netloc.lower()
     for site in PROBLEMATIC_SITES:
         if site in domain:
             info_highlight(
                 f"Skipping content from problematic site {site}: {url}",
-                category="validation"
+                category="validation",
             )
             return True
 
     return False
 
 
-def _merge_field(merged: Dict[str, Any], results: List[Dict[str, Any]], field: str, operation: str, seen_items: set) -> None:
-    """Merge a specific field from a list of result dictionaries into the merged dictionary.
-
-    The operation can be:
-      - 'extend': Append unique items to a list.
-      - 'update': Update dictionary values.
-      - 'max' or 'min': Keep the maximum or minimum value.
-      - 'avg': Append values to compute an average later.
-
-    Args:
-        merged (Dict[str, Any]): The dictionary accumulating merged results.
-        results (List[Dict[str, Any]]): The list of result dictionaries from which to merge data.
-        field (str): The field key to merge.
-        operation (str): The merge operation to perform ('extend', 'update', 'max', 'min', 'avg').
-        seen_items (set): A set to track items already merged to avoid duplicates.
-
-    Examples:
-        >>> merged = {}
-        >>> results = [{'score': 8}, {'score': 9}]
-        >>> _merge_field(merged, results, 'score', 'max', set())
-        >>> merged
-        {'score': 9}
-    """
-    for result in results:
-        if field not in result:
-            continue
-
-        value = result[field]
-        if operation == "extend":
-            merged[field] = merged.get(field, [])
-            item_key = json.dumps(value, sort_keys=True)
-            if item_key not in seen_items:
-                merged[field].append(value)
-                seen_items.add(item_key)
-        elif operation == "update":
-            merged[field] = merged.get(field, {})
-            merged[field].update(value)
-        elif operation in {"max", "min"}:
-            if field not in merged or (operation == "max" and value > merged[field]) or (operation == "min" and value < merged[field]):
-                merged[field] = value
-        elif operation == "avg":
-            merged[field] = merged.get(field, [])
-            merged[field].append(value)
-
-
-def _get_total_fields(merge_strategy: Dict[str, str], results: List[Dict[str, Any]]) -> int:
-    """Determine the total number of fields for progress tracking.
-    
-    Args:
-        merge_strategy: Dictionary mapping field names to merge operations.
-        results: List of result dictionaries to merge.
-        
-    Returns:
-        int: Total number of fields to process.
-    """
-    total_fields = len(merge_strategy) if merge_strategy else 0
-    if total_fields == 0 and results:
-        # If no merge strategy, count fields in first result
-        total_fields = len(results[0].keys())
-    return total_fields
-
-def _process_merge_strategy_fields(
-    merged: Dict[str, Any], 
-    results: List[Dict[str, Any]], 
-    merge_strategy: Dict[str, str], 
-    seen_items: Set[str],
-    category: str
-) -> int:
-    """Process fields according to the merge strategy.
-    
-    Args:
-        merged: Dictionary accumulating the merged results.
-        results: List of result dictionaries to merge.
-        merge_strategy: Dictionary mapping field names to merge operations.
-        seen_items: Set tracking already processed items.
-        category: Category name for logging.
-        
-    Returns:
-        int: Number of fields processed.
-    """
-    total_fields = _get_total_fields(merge_strategy, results)
-    current_field = 0
-    
-    for field, operation in merge_strategy.items():
-        _merge_field(merged, results, field, operation, seen_items)
-        current_field += 1
-        if total_fields > 0:
-            log_progress(current_field, total_fields, "merging", f"Merging {category} results")
-            
-    return current_field
-
-def _process_remaining_fields(
-    merged: Dict[str, Any], 
-    results: List[Dict[str, Any]], 
-    merge_strategy: Dict[str, str],
-    seen_items: Set[str]
-) -> None:
-    """Process fields in results that aren't in the merge strategy.
-    
-    Args:
-        merged: Dictionary accumulating the merged results.
-        results: List of result dictionaries to merge.
-        merge_strategy: Dictionary mapping field names to merge operations.
-        seen_items: Set tracking already processed items.
-    """
-    for result in results:
-        for field in result:
-            if field not in merge_strategy and field not in merged:
-                # Select appropriate merge operation based on field type
-                if isinstance(result[field], list):
-                    _merge_field(merged, results, field, 'extend', seen_items)
-                elif isinstance(result[field], dict):
-                    _merge_field(merged, results, field, 'update', seen_items)
-                elif isinstance(result[field], (int, float)):
-                    _merge_field(merged, results, field, 'max', seen_items)
-                elif result[field] is not None:
-                    # For other types, just take the first non-None value
-                    merged[field] = result[field]
-
-def _finalize_averages(merged: Dict[str, Any], merge_strategy: Dict[str, str]) -> None:
-    """Calculate final averages for 'avg' operations.
-    
-    Args:
-        merged: Dictionary accumulating the merged results.
-        merge_strategy: Dictionary mapping field names to merge operations.
-    """
-    for field, operation in merge_strategy.items():
-        if operation == 'avg' and isinstance(merged.get(field), list):
-            values = merged[field]
-            merged[field] = sum(values) / len(values) if values else 0.0
-
-def merge_chunk_results(results: List[Dict[str, Any]], category: str, merge_strategy: Dict[str, str] | None = None) -> Dict[str, Any]:
-    """Merge multiple chunk extraction results into a single consolidated result.
-
-    The function uses a merge strategy (or a default one based on the category)
-    to determine how to merge each field (e.g., 'extend' lists, 'update' dictionaries,
-    or compute 'max', 'min', or 'avg' values).
-
-    Args:
-        results (List[Dict[str, Any]]): A list of dictionaries containing results from each chunk.
-        category (str): The category of the extraction (e.g., 'research', 'summary').
-        merge_strategy (Optional[Dict[str, str]]): Optional mapping of field names to merge operations.
-            If not provided, a default mapping for the category is used.
-
-    Returns:
-        Dict[str, Any]: A single dictionary containing the merged results.
-
-    Examples:
-        >>> results = [
-        ...     {'findings': ['finding1'], 'score': 5},
-        ...     {'findings': ['finding2'], 'score': 8}
-        ... ]
-        >>> merge_strategy = {'findings': 'extend', 'score': 'max'}
-        >>> merge_chunk_results(results, 'research', merge_strategy)
-        {'findings': ['finding1', 'finding2'], 'score': 8}
-        
-        >>> # Using average merge operation
-        >>> results = [{'rating': 4.0}, {'rating': 6.0}]
-        >>> merge_strategy = {'rating': 'avg'}
-        >>> merge_chunk_results(results, 'review', merge_strategy)
-        {'rating': 5.0}
-    """
-    if not results:
-        warning_highlight(f"No results to merge for category: {category}")
-        return get_default_extraction_result(category)
-
-    start_time = time.time()
-    
-    info_highlight(f"Merging {len(results)} chunk results for category: {category}")
-    
-    # Get the default merge strategy if none provided
-    if not merge_strategy:
-        merge_strategy = get_category_merge_mapping(category)
-        
-    merged: Dict[str, Any] = {}
-    seen_items: Set[str] = set()
-    
-    # Process fields according to merge strategy
-    _process_merge_strategy_fields(merged, results, merge_strategy, seen_items, category)
-    
-    # Process any remaining fields not in the merge strategy
-    _process_remaining_fields(merged, results, merge_strategy, seen_items)
-    
-    # Calculate final averages
-    _finalize_averages(merged, merge_strategy)
-    
-    end_time = time.time()
-    log_performance_metrics(
-        f"Merging {category} results", 
-        start_time, 
-        end_time, 
-        "merging",
-        {"num_results": len(results), "num_fields": len(merged)}
-    )
-    
-    return merged
-
-
-def validate_content(content: str) -> bool:
-    """Validate that the provided content meets minimum requirements.
-
-    This function checks that the content is a string, is non-empty,
-    and meets a minimum length requirement.
-
-    Args:
-        content (str): The content string to validate.
-
-    Returns:
-        bool: True if the content is valid; False otherwise.
-
-    Examples:
-        >>> validate_content("This is valid content")
-        True
-        
-        >>> validate_content("")  # Empty string
-        False
-        
-        >>> validate_content("Hi")  # Too short
-        False
-        
-        >>> validate_content(123)  # Invalid type (non-string)
-        False
-    """
-    if not content or not isinstance(content, str):
-        warning_highlight("Invalid content type or empty content", category="validation")
-        return False
-        
-    if len(content) < 10:  # Minimum content length requirement.
-        warning_highlight(
-            f"Content too short: {len(content)} characters",
-            category="validation"
-        )
-        return False
-        
-    return True
+CONTENT_DETECTION_STRATEGIES = [
+    {"strategy": detect_html, "weight": 0.8, "content_based": True},
+    {"strategy": detect_json, "weight": 0.7, "content_based": True},
+    {"strategy": detect_from_url_extension, "weight": 0.9, "content_based": False},
+    {"strategy": detect_from_url_path, "weight": 0.6, "content_based": False},
+    {"strategy": detect_from_content_heuristics, "weight": 0.5, "content_based": True},
+    {"strategy": detect_from_url_domain, "weight": 0.4, "content_based": False},
+]
 
 
 def detect_content_type(url: str, content: str) -> str:
-    r"""Determine the content type using multiple detection strategies.
+    """Determine the content type using multiple detection strategies.
 
-    This function sequentially applies various detectors (HTML, JSON, URL extension/path,
-    content heuristics, and domain analysis). If none succeed, a fallback detection is used.
-    If the URL points to a document file and Docling is available, returns the document type.
+    This function attempts to identify the content type of a given URL and content
+    using a series of detection strategies, falling back to a default type if
+    none of the strategies are successful.
 
     Args:
-        url (str): The URL associated with the content.
-        content (str): The content to analyze.
+        url: The URL of the content.
+        content: The actual content.
 
     Returns:
-        str: The detected content type (e.g., 'html', 'json', 'text', 'pdf', 'doc', 'unknown').
+        The detected content type as a string (e.g., 'html', 'json', 'text').
 
     Examples:
-        >>> detect_content_type('page.html', '<html><body>Content</body></html>')
+        >>> url = "https://example.com/page.html"
+        >>> content = "<html><body>Content</body></html>"
+        >>> detect_content_type(url, content)
         'html'
-        
-        >>> detect_content_type('data.json', '{"key": "value"}')
+
+        >>> url = "https://api.example.com/data.json"
+        >>> content = '{"key": "value"}'
+        >>> detect_content_type(url, content)
         'json'
-        
-        >>> detect_content_type('document.pdf', 'PDF binary content')
-        'pdf'  # If Docling is available
-        
-        >>> detect_content_type('article', 'Plain text content\n\nMore content')
-        'text'
-        
-        >>> detect_content_type('', '')
-        'unknown'
     """
     info_highlight(f"Detecting content type for URL: {url}", category="content_type")
 
@@ -1829,187 +4761,281 @@ def detect_content_type(url: str, content: str) -> str:
         info_highlight(f"Detected document type: {doc_type}", category="content_type")
         return doc_type
 
-    detector_functions = [
-        (detect_html, content),
-        (detect_json, content),
-        (detect_from_url_extension, url),
-        (detect_from_url_path, url),
-        (detect_from_content_heuristics, content),
-        (detect_from_url_domain, url)
-    ]
+    for strategy_data in CONTENT_DETECTION_STRATEGIES:
+        strategy = strategy_data["strategy"]
+        strategy_data["weight"]
+        content_based = strategy_data["content_based"]
 
-    for detector, arg in detector_functions:
-        if result := detector(arg):
+        if result := strategy(content if content_based else url):
             info_highlight(f"Detected content type: {result}", category="content_type")
             return result
 
-    # Fallback detection if no other detectors return a type.
-    result = fallback_detection(url, content)
-    info_highlight(f"Using fallback detection, type: {result}", category="content_type")
-    return result
+    return fallback_detection(url, content)
 
 
-def fallback_detection(url: str, content: str) -> str:
-    """Fallback detection logic for content type.
+MIN_CONTENT_LENGTH = 10  # Or retrieve from a config file/env variable
 
-    Args:
-        url (str): The URL to analyze.
-        content (str): The content to analyze.
 
-    Returns:
-        str: Returns 'text' if content is non-empty; if URL indicates a web resource, returns 'html';
-             otherwise returns 'unknown'.
+def validate_content(content: str) -> bool:
+    """Validate that the provided content meets minimum requirements."""
+    if not content or not isinstance(content, str):
+        warning_highlight(
+            "Invalid content type or empty content", category="validation"
+        )
+        return False
 
-    Examples:
-        >>> fallback_detection("http://example.com", "Some text content")
-        'text'
-        
-        >>> fallback_detection("", "")
-        'unknown'
-    """
-    if content and content.strip():
-        return 'text'
-    return 'html' if url and url.startswith(('http://', 'https://')) else 'unknown'
+    if len(content) < MIN_CONTENT_LENGTH:  # Minimum content length requirement
+        warning_highlight(
+            f"Content too short: {len(content)} characters", category="validation"
+        )
+        return False
+
+    return True
 
 
 def preprocess_content(content: str, url: str) -> str:
-    r"""Clean and preprocess content prior to further processing or model ingestion.
-
-    This includes removing boilerplate text, redundant whitespace, site-specific cleaning,
-    and truncating overly long content. Results are cached for performance.
-
-    Args:
-        content (str): The raw content string to be preprocessed.
-        url (str): The URL of the content (used for site-specific rules and caching).
-
-    Returns:
-        str: The cleaned and preprocessed content.
-
-    Examples:
-        >>> content = "Copyright 2024 Example Corp. All rights reserved.\\nActual content here"
-        >>> preprocess_content(content, "example.com")
-        'Actual content here'
-        
-        >>> content = "Please enable JavaScript to continue.\\nImportant content"
-        >>> preprocess_content(content, "example.com")
-        'Important content'
-        
-        >>> preprocess_content("", "example.com")
-        ''
-    """
+    """Clean and preprocess content prior to further processing or model ingestion."""
     if not content:
-        warning_highlight("Empty content provided", category="preprocessing")
         return ""
 
-    info_highlight(f"Preprocessing content from {url}", category="preprocessing")
-    info_highlight(f"Initial content length: {len(content)}", category="preprocessing")
+    # Remove excessive whitespace
+    content = re.sub(r"\s+", " ", content)
 
-    # Track preprocessing performance
-    import time
-    start_time = time.time()
-
-    # Generate a cache key based on content and URL.
-    cache_key = f"preprocess_content_{hash(f'{content}_{url}')}"
-
-    # Retrieve cached content if available and not expired.
-    cached_result = content_cache.get(cache_key)
-    if cached_result and isinstance(cached_result, dict):
-        log_performance_metrics(
-            "Content preprocessing (cached)", 
-            start_time, 
-            time.time(), 
-            "preprocessing",
-            {"content_length": len(cached_result.get("content", "")), "cache_hit": True}
+    # Trim content to maximum length if needed
+    if len(content) > MAX_CONTENT_LENGTH:
+        info_highlight(
+            f"Trimming content from {len(content)} to {MAX_CONTENT_LENGTH} characters",
+            category="preprocessing",
         )
-        return cached_result.get("content", "")
+        content = content[:MAX_CONTENT_LENGTH]
 
-    # Define boilerplate removal regex patterns.
-    boilerplate_patterns = [
-        (re.compile(r'Copyright \d{4}.*?reserved\.', re.IGNORECASE | re.DOTALL), ''),
-        (re.compile(r'Terms of Service.*?Privacy Policy', re.IGNORECASE | re.DOTALL), ''),
-        (re.compile(r'Please enable JavaScript.*?continue', re.IGNORECASE | re.DOTALL), '')
-    ]
+    # Basic cleaning of HTML remnants if they exist
+    content = re.sub(r"<[^>]*>", " ", content)
 
-    # Log progress for preprocessing steps
-    total_steps = 4  # boilerplate removal, whitespace normalization, site-specific, truncation
-    # Remove boilerplate text.
-    for pattern, replacement in boilerplate_patterns:
-        content = pattern.sub(replacement, content)
-    current_step = 0 + 1
-    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
+    # Normalize whitespace after cleaning
+    content = re.sub(r"\s+", " ", content).strip()
 
-    # Normalize whitespace.
-    content = ' '.join(content.split())
-    current_step += 1
-    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
-
-    # Site-specific cleaning (e.g., for iaeme.com).
-    domain = urlparse(url).netloc.lower()
-    if 'iaeme.com' in domain:
-        iaeme_pattern = re.compile(r'International Journal.*?Indexing', re.IGNORECASE | re.DOTALL)
-        content = iaeme_pattern.sub('', content)
-    current_step += 1
-    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
-
-    # Truncate content if it exceeds maximum length.
-    original_length = len(content)
-    if original_length > MAX_CONTENT_LENGTH:
-        warning_highlight(
-            f"Content exceeds {MAX_CONTENT_LENGTH} characters, truncating",
-            category="preprocessing"
-        )
-        content = f"{content[:MAX_CONTENT_LENGTH]}..."
-    current_step += 1
-    log_progress(current_step, total_steps, "preprocessing", "Cleaning content")
-
-    # Cache the preprocessed content.
-    content_cache.put(
-        cache_key,
-        {"content": content},
-        ttl=3600  # 1 hour TTL
-    )
-
-    end_time = time.time()
-    log_performance_metrics(
-        "Content preprocessing", 
-        start_time, 
-        end_time, 
-        "preprocessing",
-        {
-            "original_length": original_length, 
-            "final_length": len(content), 
-            "reduction_percent": round((1 - len(content) / max(1, original_length)) * 100, 2),
-            "cache_hit": False
-        }
-    )
-
-    info_highlight(f"Final content length: {len(content)}", category="preprocessing")
     return content
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate the number of tokens in a text based on a fixed character-to-token ratio.
-
-    Args:
-        text (str): The text whose tokens are to be estimated.
-
-    Returns:
-        int: The estimated token count.
-
-    Examples:
-        >>> # Assuming TOKEN_CHAR_RATIO = 4.0
-        >>> estimate_tokens("This is a test string")
-        5  # Approximately 20 characters / 4.0
-        
-        >>> estimate_tokens("")
-        0
-        
-        >>> estimate_tokens("Short")
-        1  # Approximately 5 characters / 4.0
-    """
+    """Estimate the number of tokens in a text based on a fixed character-to-token ratio."""
     return int(len(text) / TOKEN_CHAR_RATIO) if text else 0
 
 
+# Field merging utilities for handling chunk results
+def _handle_list_extend(
+    merged_field: List[Any], value: List[Any], seen_items: Set[str]
+) -> None:
+    """Handle the 'extend' operation for list values."""
+    # Convert the entire value to string for deduplication
+    value_str = json.dumps(value, sort_keys=True)
+    
+    # Add the entire list as an item if not already seen
+    if value_str not in seen_items:
+        seen_items.add(value_str)
+        merged_field.append(value)
+
+
+def _handle_dict_update(merged_field: Dict[str, Any], value: Dict[str, Any]) -> None:
+    """Handle the 'update' operation for dictionary values."""
+    # Update dictionary fields, but don't overwrite with empty values
+    for k, v in value.items():
+        if (v or v == 0) and (k not in merged_field or not merged_field[k]):
+            merged_field[k] = v
+
+
+def _handle_numeric_operation(
+    merged_field: float | None, value: float, operation: str
+) -> float | None:
+    """Handle numeric operations (max, min)."""
+    if (
+        operation == "max"
+        and (merged_field is None or value > merged_field)
+        or operation != "max"
+        and operation == "min"
+        and (merged_field is None or value < merged_field)
+    ):
+        return value
+    return merged_field
+
+
+def _handle_average_collection(
+    merged: Dict[str, Any], field: str, value: float
+) -> None:
+    """Collect values for average operation."""
+    if "values" not in merged:
+        merged["values"] = {}
+    if field not in merged["values"]:
+        merged["values"][field] = []
+    merged["values"][field].append(value)
+
+
+def _initialize_field(merged: Dict[str, Any], field: str, value: Any) -> None:
+    """Initialize a field in the merged dictionary if it doesn't exist."""
+    if field not in merged:
+        if isinstance(value, list):
+            merged[field] = []
+        elif isinstance(value, dict):
+            merged[field] = {}
+        else:
+            merged[field] = None
+
+
+def _merge_field(
+    merged: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    field: str,
+    operation: str,
+    seen_items: Set[str],
+) -> None:
+    """Merge a specific field from result dictionaries into the merged dictionary."""
+    for result in results:
+        if field not in result:
+            continue
+
+        value = result[field]
+        if not value and value != 0:  # Skip empty values but keep zeros
+            continue
+
+        # Initialize field if it doesn't exist in merged dict
+        _initialize_field(merged, field, value)
+
+        # Handle different merge operations
+        if operation == "extend" and isinstance(value, list):
+            _handle_list_extend(merged[field], value, seen_items)
+
+        elif operation == "update" and isinstance(value, dict):
+            if not isinstance(merged[field], dict):
+                merged[field] = {}
+            _handle_dict_update(merged[field], value)
+
+        elif operation in {"max", "min"} and isinstance(value, (int, float)):
+            merged[field] = _handle_numeric_operation(merged[field], value, operation)
+
+        elif operation in {"average", "avg"} and isinstance(value, (int, float)):
+            _handle_average_collection(merged, field, value)
+
+        elif operation == "first" and merged[field] is None:
+            # Take first non-empty value
+            merged[field] = value
+
+
+def _get_total_fields(
+    merge_strategy: Dict[str, str], results: List[Dict[str, Any]]
+) -> int:
+    """Determine the total number of fields for progress tracking."""
+    total_fields = len(merge_strategy) if merge_strategy else 0
+    if total_fields == 0 and results:
+        # If no merge strategy, count fields in first result
+        total_fields = len(results[0].keys())
+    return total_fields
+
+
+def _process_merge_strategy_fields(
+    merged: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    merge_strategy: Dict[str, str],
+    seen_items: Set[str],
+    category: str,
+) -> int:
+    """Process fields according to the merge strategy."""
+    total_fields = _get_total_fields(merge_strategy, results)
+    current_field = 0
+
+    for field, operation in merge_strategy.items():
+        _merge_field(merged, results, field, operation, seen_items)
+        current_field += 1
+        if total_fields > 0:
+            log_progress(
+                current_field, total_fields, "merging", f"Merging {category} results"
+            )
+
+    return current_field
+
+
+def _process_remaining_fields(
+    merged: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    merge_strategy: Dict[str, str],
+    seen_items: Set[str],
+) -> None:
+    """Process fields in results that aren't in the merge strategy."""
+    for result in results:
+        for field in result:
+            if field not in merge_strategy and field not in merged:
+                # Select appropriate merge operation based on field type
+                if isinstance(result[field], list):
+                    _merge_field(merged, results, field, "extend", seen_items)
+                elif isinstance(result[field], dict):
+                    _merge_field(merged, results, field, "update", seen_items)
+                elif isinstance(result[field], (int, float)):
+                    _merge_field(merged, results, field, "max", seen_items)
+                elif result[field] is not None:
+                    # For other types, just take the first non-None value
+                    merged[field] = result[field]
+
+
+def _finalize_averages(merged: Dict[str, Any], merge_strategy: Dict[str, str]) -> None:
+    """Calculate final averages for 'avg' operations."""
+    if "values" not in merged:
+        return
+
+    for field, values in merged.get("values", {}).items():
+        if values:
+            # Calculate the average of collected values
+            merged[field] = sum(values) / len(values)
+
+    # Remove the temporary values storage
+    if "values" in merged:
+        del merged["values"]
+
+
+def merge_chunk_results(
+    results: List[Dict[str, Any]],
+    category: str,
+    merge_strategy: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Merge multiple chunk extraction results into a single consolidated result."""
+    if not results:
+        warning_highlight(f"No results to merge for category: {category}")
+        return get_default_extraction_result(category)
+
+    start_time = time.time()
+
+    info_highlight(f"Merging {len(results)} chunk results for category: {category}")
+
+    # Get the default merge strategy if none provided
+    if not merge_strategy:
+        merge_strategy = get_category_merge_mapping(category)
+
+    merged: Dict[str, Any] = {}
+    seen_items: Set[str] = set()
+
+    # Process fields according to merge strategy
+    _process_merge_strategy_fields(
+        merged, results, merge_strategy, seen_items, category
+    )
+
+    # Process any remaining fields not in the merge strategy
+    _process_remaining_fields(merged, results, merge_strategy, seen_items)
+
+    # Calculate final averages
+    _finalize_averages(merged, merge_strategy)
+
+    end_time = time.time()
+    log_performance_metrics(
+        f"Merging {category} results",
+        start_time,
+        end_time,
+        "merging",
+        {"num_results": len(results), "num_fields": len(merged)},
+    )
+
+    return merged
+
+
+# Export public functions
 __all__ = [
     "chunk_text",
     "preprocess_content",
@@ -2018,7 +5044,9 @@ __all__ = [
     "merge_chunk_results",
     "validate_content",
     "detect_content_type",
-    "process_document_with_docling"
+    "process_document",
+    "process_document_with_docling",
+    "is_document_url",
 ]
 </file>
 
@@ -2030,7 +5058,7 @@ used across the research agent to maintain consistency and reduce duplication.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 # Default chunking configurations
@@ -2041,6 +5069,45 @@ class ChunkConfig:
     DEFAULT_OVERLAP: int = 500
     LARGE_CHUNK_SIZE: int = 40000
     LARGE_OVERLAP: int = 5000
+
+
+# Constants for content processing
+DEFAULT_CHUNK_SIZE: int = 40000
+DEFAULT_OVERLAP: int = 5000
+MAX_CONTENT_LENGTH: int = 100000
+TOKEN_CHAR_RATIO: float = 4.0
+
+# Problematic content patterns to skip certain file types
+PROBLEMATIC_PATTERNS: List[str] = [
+    r'\.zip$',
+    r'\.rar$',
+    r'\.exe$',
+    r'\.dmg$',
+    r'\.iso$',
+    r'\.tar$',
+    r'\.gz$'
+]
+
+# Known problematic sites to avoid
+PROBLEMATIC_SITES: List[str] = [
+    'iaeme.com',
+    'scribd.com',
+    'slideshare.net',
+    'academia.edu'
+]
+
+# Document type mappings
+DOCUMENT_TYPE_MAPPING: Dict[str, str] = {
+    '.pdf': 'pdf',
+    '.doc': 'doc',
+    '.docx': 'doc',
+    '.xls': 'excel',
+    '.xlsx': 'excel',
+    '.ppt': 'presentation',
+    '.pptx': 'presentation',
+    '.odt': 'document',
+    '.rtf': 'document'
+}
 
 
 # Default extraction result structure
@@ -2143,13 +5210,141 @@ def get_category_merge_mapping(category: str) -> Dict[str, str]:
     return CATEGORY_MERGE_MAPPINGS.get(category, {})
 
 
+# URL path patterns for content type detection
+HTML_PATH_PATTERNS = (
+    "/wiki/",
+    "/articles/",
+    "/blog/",
+    "/news/",
+    "/docs/",
+    "/help/",
+    "/support/",
+    "/pages/",
+    "/product/",
+    "/service/",
+    "/consumers/",
+    "/detail/",
+    "/view/",
+    "/content/",
+)
+
+# Data feed patterns (JSON/XML/CSV)
+DATA_PATH_PATTERNS = (
+    "/api/",
+    "/data/",
+    "/feeds/",            # plural version
+    "/feed/",
+    "/export/",
+    "/export-data/",
+    "/catalog.",
+    "/product-feed",
+    "/pricing-data",
+    ".json",
+    ".xml",
+    ".csv"
+)
+
+# Procurement/specific HTML content patterns
+PROCUREMENT_HTML_PATTERNS = (
+    "/procurement/", 
+    "/procurements/",     # plural
+    "/sourcing/",
+    "/tender/",
+    "/tender-notice/",    # additional synonym
+    "/rfp/",
+    "/rfq/",
+    "/rfx/",
+    "/bid-request/",      # capturing bid-related pages
+    "/bid-invitation/",
+    "/bidding/",
+    "/contracts/",
+    "/contract-management/",  # extended contract keyword
+    "/supplier/",
+    "/suppliers/",        # plural
+    "/vendor/",
+    "/vendors/",          # plural
+    "/purchase-order/",
+    "/category-management/",
+    "/strategic-sourcing/",
+    "/purchasing/",
+    "/reverse-auction/",
+    "/scorecard/",
+    "/supplier-portal/",
+    "/vendor-management/",
+    "/e-procurement/",    # electronic procurement systems
+    "/quotation/",        # for RFQs and pricing inquiries
+    "/quote/"
+)
+
+# Marketplace/catalogue indicators
+MARKETPLACE_PATTERNS = (
+    "/product/",
+    "/sku/",
+    "/listing/",
+    "/catalog/",
+    "/inventory/",
+    "/stock/",
+    "/marketplace/",
+    "/b2b/",
+    "/bulk-pricing/",
+    "/moq/",              # minimum order quantity
+    "/lead-time/",
+    "/vendor-central/",
+    "/shop/",             # capturing shopping portals
+    "/store/",
+    "/deals/",
+    "/offers/"
+)
+
+# Document file extensions and patterns
+DOCUMENT_PATTERNS = (
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".rtf",              # rich text format
+    ".odt",              # OpenDocument text
+    ".ods"               # OpenDocument spreadsheet
+)
+
+# Report-specific patterns (research, studies, whitepapers)
+REPORT_PATTERNS = (
+    "/report/",
+    "/analysis/",
+    "/study/",
+    "/whitepaper/",
+    "/benchmark/",
+    "/survey/",
+    "/insights/",        # additional analysis perspective
+    "/case-study/",
+    "/evaluation/",
+    "/audit/",
+    "/dossier/"          # detailed collection of documents
+)
+
 # Export all defaults
 __all__ = [
     "ChunkConfig",
     "DEFAULT_EXTRACTION_RESULTS",
     "CATEGORY_MERGE_MAPPINGS",
     "get_default_extraction_result",
-    "get_category_merge_mapping"
+    "get_category_merge_mapping",
+    "DEFAULT_CHUNK_SIZE",
+    "DEFAULT_OVERLAP",
+    "MAX_CONTENT_LENGTH",
+    "TOKEN_CHAR_RATIO",
+    "PROBLEMATIC_PATTERNS",
+    "PROBLEMATIC_SITES",
+    "DOCUMENT_TYPE_MAPPING",
+    "HTML_PATH_PATTERNS",
+    "DATA_PATH_PATTERNS",
+    "PROCUREMENT_HTML_PATTERNS",
+    "MARKETPLACE_PATTERNS",
+    "DOCUMENT_PATTERNS",
+    "REPORT_PATTERNS"
 ]
 </file>
 

@@ -1,572 +1,1240 @@
-"""Enhanced Jina AI Search Integration.
+"""Jina AI Tools - Clean Implementation for LangGraph.
 
-This module provides a more robust integration with Jina AI's search API
-with improved error handling, result validation, and search strategies.
+This module provides production-ready tool implementations for Jina AI's
+Search Foundation APIs, designed to work seamlessly with LangGraph's
+orchestration framework. The implementation follows best practices for
+asynchronous programming, error handling, and type safety.
+
+Each tool is structured to support both standalone usage and integration
+with LangGraph's ToolNode, InjectedState, and checkpoint mechanisms.
+
+Usage:
+    1. Set the JINA_API_KEY environment variable
+    2. Import specific tools or use the create_jina_toolnode() function
+    3. Integrate with your LangGraph workflow
+
+Example:
+    ```python
+    from langgraph.graph import StateGraph
+    from react_agent.tools.jina import create_jina_toolnode
+    from react_agent.tools.jina import search, reader, embeddings
+
+    # Create a graph with all Jina tools
+    workflow = StateGraph(YourStateType)
+    workflow.add_node("jina_tools", create_jina_toolnode())
+    
+    # Or with selected tools
+    search_tools = create_jina_toolnode(include_tools=["search", "grounding"])
+    workflow.add_node("search_tools", search_tools)
+    ```
 """
 
-
-from typing import Dict, List, Optional, Any, Union, cast, Tuple, Literal
-import json
-import time
-import aiohttp
 import asyncio
-import contextlib
-from urllib.parse import urljoin, quote, urlparse
-import random
-from datetime import datetime, timezone
-import re
+import hashlib
 import os
+from typing import Annotated, Any, Dict, List, Literal, TypedDict, Union
 
-from langchain_core.documents import Document
+import aiohttp
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import InjectedToolArg
-from typing_extensions import Annotated
-from pydantic import BaseModel, Field
-from langchain.tools import BaseTool
-from langchain_core.tools import ToolException
-from langgraph.graph import StateGraph
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from langchain_core.tools import InjectedToolArg, ToolException, tool
+from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
+from langgraph.store.base import BaseStore
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 
 from react_agent.configuration import Configuration
-from react_agent.utils.logging import get_logger, log_dict, info_highlight, warning_highlight, error_highlight
-from react_agent.utils.validations import is_valid_url
-from react_agent.prompts.query import optimize_query, detect_vertical, expand_acronyms
-from react_agent.utils.extraction import safe_json_parse
-from react_agent.utils.cache import create_checkpoint, load_checkpoint, cache_result, ProcessorCache
+from react_agent.utils.cache import create_checkpoint, load_checkpoint
 
-# Initialize logger
+# Utilities from your existing project
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
+from react_agent.utils.validations import is_valid_url
+
 logger = get_logger(__name__)
 
-# Define search types for specialized search strategies
-SearchType = Literal["general", "authoritative", "recent", "comprehensive", "technical"]
+# -------------------------------------------------------------------------
+# Common Types and Configuration
+# -------------------------------------------------------------------------
 
-# Initialize memory saver for caching
-processor_cache = ProcessorCache(thread_id="jina-search")
-
-# Add at module level after imports
-_query_cache: Dict[str, Tuple[List[Document], datetime]] = {}
 
 class RetryConfig(BaseModel):
-    """Configuration for retry behavior."""
-    max_retries: int = Field(default=3, description="Maximum number of retries")
-    base_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
-    max_delay: float = Field(default=10.0, description="Maximum delay between retries in seconds")
-    
-    def get_delay(self, attempt: int) -> float:
-        """Calculate delay with exponential backoff."""
-        return min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
+    """Configuration for HTTP request retries with exponential backoff."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-class SearchParams(BaseModel):
-    """Parameters for search operations."""
-    query: str = Field(..., description="Search query")
-    search_type: SearchType = Field(default="general", description="Type of search to perform")
-    max_results: Optional[int] = Field(default=None, description="Maximum number of results to return")
-    min_quality_score: Optional[float] = Field(default=0.5, description="Minimum quality score for results")
-    recency_days: Optional[int] = Field(default=None, description="Maximum age of results in days")
-    domains: Optional[List[str]] = Field(default=None, description="List of domains to search")
-    category: Optional[str] = Field(default=None, description="Category to search in")
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API request."""
-        result = {
-            "q": self.query,
-            "limit": self.max_results or 10,
-            "min_score": self.min_quality_score or 0.5
-        }
-        
-        if self.recency_days:
-            result["recency_days"] = self.recency_days
-            
-        if self.domains:
-            result["domains"] = ",".join(self.domains)
-            
-        if self.category:
-            result["category"] = self.category
-            
-        return result
+    max_retries: PositiveInt = Field(default=3, description="Maximum number of retries")
+    base_delay: PositiveFloat = Field(default=1.0, description="Base delay in seconds")
+    max_delay: PositiveFloat = Field(default=5.0, description="Maximum delay in seconds")
 
-class JinaSearchClient:
-    """Enhanced client for Jina AI search with retry and validation."""
-    
-    def __init__(
-        self,
-        api_key: str,
-        base_url: Optional[str] = None,
-        retry_config: Optional[RetryConfig] = None,
-    ):
-        """Initialize Jina search client.
-        
-        Args:
-            api_key: Jina AI API key
-            base_url: Optional base URL for self-hosted instances
-            retry_config: Configuration for retry behavior
-        """
-        self.api_key = api_key
-        self.base_url = base_url.rstrip('/') if base_url else "https://s.jina.ai"
-        self.retry_config = retry_config or RetryConfig()
-        self.session: Optional[aiohttp.ClientSession] = None
-        
-    async def __aenter__(self):
-        """Create aiohttp session."""
-        self.session = aiohttp.ClientSession(
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-        )
+    @model_validator(mode="after")
+    def validate_delays(self) -> "RetryConfig":
+        """Ensure max_delay is greater than or equal to base_delay."""
+        if self.max_delay < self.base_delay:
+            raise ValueError("max_delay must be greater than or equal to base_delay")
         return self
+
+
+class JinaToolState(TypedDict, total=False):
+    """State for LangGraph tools to access and modify."""
+    messages: List[Any]  # Messages in the graph state
+    jina_api_key: str | None  # Optional API key override
+    retry_config: RetryConfig | None  # Optional retry configuration
+    cache_results: bool  # Whether to cache results in store
+
+
+# -------------------------------------------------------------------------
+# Shared HTTP Client Logic 
+# -------------------------------------------------------------------------
+
+async def _make_request_with_retry(
+    method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"],
+    url: str,
+    headers: Dict[str, str],
+    json_data: Dict[str, Any] | None = None,
+    retry_config: RetryConfig | None = None,
+) -> Dict[str, Any]:
+    """Make an HTTP request with exponential backoff retry logic.
+    
+    Args:
+        method: HTTP method to use
+        url: Target URL for the request
+        headers: HTTP headers to include
+        json_data: Optional JSON payload
+        retry_config: Configuration for retries
         
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Close aiohttp session."""
-        if self.session:
-            await self.session.close()
-            self.session = None
+    Returns:
+        API response as a dictionary or error information
+    """
+    if retry_config is None:
+        retry_config = RetryConfig()
 
-    def _get_endpoint(self, endpoint: str) -> str:
-        """Get endpoint URL."""
-        base = self.base_url.rstrip('/')
-        if not endpoint.startswith('/'):
-            endpoint = f'/{endpoint}'
-        return f"{base}{endpoint}"
+    attempt = 0
+    last_exception: Exception | None = None
 
-    async def _make_request_with_retry(
-        self,
-        method: str,
-        endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Make HTTP request to Jina API with retry logic and better error handling."""
-        if not self.session:
-            raise ValueError("Session not initialized")
+    while attempt < retry_config.max_retries:
+        attempt += 1
+        try:
+            info_highlight(f"Attempt {attempt} {method} {url}", "JinaTool")
 
-        last_exception = None
-        for attempt in range(1, self.retry_config.max_retries + 1):
-            try:
-                url = self._get_endpoint(endpoint)
-                info_highlight(f"Making request to: {url} with params: {params}")
-                
-                async with self.session.request(
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
                     method=method,
                     url=url,
-                    params=params,
-                    json=json_data
-                ) as response:
-                    # Check for no results error (422)
-                    if response.status == 422:
-                        error_text = await response.text()
-                        if "No search results available" in error_text:
-                            warning_highlight("No search results available for this query")
-                            return {"results": []}  # Return empty results rather than raising an error
-                    
-                    # Handle other errors
-                    if response.status != 200:
-                        error_text = await response.text()
-                        error_highlight(f"Request failed with status {response.status}: {error_text}")
-                        raise aiohttp.ClientError(f"Request failed with status {response.status}: {error_text}")
-                    
-                    return await response.json()
-            except Exception as e:
-                last_exception = e
-                if attempt < self.retry_config.max_retries:
-                    delay = self.retry_config.get_delay(attempt)
-                    warning_highlight(
-                        f"Request failed (attempt {attempt}/{self.retry_config.max_retries}): {str(last_exception)}. Retrying in {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    error_highlight(
-                        f"Request failed after {self.retry_config.max_retries} attempts: {str(last_exception)}"
-                    )
-                    raise
+                    headers=headers,
+                    json=json_data,
+                    raise_for_status=False,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    status = resp.status
+                    text = await resp.text()
 
-        # This should never be reached as the last failure should raise
-        assert last_exception is not None
-        raise last_exception
+                    # Special case for 422 (invalid input)
+                    if status == 422:
+                        warning_highlight(f"422 Unprocessable Entity: {text}", "JinaTool")
+                        return {"error": {"status": status, "message": text}}
 
-    async def search(
-        self,
-        params: SearchParams
-    ) -> List[Document]:
-        """Search with improved parameters and result validation.
-        
-        Args:
-            params: Search parameters
-            
-        Returns:
-            List of documents from search results
-        """
-        request_params = params.to_dict()
-        info_highlight(f"Executing {params.search_type} search with query: {params.query}")
-        
-        try:
-            # Use the search endpoint
-            data = await self._make_request_with_retry(
-                method="GET",
-                endpoint="/search",  # Use the search endpoint
-                params=request_params
+                    # Handle successful responses (status 2xx)
+                    if 200 <= status < 300:
+                        try:
+                            return await resp.json()
+                        except Exception:
+                            # If not valid JSON, return the raw text
+                            return {"raw_response": text, "status": status}
+
+                    # Handle error responses
+                    error_msg = f"HTTP {status}: {text}"
+                    raise aiohttp.ClientError(error_msg)
+
+        except aiohttp.ClientError as ce:
+            last_exception = ce
+            warning_highlight(
+                f"ClientError on attempt {attempt}/{retry_config.max_retries}: {str(last_exception)}",
+                "JinaTool",
             )
-            
-            results = self._parse_search_results(data)
-            info_highlight(f"Retrieved {len(results)} search results")
-            
-            # If no results, try simplified query
-            if not results:
-                # Extract main keywords (first 3 words or up to 30 chars)
-                simplified_query = " ".join(params.query.split()[:3])
-                if len(simplified_query) > 30:
-                    simplified_query = simplified_query[:30]
-                
-                info_highlight(f"No results found, trying simplified query: {simplified_query}")
-                request_params["query"] = simplified_query
-                
-                data = await self._make_request_with_retry(
-                    method="GET",
-                    endpoint="/search",
-                    params=request_params
-                )
-                
-                results = self._parse_search_results(data)
-                info_highlight(f"Retrieved {len(results)} results with simplified query")
-            
-            # Convert results to Documents
-            documents = self._convert_to_documents(results)
-            
-            # Apply quality filtering
-            min_score: float = float(params.min_quality_score or 0.5)  # Explicit type conversion
-            filtered_docs = self._filter_documents(documents, min_score)
-            info_highlight(f"Filtered to {len(filtered_docs)} high-quality results")
-            
-            return filtered_docs
         except Exception as e:
-            error_highlight(f"Search failed: {str(e)}")
-            return []
+            last_exception = e
+            warning_highlight(
+                f"Exception on attempt {attempt}/{retry_config.max_retries}: {str(last_exception)}",
+                "JinaTool",
+            )
+        # Calculate exponential backoff delay
+        delay = min(retry_config.max_delay, retry_config.base_delay * (2 ** (attempt - 1)))
+        await asyncio.sleep(delay)
 
-    def _parse_search_results(self, raw_results: Union[str, List[Dict], Dict]) -> List[Dict]:
-        """Parse raw results with improved error handling."""
-        try:
-            # Convert raw_results to string if it's not already
-            if isinstance(raw_results, (list, dict)):
-                raw_results = json.dumps(raw_results)
-            parsed = safe_json_parse(raw_results, "search_results")
-            return self._extract_results_list(parsed)
-        except Exception as e:
-            error_highlight(f"Error parsing search results: {str(e)}")
-            return []
+    # All retry attempts failed
+    error_highlight(f"All retry attempts failed: {last_exception}", "JinaTool")
+    return {"error": {"message": str(last_exception), "status": -1}}
 
-    def _extract_results_list(self, data: Union[List[Dict], Dict]) -> List[Dict]:
-        """Extract results list from various response formats."""
-        try:
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                # Try common response formats
-                for key in ['results', 'data', 'items', 'hits', 'matches', 'documents', 'response']:
-                    if key in data:
-                        if isinstance(data[key], list):
-                            return data[key]
-                        elif isinstance(data[key], dict):
-                            # Try to extract from nested structure
-                            for nested_key in ['results', 'data', 'items', 'hits', 'matches']:
-                                if nested_key in data[key] and isinstance(data[key][nested_key], list):
-                                    return data[key][nested_key]
 
-                # If no list found, try to extract single result
-                if 'result' in data:
-                    return [data['result']]
-
-                # If still no results, try to extract from nested structure
-                for value in data.values():
-                    if isinstance(value, list):
-                        return value
-                    elif isinstance(value, dict):
-                        if nested_results := self._extract_results_list(value):
-                            return nested_results
-
-                # If still no results, return empty list
-                return []
-            return []
-        except Exception as e:
-            error_highlight(f"Error extracting results list: {str(e)}")
-            return []
-
-    def _extract_content(self, result: Dict) -> Optional[str]:
-        """Extract content from result with fallbacks."""
-        content_fields = ['snippet', 'content', 'text', 'description', 'summary', 'body', 'raw']
-        for field in content_fields:
-            if content := result.get(field):
-                return content.strip().strip('```json').strip('```')
-        return None
-
-    def _build_metadata(self, result: Dict, content: str) -> Dict:
-        """Build metadata dictionary from result."""
-        field_mapping = {
-            'url': ['url', 'link', 'href', 'source_url', 'web_url'],
-            'title': ['title', 'name', 'heading', 'subject', 'headline'],
-            'source': ['source', 'domain', 'site', 'provider', 'publisher'],
-            'published_date': ['published_date', 'date', 'timestamp', 'published', 'created_at', 'publication_date']
-        }
-        
-        metadata = {
-            'quality_score': self._calculate_quality_score(result, content),
-            'extraction_status': 'success',
-            'extraction_timestamp': datetime.now().isoformat(),
-            'original_result': result
-        }
-        
-        for field_type, fields in field_mapping.items():
-            for field in fields:
-                if value := result.get(field):
-                    metadata[field_type] = value
-                    break
-        
-        if url := metadata.get('url'):
-            try:
-                metadata['domain'] = urlparse(url).netloc
-            except Exception:
-                metadata['domain'] = ""
-                
-        return metadata
-
-    def _convert_to_documents(self, results: List[Dict]) -> List[Document]:
-        """Convert search results to Document objects with improved metadata."""
-        documents = []
-        for idx, result in enumerate(results, 1):
-            if not isinstance(result, dict):
-                continue
-                
-            if not (content := self._extract_content(result)):
-                warning_highlight(f"No content found for result {idx}")
-                continue
-                
-            try:
-                metadata = self._build_metadata(result, content)
-                documents.append(Document(page_content=content, metadata=metadata))
-                info_highlight(f"Successfully converted result {idx} to Document")
-            except Exception as e:
-                warning_highlight(f"Error converting result {idx} to Document: {str(e)}")
-                continue
-                
-        return documents
-
-    @cache_result(ttl=3600)
-    def _calculate_quality_score(self, result: Dict[str, Any], content: str) -> float:
-        """Calculate quality score for a search result."""
-        score = 0.5  # Base score
-
-        # Add points for authoritative domains
-        authoritative_domains = [
-            '.gov', '.edu', '.org', 'wikipedia.org', 
-            'research', 'journal', 'university', 'association'
-        ]
-        url = result.get('url', '')
-        if any(domain in url.lower() for domain in authoritative_domains):
-            score += 0.2
-
-        # Add points for content length (substantive content)
-        if len(content) > 500:
-            score += 0.1
-
-        # Add points for having title/publication date
-        if result.get('title'):
-            score += 0.05
-        if result.get('published_date') or result.get('date'):
-            score += 0.05
-
-        if date_field := result.get('published_date', result.get('date', '')):
-            with contextlib.suppress(Exception):
-                # Try to parse date
-                from dateutil import parser
-                published_date = parser.parse(date_field)
-                current_date = datetime.now(timezone.utc)
-                days_old = (current_date - published_date).days
-
-                # Fresher content gets higher score
-                if days_old < 30:  # Last month
-                    score += 0.1
-                elif days_old < 180:  # Last 6 months
-                    score += 0.05
-        return min(1.0, score)  # Cap at 1.0
-
-    @cache_result(ttl=3600)
-    def _filter_documents(self, documents: List[Document], min_score: float) -> List[Document]:
-        """Filter documents based on quality score."""
-        return [
-            doc for doc in documents 
-            if doc.metadata.get('quality_score', 0) >= min_score
-        ]
-
-class JinaSearchTool(BaseTool):
-    """Enhanced Jina AI search integration with caching and parallel processing."""
+def _get_jina_api_key(state: Dict[str, Any] | None = None, config: RunnableConfig | None = None) -> str:
+    """Get the Jina API key from configuration, state, or environment.
     
-    name: str = "jina_search"
-    description: str = "Search for information using Jina AI's search engine with enhanced caching and parallel processing"
-    
-    config: Configuration = Field(default_factory=Configuration)
-    
-    def __init__(self, config: Optional[Configuration] = None):
-        """Initialize the Jina search tool.
+    Args:
+        state: Optional state dictionary that might contain the API key
+        config: Optional RunnableConfig that might contain the API key
         
-        Args:
-            config: Optional configuration for the search tool
-        """
-        super().__init__()
-        if config:
-            self.config = config
-        if not self.config.jina_api_key:
-            raise ValueError("Jina API key is required")
-            
-    async def _arun(
-        self,
-        query: str,
-        search_type: Optional[SearchType] = None,
-        max_results: Optional[int] = None,
-        min_quality_score: Optional[float] = None,
-        recency_days: Optional[int] = None,
-        domains: Optional[List[str]] = None,
-        category: Optional[str] = None
-    ) -> List[Document]:
-        """Execute search with caching and parallel processing."""
-        config = RunnableConfig(configurable={"jina_api_key": self.config.jina_api_key})
-        return await search(
-            query=query,
-            search_type=search_type,
-            max_results=max_results,
-            min_quality=min_quality_score,
-            recency_days=recency_days,
-            domains=domains,
-            category=category,
-            config=config
+    Returns:
+        The API key as a string
+        
+    Raises:
+        ValueError: If the API key is not found
+    """
+    # First check if config exists and has the API key
+    if config is not None:
+        configuration = Configuration.from_runnable_config(config)
+        if configuration.jina_api_key:
+            return configuration.jina_api_key
+
+    # Then check if key exists in state
+    if state and state.get("jina_api_key"):
+        return state["jina_api_key"]
+
+    if key := os.environ.get("JINA_API_KEY"):
+        return key
+    else:
+        raise ValueError(
+            "JINA_API_KEY not found in configuration, state, or environment. "
+            "Set the JINA_API_KEY environment variable or include it in the configuration."
         )
 
-async def _execute_search_strategy(
-    client: JinaSearchClient,
-    params: SearchParams,
-    category: Optional[str] = None
-) -> List[List[Document]]:
-    """Execute search with optional category-specific search."""
-    search_tasks = [client.search(params)]
 
-    if not category:
-        if vertical := detect_vertical(params.query):
-            category_params = SearchParams(**params.model_dump())
-            category_params.category = vertical
-            search_tasks.append(client.search(category_params))
+# -------------------------------------------------------------------------
+# 1. Embeddings API
+# -------------------------------------------------------------------------
 
-    return await asyncio.gather(*search_tasks)
+class EmbeddingsRequest(BaseModel):
+    """Request model for Jina's Embeddings API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-@cache_result(ttl=3600)
-def _merge_and_filter_results(
-    results_list: List[List[Document]],
-    min_quality: float
-) -> List[Document]:
-    """Merge, deduplicate and filter search results."""
-    seen_urls = set()
-    all_results = []
-    
-    for results in results_list:
-        for doc in results:
-            url = doc.metadata.get("url", "")
-            if url not in seen_urls:
-                seen_urls.add(url)
-                all_results.append(doc)
-    
-    all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
-    return [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_quality]
-
-async def _load_cached_results(cache_key: str) -> Optional[List[Document]]:
-    """Load and validate cached search results."""
-    try:
-        if cached := load_checkpoint(cache_key):
-            if not isinstance(cached, dict) or "results" not in cached or "timestamp" not in cached:
-                return None
-                
-            if (datetime.now() - datetime.fromisoformat(cached["timestamp"])).total_seconds() >= 86400:
-                return None
-                
-            results = cached["results"]
-            if not isinstance(results, list) or not all(isinstance(doc, Document) for doc in results):
-                return None
-                
-            info_highlight(f"Retrieved {len(results)} results from cache")
-            return results
-    except Exception as e:
-        warning_highlight(f"Error loading from cache: {str(e)}")
-    return None
-
-async def _perform_search(
-    configuration: Configuration,
-    params: SearchParams,
-    cache_key: str
-) -> List[Document]:
-    """Execute search and cache results."""
-    async with JinaSearchClient(
-        api_key=configuration.jina_api_key or "",
-        base_url=configuration.jina_url,
-        retry_config=RetryConfig()
-    ) as client:
-        results_list = await _execute_search_strategy(client, params, params.category)
-        all_results = _merge_and_filter_results(results_list, params.min_quality_score or 0.5)
-        
-        try:
-            create_checkpoint(
-                cache_key,
-                {
-                    "results": all_results,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "params": params.to_dict()
-                },
-                ttl=86400
-            )
-            info_highlight(f"Cached {len(all_results)} results")
-        except Exception as e:
-            warning_highlight(f"Error caching results: {str(e)}")
-        
-        return all_results
-
-async def search(
-    query: str,
-    search_type: Optional[SearchType] = None,
-    max_results: Optional[int] = None,
-    min_quality: Optional[float] = None,
-    recency_days: Optional[int] = None,
-    domains: Optional[List[str]] = None,
-    category: Optional[str] = None,
-    *,
-    config: Annotated[RunnableConfig, InjectedToolArg]
-) -> List[Document]:
-    """Enhanced search with multiple strategies, quality filters, and improved caching."""
-    configuration = Configuration.from_runnable_config(config)
-    if not configuration.jina_api_key:
-        error_highlight("Jina API key is required")
-        return []
-
-    os.environ["JINA_API_KEY"] = configuration.jina_api_key
-    if configuration.jina_url:
-        os.environ["JINA_URL"] = configuration.jina_url
-
-    params = SearchParams(
-        query=query,
-        search_type=search_type or "general",
-        max_results=max_results or configuration.max_search_results,
-        min_quality_score=min_quality or 0.5,
-        recency_days=recency_days,
-        domains=domains or (['.edu', '.gov', '.org'] if search_type in ["authoritative", None] else None),
-        category=category
+    model: str = Field(
+        ..., 
+        description="Model identifier (e.g. 'jina-embeddings-v3', 'jina-clip-v2')"
+    )
+    input: List[str] = Field(
+        ...,
+        min_length=1,
+        description="Text strings or base64-encoded images to embed"
+    )
+    embedding_type: Union[Literal["float", "base64"], List[Literal["float", "base64"]]] | None = Field(
+        default="float",
+        description="Format of returned embeddings"
+    )
+    task: str | None = Field(
+        default=None,
+        description="Intended downstream application (e.g. 'retrieval.query')"
+    )
+    dimensions: PositiveInt | None = Field(
+        default=None,
+        description="Truncates output embeddings to this size if set"
+    )
+    normalized: bool = Field(
+        default=False,
+        description="Normalize embeddings to unit L2 norm"
+    )
+    late_chunking: bool = Field(
+        default=False,
+        description="Concatenate sentences and treat as a single input"
     )
 
-    cache_key = f"jina_search_{params.query}_{params.search_type}_{params.max_results}"
+
+@tool
+async def embeddings(
+    model: str,
+    input_texts: List[str],
+    embedding_type: str = "float",
+    task: str | None = None,
+    dimensions: int | None = None,
+    normalized: bool = False,
+    late_chunking: bool = False,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Generate vector embeddings for text or images using Jina AI.
     
-    if cached_results := await _load_cached_results(cache_key):
-        return cached_results
+    Args:
+        model: Identifier of model to use (e.g. 'jina-embeddings-v3', 'jina-clip-v2')
+        input_texts: List of texts or base64-encoded images to embed
+        embedding_type: Format of returned embeddings (default: 'float')
+        task: Intended downstream application (e.g. 'retrieval.query')
+        dimensions: Truncate output embeddings to this size if set
+        normalized: Normalize embeddings to unit L2 norm
+        late_chunking: Concatenate sentences as a single input
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing embedding data for each input
+    """
+    # Create request object
+    request = EmbeddingsRequest(
+        model=model,
+        input=input_texts,
+        embedding_type=embedding_type,
+        task=task,
+        dimensions=dimensions,
+        normalized=normalized,
+        late_chunking=late_chunking
+    )
+
+    # Create cache key for store
+    cache_key = f"jina_embeddings_{model}_{hashlib.sha256(str(input_texts).encode('utf8')).hexdigest()}"
+
+    # Check cache if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight(f"Using cached embeddings result for {model}", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/embeddings",
+        headers=headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Embeddings API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Embeddings API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight(f"Cached embeddings result for {model}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching embeddings result: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 2. Re-Ranker API
+# -------------------------------------------------------------------------
+
+class RerankerRequest(BaseModel):
+    """Request model for Jina's Re-Ranker API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = Field(
+        ...,
+        description="Model identifier (e.g. 'jina-reranker-v2-base-multilingual')"
+    )
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="The search query for re-ranking"
+    )
+    documents: List[Union[str, Dict[str, Any]]] = Field(
+        ...,
+        min_length=1,
+        description="List of documents to re-rank"
+    )
+    top_n: PositiveInt | None = Field(
+        default=None,
+        description="Number of top documents to return"
+    )
+    return_documents: bool = Field(
+        default=True,
+        description="Return documents in the response"
+    )
+
+
+@tool
+async def rerank(
+    model: str,
+    query: str,
+    documents: List[Union[str, Dict[str, Any]]],
+    top_n: int | None = None,
+    return_documents: bool = True,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Re-rank a list of documents based on relevance to a query.
+    
+    Args:
+        model: Identifier of model to use (e.g. 'jina-reranker-v2-base-multilingual')
+        query: The search query for re-ranking
+        documents: List of documents (strings or dicts) to re-rank
+        top_n: Number of top documents to return
+        return_documents: Return documents in the response
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing re-ranked documents with relevance scores
+    """
+    # Create request object
+    request = RerankerRequest(
+        model=model,
+        query=query,
+        documents=documents,
+        top_n=top_n,
+        return_documents=return_documents
+    )
+    
+    # Create cache key for store
+    doc_hash = str(hash(str(documents)))
+    cache_key = f"jina_rerank_{model}_{query}_{doc_hash}_{top_n}_{return_documents}"
+    
+    # Check cache if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight(f"Using cached reranking result for {query}", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+    
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+    
+    # Set up headers
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/rerank",
+        headers=headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+    
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Reranker API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Reranker API error: {response['error'].get('message', 'Unknown error')}")
+    
+    # Cache result if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight(f"Cached reranking result for {query}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching reranking result: {str(e)}", "JinaTool")
+    
+    return response
+
+
+# -------------------------------------------------------------------------
+# 3. Reader API
+# -------------------------------------------------------------------------
+
+class ReaderHeaders(BaseModel):
+    """Optional headers for the Reader API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_engine: str | None = Field(default=None, alias="X-Engine")
+    x_timeout: PositiveInt | None = Field(default=None, alias="X-Timeout")
+    x_target_selector: str | None = Field(default=None, alias="X-Target-Selector")
+    x_wait_for_selector: str | None = Field(default=None, alias="X-Wait-For-Selector")
+    x_remove_selector: str | None = Field(default=None, alias="X-Remove-Selector")
+    x_with_links_summary: bool | None = Field(default=None, alias="X-With-Links-Summary")
+    x_with_images_summary: bool | None = Field(default=None, alias="X-With-Images-Summary")
+    x_with_generated_alt: bool | None = Field(default=None, alias="X-With-Generated-Alt")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+    x_with_iframe: bool | None = Field(default=None, alias="X-With-Iframe")
+    x_return_format: Literal["markdown", "html", "text"] | None = Field(default=None, alias="X-Return-Format")
+    x_token_budget: PositiveInt | None = Field(default=None, alias="X-Token-Budget")
+
+
+class ReaderRequest(BaseModel):
+    """Request model for Jina's Reader API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    url: HttpUrl = Field(
+        ...,
+        description="The website URL to read/parse"
+    )
+    options: Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"] | None = Field(
+        default=None,
+        description="Format options for response content"
+    )
+    headers: ReaderHeaders | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: HttpUrl) -> HttpUrl:
+        """Validate that the URL is valid and not a placeholder."""
+        str_url = str(v)
+        if not is_valid_url(str_url):
+            raise ValueError(f"Invalid or placeholder URL: {str_url}")
+        return v
+
+
+@tool
+async def reader(
+    url: str,
+    options: str = "Default",
+    with_links_summary: bool | None = None,
+    with_images_summary: bool | None = None,
+    with_generated_alt: bool | None = None,
+    return_format: str | None = None,
+    token_budget: int | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> dict[str, Any]:
+    """Parse and extract content from a webpage using Jina AI.
+    
+    Args:
+        url: The URL of the webpage to read
+        options: Format options ("Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot")
+        with_links_summary: Include summary of links in the result
+        with_images_summary: Include summary of images in the result
+        with_generated_alt: Generate alt text for images
+        return_format: Preferred format ("markdown", "html", "text")
+        token_budget: Maximum number of tokens to return
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing parsed webpage content
+    """
+    # Simplified header dict creation
+    headers_dict = {
+        k: v for k, v in {
+            "x_with_links_summary": with_links_summary,
+            "x_with_images_summary": with_images_summary,
+            "x_with_generated_alt": with_generated_alt,
+            "x_return_format": return_format,
+            "x_token_budget": token_budget,
+            "x_no_cache": no_cache,
+        }.items()
+        if v is not None  # Separate condition for readability
+    }
+
+    headers_model = ReaderHeaders(**headers_dict) if headers_dict else None
 
     try:
-        return await _perform_search(configuration, params, cache_key)
+        request = ReaderRequest(
+            url=url,
+            options=options,
+            headers=headers_model
+        )
     except Exception as e:
-        error_highlight(f"Error in Jina search: {str(e)}")
-        return []
+        raise ToolException(f"Invalid reader request: {e}") from e
 
-# Export available tools
-TOOLS = [search]
+    # Simplified cache key construction
+    cache_key = f"jina_reader_{url}_{options}"
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+
+    # Cache check with early return
+    if store and should_use_cache:
+        try:
+            if cached := store.get(["jina", cache_key]):
+                info_highlight(f"Using cached reader result for {url}", "JinaTool")
+                return cached.value
+        except Exception as e:
+            warning_highlight(f"Cache access error: {e}", "JinaTool")
+
+    # API request preparation
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Header processing with line breaks
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(
+            exclude_none=True, 
+            by_alias=True
+        ).items():
+            if field_value is not None:
+                request_headers[field_name] = str(field_value).lower()
+
+    # API call with simplified options
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://r.jina.ai/",
+        headers=request_headers,
+        json_data={"url": str(request.url), "options": request.options},
+        retry_config=retry_config,
+    )
+
+    if "error" in response:
+        error_highlight(f"Reader API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Reader API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache write with guard clause
+    if store and should_use_cache:
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight(f"Cached reader result for {url}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Cache write error: {e}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 4. Search API
+# -------------------------------------------------------------------------
+
+class SearchHeaders(BaseModel):
+    """Optional headers for the Search API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_site: str | None = Field(default=None, alias="X-Site")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+    x_with_links_summary: bool | None = Field(default=None, alias="X-With-Links-Summary")
+    x_with_images_summary: bool | None = Field(default=None, alias="X-With-Images-Summary")
+
+
+class SearchRequest(BaseModel):
+    """Request model for Jina's Search API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    q: str = Field(
+        ...,
+        min_length=1,
+        description="Search query text"
+    )
+    options: Literal["Default", "Markdown", "HTML", "Text"] | None = Field(
+        default=None,
+        description="Format options for response content"
+    )
+    headers: SearchHeaders | None = None
+
+    @field_validator("q")
+    @classmethod
+    def no_placeholder_query(cls, v: str) -> str:
+        """Validate that the search query is not empty."""
+        if not v.strip():
+            raise ValueError("Search query cannot be empty")
+        return v
+
+
+@tool
+async def search(
+    query: str,
+    options: str = "Default",
+    site: str | None = None,
+    with_links_summary: bool | None = None,
+    with_images_summary: bool | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Search the web using Jina AI.
+    
+    Args:
+        query: The search query
+        options: Format options ("Default", "Markdown", "HTML", "Text")
+        site: Limit search to a specific site (e.g. "example.com")
+        with_links_summary: Include summary of links in results
+        with_images_summary: Include summary of images in results
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing search results
+    """
+    # Create headers if needed
+    headers_dict = {
+        "x_site": site,
+        "x_with_links_summary": with_links_summary,
+        "x_with_images_summary": with_images_summary,
+        "x_no_cache": no_cache,
+    }
+    headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+
+    headers_model = SearchHeaders(**headers_dict) if headers_dict else None
+
+    # Create request object
+    try:
+        request = SearchRequest(
+            q=query,
+            options=options,
+            headers=headers_model
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid search request: {str(e)}") from e
+
+    # Create cache key for store - don't cache if no_cache is True
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+    cache_key = f"jina_search_{query}_{options}_{site}"
+
+    # Check cache if store is available and caching is enabled
+    if store and should_use_cache:
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight(f"Using cached search result for '{query}'", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Add custom headers if provided
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
+            if field_value is not None:
+                request_headers[field_name] = str(field_value).lower()
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://s.jina.ai/",
+        headers=request_headers,
+        json_data={"q": request.q, "options": request.options or "Default"},
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Search API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Search API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled (and no_cache wasn't set)
+    if store and should_use_cache:
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight(f"Cached search result for '{query}'", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching search result: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 5. Grounding API
+# -------------------------------------------------------------------------
+
+class GroundingHeaders(BaseModel):
+    """Optional headers for the Grounding API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_site: str | None = Field(default=None, alias="X-Site")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+
+
+class GroundingRequest(BaseModel):
+    """Request model for Jina's Grounding API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    statement: str = Field(
+        ...,
+        min_length=1,
+        description="The statement to verify for factual accuracy"
+    )
+    headers: GroundingHeaders | None = None
+
+    @field_validator("statement")
+    @classmethod
+    def statement_not_empty(cls, v: str) -> str:
+        """Validate that the statement is not empty."""
+        if not v.strip():
+            raise ValueError("Statement cannot be empty")
+        return v
+
+
+@tool
+async def grounding(
+    statement: str,
+    site: str | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Verify the factual accuracy of a statement using Jina AI.
+    
+    Args:
+        statement: The statement to verify
+        site: Limit search to a specific site (e.g. "example.com")
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing verification results with evidence
+    """
+    # Create headers if needed
+    headers_dict = {}
+    if any(v is not None for v in [site, no_cache]):
+        headers_dict = {
+            "x_site": site,
+            "x_no_cache": no_cache
+        }
+        # Remove None values
+        headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+
+    headers_model = GroundingHeaders(**headers_dict) if headers_dict else None
+
+    # Create request object
+    try:
+        request = GroundingRequest(
+            statement=statement,
+            headers=headers_model
+        )
+    except Exception as e:
+        error_msg = f"Invalid grounding request: {str(e)}"
+        error_highlight(error_msg, "JinaTool")
+        raise ToolException(error_msg) from None  # Disable exception chaining
+
+    # Create cache key for store - don't cache if no_cache is True
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+    cache_key = f"jina_grounding_{statement}_{site}"
+
+    # Check cache if store is available and caching is enabled
+    if store and should_use_cache:
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight("Using cached grounding result for statement", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Add custom headers if provided
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
+            if field_value is not None:
+                # Convert bool to string
+                if isinstance(field_value, bool):
+                    field_value = "true" if field_value else "false"
+                request_headers[field_name] = str(field_value)
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://g.jina.ai/",
+        headers=request_headers,
+        json_data={"statement": request.statement},
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Grounding API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Grounding API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled (and no_cache wasn't set)
+    if store and should_use_cache:
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight("Cached grounding result for statement", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching grounding result: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 6. Segmenter API
+# -------------------------------------------------------------------------
+
+class SegmenterRequest(BaseModel):
+    """Request model for Jina's Segmenter API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content: str = Field(
+        ...,
+        min_length=1,
+        description="The text content to segment"
+    )
+    tokenizer: Literal["cl100k_base", "p50k_base", "r50k_base"] = Field(
+        default="cl100k_base",
+        description="Tokenizer to use"
+    )
+    return_tokens: bool = Field(
+        default=False,
+        description="Include tokens and IDs in response"
+    )
+    return_chunks: bool = Field(
+        default=False,
+        description="Segment text into semantic chunks"
+    )
+    max_chunk_length: PositiveInt = Field(
+        default=1000,
+        description="Maximum characters per chunk if return_chunks=True"
+    )
+    head: PositiveInt | None = Field(
+        default=None,
+        description="Return first N tokens (exclusive with tail)"
+    )
+    tail: PositiveInt | None = Field(
+        default=None,
+        description="Return last N tokens (exclusive with head)"
+    )
+
+    @field_validator("content")
+    @classmethod
+    def content_not_empty(cls, v: str) -> str:
+        """Validate that the content is not empty."""
+        if not v.strip():
+            raise ValueError("Content cannot be empty")
+        return v
+
+    @model_validator(mode="after")
+    def validate_head_tail(self) -> "SegmenterRequest":
+        """Ensure head and tail are not both specified."""
+        if self.head is not None and self.tail is not None:
+            raise ValueError("Only one of head or tail can be specified")
+        return self
+
+
+@tool
+async def segmenter(
+    content: str,
+    tokenizer: str = "cl100k_base",
+    return_tokens: bool = False,
+    return_chunks: bool = False,
+    max_chunk_length: int = 1000,
+    head: int | None = None,
+    tail: int | None = None,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Segment and tokenize text using Jina AI.
+    
+    Args:
+        content: The text content to segment
+        tokenizer: Tokenizer to use ("cl100k_base", "p50k_base", "r50k_base")
+        return_tokens: Include tokens and IDs in the response
+        return_chunks: Segment the text into semantic chunks
+        max_chunk_length: Maximum characters per chunk if return_chunks=True
+        head: Return first N tokens (exclusive with tail)
+        tail: Return last N tokens (exclusive with head)
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing tokenization results
+    """
+    # Create request object
+    try:
+        request = SegmenterRequest(
+            content=content,
+            tokenizer=tokenizer,
+            return_tokens=return_tokens,
+            return_chunks=return_chunks,
+            max_chunk_length=max_chunk_length,
+            head=head,
+            tail=tail
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid segmenter request: {str(e)}") from e
+
+    # Create cache key for store
+    content_hash = str(hash(content))
+    cache_key = f"jina_segmenter_{tokenizer}_{content_hash}_{return_tokens}_{return_chunks}_{max_chunk_length}_{head}_{tail}"
+
+    # Check cache if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight("Using cached segmenter result", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://segment.jina.ai/",
+        headers=request_headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Segmenter API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Segmenter API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight("Cached segmenter result", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching segmenter result: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 7. Classifier API
+# -------------------------------------------------------------------------
+
+class ClassifierRequest(BaseModel):
+    """Request model for Jina's Classifier API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str | None = Field(
+        default=None,
+        description="Model identifier, e.g. 'jina-embeddings-v3' for text"
+    )
+    classifier_id: str | None = Field(
+        default=None,
+        description="Identifier of an existing classifier"
+    )
+    input: List[Union[str, Dict[str, str]]] = Field(
+        ...,
+        min_length=1,
+        description="Inputs for classification"
+    )
+    labels: List[str] = Field(
+        ...,
+        min_length=1,
+        description="Classification labels"
+    )
+
+    @field_validator("input")
+    @classmethod
+    def validate_input_not_empty(cls, v: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
+        """Validate that the input list is not empty."""
+        if not v:
+            raise ValueError("Classifier input cannot be empty")
+        return v
+
+    @field_validator("labels")
+    @classmethod
+    def validate_labels_not_empty(cls, v: List[str]) -> List[str]:
+        """Validate that the labels list has no empty strings."""
+        if not v:
+            raise ValueError("Classifier labels cannot be empty")
+        for label in v:
+            if not label.strip():
+                raise ValueError("Classifier labels cannot contain empty strings")
+        return v
+
+
+@tool
+async def classifier(
+    inputs: List[Union[str, Dict[str, str]]],
+    labels: List[str],
+    model: str | None = None,
+    classifier_id: str | None = None,
+    state: Annotated[JinaToolState, InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Perform zero-shot classification with Jina AI.
+    
+    Args:
+        inputs: Inputs for classification (text strings or image dicts)
+        labels: List of classification labels
+        model: Model identifier (optional)
+        classifier_id: Existing classifier ID (optional)
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing classification results
+    """
+    # Create request object
+    try:
+        request = ClassifierRequest(
+            input=inputs,
+            labels=labels,
+            model=model,
+            classifier_id=classifier_id
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid classifier request: {str(e)}") from e
+
+    # Create cache key for store
+    inputs_hash = str(hash(str(inputs)))
+    labels_hash = str(hash(str(labels)))
+    cache_key = f"jina_classifier_{model}_{classifier_id}_{inputs_hash}_{labels_hash}"
+
+    # Check cache if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            cached_data = store.get(["jina", cache_key])
+            if cached_data and cached_data.value:
+                info_highlight("Using cached classifier result", "JinaTool")
+                return cached_data.value
+        except Exception as e:
+            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/classify",
+        headers=request_headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Classifier API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Classifier API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if store and state and state.get("cache_results", True):
+        try:
+            store.put(["jina", cache_key], response)
+            info_highlight("Cached classifier result", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error caching classifier result: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# LangGraph Integration
+# -------------------------------------------------------------------------
+
+def create_jina_toolnode(
+    include_tools: List[str] | None = None,
+    retry_config: RetryConfig | None = None,
+    cache_results: bool = True
+) -> ToolNode:
+    """Create a LangGraph ToolNode with Jina AI tools.
+    
+    This function creates a ToolNode containing the specified Jina AI tools
+    for use in a LangGraph workflow.
+    
+    Args:
+        include_tools: Optional list of tool names to include. If None, all tools are included.
+                      Available tools: ["embeddings", "rerank", "reader", 
+                                       "search", "grounding", "segmenter", 
+                                       "classifier"]
+        retry_config: Optional retry configuration for HTTP requests
+        cache_results: Whether to cache tool results in the store (default: True)
+    
+    Returns:
+        A configured ToolNode instance with the specified Jina AI tools
+        
+    Example:
+        ```python
+        from langgraph.graph import StateGraph
+        from react_agent.tools.jina import create_jina_toolnode
+        
+        # Create a graph with all Jina tools
+        workflow = StateGraph(MessagesState)
+        workflow.add_node("jina_tools", create_jina_toolnode())
+        
+        # Or with specific tools
+        search_tools = create_jina_toolnode(include_tools=["search", "grounding"])
+        workflow.add_node("search_tools", search_tools)
+        ```
+    """
+    all_tools = [
+        embeddings,
+        rerank,
+        reader,
+        search,
+        grounding,
+        segmenter,
+        classifier
+    ]
+    
+    if include_tools:
+        # Map of tool names to tool functions
+        tool_map = {
+            "embeddings": embeddings,
+            "rerank": rerank,
+            "reader": reader,
+            "search": search,
+            "grounding": grounding,
+            "segmenter": segmenter,
+            "classifier": classifier
+        }
+        
+        # Get only the requested tools
+        selected_tools = []
+        for tool_name in include_tools:
+            if tool_name in tool_map:
+                selected_tools.append(tool_map[tool_name])
+            else:
+                warning_highlight(f"Tool {tool_name} not found in available Jina tools", "JinaTool")
+        
+        if not selected_tools:
+            warning_highlight("No valid tools specified, including all tools", "JinaTool")
+            selected_tools = all_tools
+            
+        tools = selected_tools
+    else:
+        tools = all_tools
+    
+    # Create and return the ToolNode
+    return ToolNode(tools)

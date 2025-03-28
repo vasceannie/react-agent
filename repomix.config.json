@@ -12,8 +12,9 @@
     "showLineNumbers": false,
     "copyToClipboard": false
   },
-  "include": ["src/react_agent/utils/*.py"
-            ],
+  "include": ["src/react_agent/utils/*.py",
+              "src/react_agent/prompts/*.py",
+              "src/react_agent/tools/jina.py"],
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,

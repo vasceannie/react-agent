@@ -1,1 +1,1 @@
-import nltk; nltk.download('popular')  # Downloads popular datasets
+import nltk; nltk.download('punkt')  # Downloads popular datasets

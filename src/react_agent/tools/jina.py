@@ -32,12 +32,17 @@ Example:
 import asyncio
 import hashlib
 import os
-from typing import Annotated, Any, Dict, List, Literal, TypedDict, Union
+from typing import Annotated, Any, Dict, List, Literal, Union
+
+# Use typing_extensions for TypedDict
+from typing_extensions import TypedDict
 
 import aiohttp
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg, ToolException, tool
-from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
+from langgraph.prebuilt import InjectedState, InjectedStore
+# Import ToolNode from langgraph.prebuilt.tool_node instead of langgraph.graph
+from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.store.base import BaseStore
 from pydantic import (
     BaseModel,
@@ -227,7 +232,7 @@ class EmbeddingsRequest(BaseModel):
         description="Model identifier (e.g. 'jina-embeddings-v3', 'jina-clip-v2')"
     )
     input: List[str] = Field(
-        ...,
+        ..., 
         min_length=1,
         description="Text strings or base64-encoded images to embed"
     )
@@ -612,7 +617,7 @@ async def reader(
                 return cached if isinstance(cached, dict) else {"cached_result": cached}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {e}", "JinaTool")
-    
+
     # API request preparation
     api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None

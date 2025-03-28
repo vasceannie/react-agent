@@ -927,26 +927,11 @@ def _get_category_facts(
         facts.extend([{"type": fact_type, "data": item} for item in items])
     return facts
 
-# Import the new tools for backward compatibility
-try:
-    from react_agent.tools import (
-        StatisticsExtractionTool,
-        CitationExtractionTool,
-        CategoryExtractionTool,
-    )
-except ImportError:
-    warning_highlight("Could not import extraction tools. Some functionality may be limited.")
-    StatisticsExtractionTool = None
-    CitationExtractionTool = None
-    CategoryExtractionTool = None
 
 # Update the __all__ list to include both the original functions and the new tools
 __all__ = [
     "extract_citations",
     "extract_statistics",
     "extract_category_information",
-    "enrich_extracted_fact",
-    "StatisticsExtractionTool",
-    "CitationExtractionTool",
-    "CategoryExtractionTool",
+    "enrich_extracted_fact"
 ]

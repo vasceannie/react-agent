@@ -32,12 +32,17 @@ Example:
 import asyncio
 import hashlib
 import os
-from typing import Annotated, Any, Dict, List, Literal, TypedDict, Union
+from typing import Annotated, Any, Dict, List, Literal, Union
+
+# Use typing_extensions for TypedDict
+from typing_extensions import TypedDict
 
 import aiohttp
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg, ToolException, tool
-from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
+from langgraph.prebuilt import InjectedState, InjectedStore
+# Import ToolNode from langgraph.prebuilt.tool_node instead of langgraph.graph
+from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.store.base import BaseStore
 from pydantic import (
     BaseModel,
@@ -147,7 +152,11 @@ async def _make_request_with_retry(
                     # Handle successful responses (status 2xx)
                     if 200 <= status < 300:
                         try:
-                            return await resp.json()
+                            response = await resp.json()
+                            if isinstance(response, dict):
+                                return response
+                            else:
+                                return {"response": response, "status": status}
                         except Exception:
                             # If not valid JSON, return the raw text
                             return {"raw_response": text, "status": status}
@@ -177,7 +186,7 @@ async def _make_request_with_retry(
     return {"error": {"message": str(last_exception), "status": -1}}
 
 
-def _get_jina_api_key(state: Dict[str, Any] | None = None, config: RunnableConfig | None = None) -> str:
+def _get_jina_api_key(state: Union[Dict[str, Any], JinaToolState, None] = None, config: RunnableConfig | None = None) -> str:
     """Get the Jina API key from configuration, state, or environment.
     
     Args:
@@ -197,16 +206,17 @@ def _get_jina_api_key(state: Dict[str, Any] | None = None, config: RunnableConfi
             return configuration.jina_api_key
 
     # Then check if key exists in state
-    if state and state.get("jina_api_key"):
-        return state["jina_api_key"]
+    if state and isinstance(state, dict) and "jina_api_key" in state and state["jina_api_key"]:
+        return str(state["jina_api_key"])
 
     if key := os.environ.get("JINA_API_KEY"):
         return key
-    else:
-        raise ValueError(
-            "JINA_API_KEY not found in configuration, state, or environment. "
-            "Set the JINA_API_KEY environment variable or include it in the configuration."
-        )
+    
+    # If we get here, no API key was found
+    raise ValueError(
+        "JINA_API_KEY not found in configuration, state, or environment. "
+        "Set the JINA_API_KEY environment variable or include it in the configuration."
+    )
 
 
 # -------------------------------------------------------------------------
@@ -222,7 +232,7 @@ class EmbeddingsRequest(BaseModel):
         description="Model identifier (e.g. 'jina-embeddings-v3', 'jina-clip-v2')"
     )
     input: List[str] = Field(
-        ...,
+        ..., 
         min_length=1,
         description="Text strings or base64-encoded images to embed"
     )
@@ -252,14 +262,14 @@ class EmbeddingsRequest(BaseModel):
 async def embeddings(
     model: str,
     input_texts: List[str],
-    embedding_type: str = "float",
+    embedding_type: Union[Literal["float", "base64"], List[Literal["float", "base64"]]] = "float",
     task: str | None = None,
     dimensions: int | None = None,
     normalized: bool = False,
     late_chunking: bool = False,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Generate vector embeddings for text or images using Jina AI.
     
@@ -296,12 +306,12 @@ async def embeddings(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight(f"Using cached embeddings result for {model}", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     # Set up headers
@@ -345,16 +355,16 @@ class RerankerRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str = Field(
-        ...,
+        ..., 
         description="Model identifier (e.g. 'jina-reranker-v2-base-multilingual')"
     )
     query: str = Field(
-        ...,
+        ..., 
         min_length=1,
         description="The search query for re-ranking"
     )
     documents: List[Union[str, Dict[str, Any]]] = Field(
-        ...,
+        ..., 
         min_length=1,
         description="List of documents to re-rank"
     )
@@ -375,9 +385,9 @@ async def rerank(
     documents: List[Union[str, Dict[str, Any]]],
     top_n: int | None = None,
     return_documents: bool = True,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Re-rank a list of documents based on relevance to a query.
     
@@ -411,12 +421,12 @@ async def rerank(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight(f"Using cached reranking result for {query}", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
     
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
     
     # Set up headers
@@ -478,7 +488,7 @@ class ReaderRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     url: HttpUrl = Field(
-        ...,
+        ..., 
         description="The website URL to read/parse"
     )
     options: Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"] | None = Field(
@@ -488,29 +498,28 @@ class ReaderRequest(BaseModel):
     headers: ReaderHeaders | None = None
 
     @field_validator("url")
-    @classmethod
     def validate_url(cls, v: HttpUrl) -> HttpUrl:
         """Validate that the URL is valid and not a placeholder."""
-        str_url = str(v)
-        if not is_valid_url(str_url):
-            raise ValueError(f"Invalid or placeholder URL: {str_url}")
+        url_str = str(v)
+        if not is_valid_url(url_str) or "{" in url_str or "}" in url_str:
+            raise ValueError(f"Invalid URL: {url_str}")
         return v
 
 
 @tool
 async def reader(
     url: str,
-    options: str = "Default",
+    options: Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"] = "Default",
     with_links_summary: bool | None = None,
     with_images_summary: bool | None = None,
     with_generated_alt: bool | None = None,
-    return_format: str | None = None,
+    return_format: Literal["markdown", "html", "text"] | None = None,
     token_budget: int | None = None,
     no_cache: bool | None = None,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
-) -> dict[str, Any]:
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
     """Parse and extract content from a webpage using Jina AI.
     
     Args:
@@ -527,24 +536,69 @@ async def reader(
     Returns:
         Dictionary containing parsed webpage content
     """
-    # Simplified header dict creation
-    headers_dict = {
-        k: v for k, v in {
-            "x_with_links_summary": with_links_summary,
-            "x_with_images_summary": with_images_summary,
-            "x_with_generated_alt": with_generated_alt,
-            "x_return_format": return_format,
-            "x_token_budget": token_budget,
-            "x_no_cache": no_cache,
-        }.items()
-        if v is not None  # Separate condition for readability
-    }
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str, int]] = {}
+    
+    if with_links_summary is not None:
+        # Ensure with_links_summary is a boolean
+        if isinstance(with_links_summary, bool):
+            headers_dict["x_with_links_summary"] = with_links_summary
+        else:
+            raise ValueError("with_links_summary must be a boolean")
+    if with_images_summary is not None:
+        # Ensure with_images_summary is a boolean
+        if isinstance(with_images_summary, bool):
+            headers_dict["x_with_images_summary"] = with_images_summary
+        else:
+            raise ValueError("with_images_summary must be a boolean")
+    if with_generated_alt is not None:
+        headers_dict["x_with_generated_alt"] = with_generated_alt
+    if return_format is not None:
+        # Ensure return_format is a string of the correct type
+        if isinstance(return_format, str) and return_format in ["markdown", "html", "text"]:
+            headers_dict["x_return_format"] = return_format
+        else:
+            raise ValueError("return_format must be one of: 'markdown', 'html', 'text'")
+    if token_budget is not None:
+        # Ensure token_budget is a positive integer
+        if isinstance(token_budget, int) and token_budget > 0:
+            headers_dict["x_token_budget"] = token_budget
+        else:
+            raise ValueError("token_budget must be a positive integer")
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
 
-    headers_model = ReaderHeaders(**headers_dict) if headers_dict else None
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = ReaderHeaders()
+        for field_name, field_value in headers_dict.items():
+            if field_name == "x_with_links_summary" and isinstance(field_value, bool):
+                headers_model.x_with_links_summary = field_value
+            elif field_name == "x_with_images_summary" and isinstance(field_value, bool):
+                headers_model.x_with_images_summary = field_value
+            elif field_name == "x_with_generated_alt" and isinstance(field_value, bool):
+                headers_model.x_with_generated_alt = field_value
+            elif field_name == "x_no_cache" and isinstance(field_value, bool):
+                headers_model.x_no_cache = field_value
+            elif field_name == "x_return_format" and isinstance(field_value, str):
+                if field_value in ["markdown", "html", "text"]:
+                    headers_model.x_return_format = field_value  # type: ignore
+                else:
+                    raise ValueError(f"Invalid return_format value: {field_value}. Must be one of: 'markdown', 'html', 'text'")
+            elif field_name == "x_token_budget" and isinstance(field_value, int):
+                headers_model.x_token_budget = field_value
 
     try:
+        # Validate URL before creating the request
+        if not is_valid_url(url):
+            raise ValueError(f"Invalid URL: {url}")
+            
+        # Convert string URL to HttpUrl
+        http_url = HttpUrl(url)
+        
         request = ReaderRequest(
-            url=url,
+            url=http_url,
             options=options,
             headers=headers_model
         )
@@ -560,12 +614,12 @@ async def reader(
         try:
             if cached := load_checkpoint(cache_key):
                 info_highlight(f"Using cached reader result for {url}", "JinaTool")
-                return cached
+                return cached if isinstance(cached, dict) else {"cached_result": cached}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {e}", "JinaTool")
 
     # API request preparation
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     request_headers = {
@@ -626,7 +680,7 @@ class SearchRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     q: str = Field(
-        ...,
+        ..., 
         min_length=1,
         description="Search query text"
     )
@@ -637,7 +691,6 @@ class SearchRequest(BaseModel):
     headers: SearchHeaders | None = None
 
     @field_validator("q")
-    @classmethod
     def no_placeholder_query(cls, v: str) -> str:
         """Validate that the search query is not empty."""
         if not v.strip():
@@ -648,14 +701,14 @@ class SearchRequest(BaseModel):
 @tool
 async def search(
     query: str,
-    options: str = "Default",
+    options: Literal["Default", "Markdown", "HTML", "Text"] = "Default",
     site: str | None = None,
     with_links_summary: bool | None = None,
     with_images_summary: bool | None = None,
     no_cache: bool | None = None,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Search the web using Jina AI.
     
@@ -671,19 +724,45 @@ async def search(
     Returns:
         Dictionary containing search results
     """
-    # Create headers if needed
-    headers_dict = {
-        "x_site": site,
-        "x_with_links_summary": with_links_summary,
-        "x_with_images_summary": with_images_summary,
-        "x_no_cache": no_cache,
-    }
-    headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str]] = {}
+    
+    if site is not None:
+        headers_dict["x_site"] = site
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
+    if with_links_summary is not None:
+        # Ensure with_links_summary is a boolean
+        if isinstance(with_links_summary, bool):
+            headers_dict["x_with_links_summary"] = with_links_summary
+        else:
+            raise ValueError("with_links_summary must be a boolean")
+    if with_images_summary is not None:
+        # Ensure with_images_summary is a boolean
+        if isinstance(with_images_summary, bool):
+            headers_dict["x_with_images_summary"] = with_images_summary
+        else:
+            raise ValueError("with_images_summary must be a boolean")
 
-    headers_model = SearchHeaders(**headers_dict) if headers_dict else None
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = SearchHeaders()
+        for field_name, field_value in headers_dict.items():
+            if field_name == "x_site" and isinstance(field_value, str):
+                headers_model.x_site = field_value
+            elif field_name == "x_no_cache" and isinstance(field_value, bool):
+                headers_model.x_no_cache = field_value
+            elif field_name == "x_with_links_summary" and isinstance(field_value, bool):
+                headers_model.x_with_links_summary = field_value
+            elif field_name == "x_with_images_summary" and isinstance(field_value, bool):
+                headers_model.x_with_images_summary = field_value
 
-    # Create request object
     try:
+        # Validate and create the request
+        if not query.strip():
+            raise ValueError("Search query cannot be empty")
+            
         request = SearchRequest(
             q=query,
             options=options,
@@ -702,12 +781,12 @@ async def search(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight(f"Using cached search result for '{query}'", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     # Set up headers
@@ -765,14 +844,13 @@ class GroundingRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     statement: str = Field(
-        ...,
+        ..., 
         min_length=1,
         description="The statement to verify for factual accuracy"
     )
     headers: GroundingHeaders | None = None
 
     @field_validator("statement")
-    @classmethod
     def statement_not_empty(cls, v: str) -> str:
         """Validate that the statement is not empty."""
         if not v.strip():
@@ -785,9 +863,9 @@ async def grounding(
     statement: str,
     site: str | None = None,
     no_cache: bool | None = None,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Verify the factual accuracy of a statement using Jina AI.
     
@@ -800,19 +878,24 @@ async def grounding(
     Returns:
         Dictionary containing verification results with evidence
     """
-    # Create headers if needed
-    headers_dict = {}
-    if any(v is not None for v in [site, no_cache]):
-        headers_dict = {
-            "x_site": site,
-            "x_no_cache": no_cache
-        }
-        # Remove None values
-        headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str]] = {}
+    
+    if site is not None:
+        headers_dict["x_site"] = site
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
 
-    headers_model = GroundingHeaders(**headers_dict) if headers_dict else None
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = GroundingHeaders()
+        for field_name, field_value in headers_dict.items():
+            if field_name == "x_site" and isinstance(field_value, str):
+                headers_model.x_site = field_value
+            elif field_name == "x_no_cache" and isinstance(field_value, bool):
+                headers_model.x_no_cache = field_value
 
-    # Create request object
     try:
         request = GroundingRequest(
             statement=statement,
@@ -833,12 +916,12 @@ async def grounding(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight("Using cached grounding result for statement", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     # Set up headers
@@ -891,7 +974,7 @@ class SegmenterRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     content: str = Field(
-        ...,
+        ..., 
         min_length=1,
         description="The text content to segment"
     )
@@ -921,7 +1004,6 @@ class SegmenterRequest(BaseModel):
     )
 
     @field_validator("content")
-    @classmethod
     def content_not_empty(cls, v: str) -> str:
         """Validate that the content is not empty."""
         if not v.strip():
@@ -939,15 +1021,15 @@ class SegmenterRequest(BaseModel):
 @tool
 async def segmenter(
     content: str,
-    tokenizer: str = "cl100k_base",
+    tokenizer: Literal["cl100k_base", "p50k_base", "r50k_base"] = "cl100k_base",
     return_tokens: bool = False,
     return_chunks: bool = False,
     max_chunk_length: int = 1000,
     head: int | None = None,
     tail: int | None = None,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Segment and tokenize text using Jina AI.
     
@@ -988,12 +1070,12 @@ async def segmenter(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight("Using cached segmenter result", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     # Set up headers
@@ -1045,18 +1127,17 @@ class ClassifierRequest(BaseModel):
         description="Identifier of an existing classifier"
     )
     input: List[Union[str, Dict[str, str]]] = Field(
-        ...,
+        ..., 
         min_length=1,
         description="Inputs for classification"
     )
     labels: List[str] = Field(
-        ...,
+        ..., 
         min_length=1,
         description="Classification labels"
     )
 
     @field_validator("input")
-    @classmethod
     def validate_input_not_empty(cls, v: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
         """Validate that the input list is not empty."""
         if not v:
@@ -1064,7 +1145,6 @@ class ClassifierRequest(BaseModel):
         return v
 
     @field_validator("labels")
-    @classmethod
     def validate_labels_not_empty(cls, v: List[str]) -> List[str]:
         """Validate that the labels list has no empty strings."""
         if not v:
@@ -1081,9 +1161,9 @@ async def classifier(
     labels: List[str],
     model: str | None = None,
     classifier_id: str | None = None,
-    state: Annotated[JinaToolState, InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
 ) -> Dict[str, Any]:
     """Perform zero-shot classification with Jina AI.
     
@@ -1119,12 +1199,12 @@ async def classifier(
             cached_data = load_checkpoint(cache_key)
             if cached_data:
                 info_highlight("Using cached classifier result", "JinaTool")
-                return cached_data
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
         except Exception as e:
             warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
-    api_key = _get_jina_api_key(state, config)
+    api_key = _get_jina_api_key(state if state is not None else None, config)
     retry_config = state.get("retry_config") if state else None
 
     # Set up headers

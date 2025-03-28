@@ -253,6 +253,19 @@ async def _call_openai_api(model: str, messages: List[ChatCompletionMessageParam
     )
     return response.choices[0].message.content
 
+async def _call_anthropic_api(model: str, messages: List[ChatCompletionMessageParam]) -> Optional[str]:
+    """Call Anthropic API with formatted messages."""
+    response = await anthropic_client.messages.create(
+        model=model,
+        messages=[{
+            "role": cast(Literal["user", "assistant"], "user" if msg["role"] not in ["user", "assistant"] else msg["role"]),
+            "content": cast(str, msg["content"])
+        } for msg in messages if msg["role"] in ["user", "assistant"]],
+        max_tokens=MAX_TOKENS,
+        temperature=0.7
+    )
+    return str(response.content[0])
+
 async def call_model(
     messages: List[Dict[str, str]],
     config: Optional[RunnableConfig] = None
@@ -275,11 +288,13 @@ async def call_model(
         provider, model = configuration.model.split("/", 1)
 
         if provider == "openai":
-            formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
-            return await _call_openai_api(model, formatted_messages)
+            formatted_messages = await _format_openai_messages(cast(List[Message], messages), configuration.system_prompt)
+            content = await _call_openai_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
         elif provider == "anthropic":
             # Handle system prompt properly
-            has_system_message = any(msg["role"] == "system" for msg in messages)
+            typed_messages = cast(List[Message], messages)
+            has_system_message = any(msg["role"] == "system" for msg in typed_messages)
             
             formatted_messages = []
             # Add system message if not already present in messages
@@ -287,7 +302,7 @@ async def call_model(
                 formatted_messages.append(cast(ChatCompletionMessageParam, {"role": "system", "content": configuration.system_prompt}))
                 
             # Process all messages, preserving their roles correctly
-            for msg in messages:
+            for msg in typed_messages:
                 if msg["role"] in ["user", "assistant", "system"]:
                     formatted_messages.append(cast(ChatCompletionMessageParam, {
                         "role": msg["role"],
@@ -299,18 +314,10 @@ async def call_model(
                     
             formatted_messages = [msg for msg in formatted_messages if msg is not None]
             
-            response = await anthropic_client.messages.create(
-                model=model,
-                messages=[{
-                    "role": cast(Literal["user", "assistant"], "user" if msg["role"] not in ["user", "assistant"] else msg["role"]),
-                    "content": cast(str, msg["content"])
-                } for msg in formatted_messages if msg["role"] in ["user", "assistant"]],
-                max_tokens=MAX_TOKENS,
-                temperature=0.7
-            )
-            return str(response.content[0])
+            content = await _call_anthropic_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
         else:
-            return {"content": str(content_block)}
+            return {"content": "Unsupported model provider"}
     except Exception as e:
         error_highlight("Error in Anthropic API call: %s", str(e))
         raise
@@ -373,10 +380,13 @@ async def _call_model(
                 messages,
                 configuration.system_prompt or "You are a helpful assistant that can answer questions and help with tasks."
             )
-            return await _call_openai_api(model, openai_messages)
+            content = await _call_openai_api(model, openai_messages)
+            return {"content": content} if content is not None else {}
         elif provider == "anthropic":
             messages = await _ensure_system_message(messages, configuration.system_prompt or "")
-            return await _call_anthropic_api(model, messages)
+            formatted_messages = cast(List[ChatCompletionMessageParam], messages)
+            content = await _call_anthropic_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
         else:
             error_highlight("Unsupported model provider: %s", provider)
             return {}

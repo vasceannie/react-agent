@@ -509,7 +509,7 @@ async def reader(
     state: Annotated[JinaToolState, InjectedState] = None,
     store: Annotated[BaseStore, InjectedStore] = None,
     config: Annotated[RunnableConfig, InjectedToolArg] = None
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Parse and extract content from a webpage using Jina AI.
     
     Args:
@@ -526,20 +526,21 @@ async def reader(
     Returns:
         Dictionary containing parsed webpage content
     """
-    # Create headers if needed
+    # Simplified header dict creation
     headers_dict = {
-        "x_with_links_summary": with_links_summary,
-        "x_with_images_summary": with_images_summary,
-        "x_with_generated_alt": with_generated_alt,
-        "x_return_format": return_format,
-        "x_token_budget": token_budget,
-        "x_no_cache": no_cache,
+        k: v for k, v in {
+            "x_with_links_summary": with_links_summary,
+            "x_with_images_summary": with_images_summary,
+            "x_with_generated_alt": with_generated_alt,
+            "x_return_format": return_format,
+            "x_token_budget": token_budget,
+            "x_no_cache": no_cache,
+        }.items()
+        if v is not None  # Separate condition for readability
     }
-    headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
 
     headers_model = ReaderHeaders(**headers_dict) if headers_dict else None
 
-    # Create request object
     try:
         request = ReaderRequest(
             url=url,
@@ -547,60 +548,61 @@ async def reader(
             headers=headers_model
         )
     except Exception as e:
-        raise ToolException(f"Invalid reader request: {str(e)}") from e
+        raise ToolException(f"Invalid reader request: {e}") from e
 
-    # Create cache key for store - don't cache if no_cache is True
-    should_use_cache = not no_cache and state and state.get("cache_results", True)
+    # Simplified cache key construction
     cache_key = f"jina_reader_{url}_{options}"
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
 
-    # Check cache if store is available and caching is enabled
+    # Cache check with early return
     if store and should_use_cache:
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            if cached := store.get(["jina", cache_key]):
                 info_highlight(f"Using cached reader result for {url}", "JinaTool")
-                return cached_data.value
+                return cached.value
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Cache access error: {e}", "JinaTool")
 
-    # Get API key and retry configuration
+    # API request preparation
     api_key = _get_jina_api_key(state, config)
     retry_config = state.get("retry_config") if state else None
 
-    # Set up headers
     request_headers = {
         "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
 
-    # Add custom headers if provided
+    # Header processing with line breaks
     if request.headers:
-        for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
+        for field_name, field_value in request.headers.model_dump(
+            exclude_none=True, 
+            by_alias=True
+        ).items():
             if field_value is not None:
                 request_headers[field_name] = str(field_value).lower()
 
-    # Make the API request
+    # API call with simplified options
     response = await _make_request_with_retry(
         method="POST",
         url="https://r.jina.ai/",
         headers=request_headers,
-        json_data={"url": str(request.url), "options": request.options or "Default"},
+        json_data={"url": str(request.url), "options": request.options},
         retry_config=retry_config,
     )
 
-    # Check for errors
     if "error" in response:
         error_highlight(f"Reader API error: {response['error']}", "JinaTool")
-        raise ToolException(f"Jina Reader API error: {response['error'].get('message', 'Unknown error')}")
+        raise ToolException("Jina Reader API error: " + 
+                          response['error'].get('message', 'Unknown error'))
 
-    # Cache result if store is available and caching is enabled (and no_cache wasn't set)
+    # Cache write with guard clause
     if store and should_use_cache:
         try:
             store.put(["jina", cache_key], response)
             info_highlight(f"Cached reader result for {url}", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching reader result: {str(e)}", "JinaTool")
+            warning_highlight(f"Cache write error: {e}", "JinaTool")
 
     return response
 

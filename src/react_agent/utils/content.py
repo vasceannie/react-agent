@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, TypedDict
 from urllib.parse import unquote, urlparse
 
+import nltk
 import nltk.data  # type: ignore[import]
 import requests  # type: ignore[import]
 
@@ -42,7 +43,6 @@ import requests  # type: ignore[import]
 DOCLING_AVAILABLE = True
 try:
     from docling.document_converter import DocumentConverter  # type: ignore[import]
-    DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
 
@@ -79,6 +79,44 @@ logger = get_logger(__name__)
 content_cache = ProcessorCache(thread_id="content")
 
 
+def ensure_nltk_data():
+    """Ensure that required NLTK data is downloaded and accessible.
+    
+    This function checks for the existence of required NLTK data packages
+    and downloads them if they're not found. It also explicitly adds the
+    NLTK data directory to the search path.
+    """
+    # Define the required NLTK packages
+    required_packages = ['punkt']
+    
+    # Get the user's home directory
+    home_dir = str(Path.home())
+    nltk_data_dir = os.path.join(home_dir, 'nltk_data')
+    
+    # Ensure the NLTK data directory exists
+    os.makedirs(nltk_data_dir, exist_ok=True)
+    
+    # Add the NLTK data directory to the search path if it's not already there
+    if nltk_data_dir not in nltk.data.path:
+        nltk.data.path.append(nltk_data_dir)
+    
+    # Download required packages if they don't exist
+    for package in required_packages:
+        try:
+            nltk.data.find(f'tokenizers/{package}')
+            logger.info(f"NLTK package '{package}' is already installed")
+        except LookupError:
+            logger.info(f"Downloading NLTK package '{package}'")
+            nltk.download(package, download_dir=nltk_data_dir)
+    
+    # Log the NLTK data path for debugging
+    logger.info(f"NLTK data path: {nltk.data.path}")
+
+
+# Ensure NLTK data is available
+ensure_nltk_data()
+
+
 class ContentState(TypedDict):
     """Typed dictionary for content state used in the graph.
 
@@ -113,7 +151,7 @@ class DocumentProcessingResult(TypedDict):
     metadata: Dict[str, Any]
 
 
-# Load the Punkt sentence tokenizer (moved outside the function)
+# Load the Punkt sentence tokenizer
 try:
     tokenizer = nltk.data.load("tokenizers/punkt/english.pickle")
 except LookupError:
@@ -368,8 +406,7 @@ def detect_document_type(url: str) -> str | None:
     if not url:
         return None
 
-    url_lower = url.lower()
-    file_ext = Path(urlparse(url_lower).path).suffix.lower()
+    file_ext = Path(urlparse(url).path).suffix.lower()
 
     return DOCUMENT_TYPE_MAPPING.get(file_ext)
 

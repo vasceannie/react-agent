@@ -48,6 +48,7 @@ src/
     prompts/
       __init__.py
       analysis.py
+      enhanced_templates.py
       market.py
       query.py
       reflection.py
@@ -62,9 +63,11 @@ src/
       cache.py
       content.py
       defaults.py
+      enhanced_search.py
       extraction.py
       llm.py
       logging.py
+      search.py
       statistics.py
       validations.py
 </directory_structure>
@@ -88,6 +91,9 @@ from react_agent.prompts.analysis import (
 from react_agent.prompts.market import (
     MARKET_DATA_PROMPT,
     MARKET_PROMPT,
+)
+from react_agent.prompts.enhanced_templates import (
+    ENHANCED_CATEGORY_TEMPLATES,
 )
 from react_agent.prompts.reflection import (
     REFLECTION_PROMPT,
@@ -159,6 +165,7 @@ __all__ = [
     "COUNTERFACTUAL_PROMPT",
     "METACOGNITION_PROMPT",
     # Functions
+    "ENHANCED_CATEGORY_TEMPLATES",
     "get_report_template",
     "get_analysis_template",
 ]
@@ -498,6 +505,55 @@ The report should:
 
 Format the report as markdown with proper headings, lists, and sections.
 """
+</file>
+
+<file path="src/react_agent/prompts/enhanced_templates.py">
+"""Enhanced query templates for search optimization.
+
+This module provides enhanced query templates for different research categories,
+with fallback options to improve search results for problematic categories.
+"""
+
+from typing import Dict, Final
+
+# Enhanced query templates for problematic categories
+ENHANCED_CATEGORY_TEMPLATES: Final[Dict[str, Dict[str, str]]] = {
+    "best_practices": {
+        "primary": "{primary_terms} best practices specific examples",
+        "fallback_1": "{primary_terms} proven guidelines successful approaches",
+        "fallback_2": "{primary_terms} implementation strategies case studies"
+    },
+    "regulatory_landscape": {
+        "primary": "{primary_terms} specific regulations compliance requirements",
+        "fallback_1": "{primary_terms} recent laws regulatory changes",
+        "fallback_2": "{primary_terms} compliance framework legal standards"
+    },
+    "implementation_factors": {
+        "primary": "{primary_terms} implementation success factors examples",
+        "fallback_1": "{primary_terms} practical implementation strategies",
+        "fallback_2": "{primary_terms} implementation challenges solutions"
+    },
+    "provider_landscape": {
+        "primary": "{primary_terms} top vendors market leaders",
+        "fallback_1": "{primary_terms} provider comparison competitive analysis",
+        "fallback_2": "{primary_terms} emerging providers market share"
+    },
+    "technical_requirements": {
+        "primary": "{primary_terms} specific technical requirements specifications",
+        "fallback_1": "{primary_terms} technical standards compatibility",
+        "fallback_2": "{primary_terms} technical infrastructure requirements"
+    },
+    "market_dynamics": {
+        "primary": "{primary_terms} current market trends data statistics",
+        "fallback_1": "{primary_terms} market analysis growth projections",
+        "fallback_2": "{primary_terms} industry developments market research"
+    },
+    "cost_considerations": {
+        "primary": "{primary_terms} cost analysis pricing models",
+        "fallback_1": "{primary_terms} budget considerations roi examples",
+        "fallback_2": "{primary_terms} cost comparison financial impact"
+    }
+}
 </file>
 
 <file path="src/react_agent/prompts/market.py">
@@ -1653,7 +1709,7 @@ from langchain_core.runnables import RunnableConfig
 
 from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.llm import call_model_json
-from react_agent.utils.extraction import extract_statistics
+from react_agent.tools import StatisticsExtractionTool
 from react_agent.utils.defaults import get_default_extraction_result
 from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint
 from langgraph.graph import StateGraph
@@ -1667,6 +1723,9 @@ synthesis_cache = ProcessorCache(thread_id="synthesis")
 
 # Initialize memory saver for caching
 memory_saver = MemorySaver()
+
+# Initialize tools
+statistics_tool = StatisticsExtractionTool()
 
 # Enhanced synthesis prompt template
 ENHANCED_SYNTHESIS_PROMPT = """Create a comprehensive synthesis of research findings for: {query}
@@ -1932,8 +1991,12 @@ async def synthesize_research(
                 if "statistics" in fact:
                     statistics.extend(fact["statistics"])
                 elif "source_text" in fact:
-                    # Extract statistics from source text
-                    extracted_stats = extract_statistics(fact["source_text"])
+                    # Extract statistics from source text using the tool
+                    extracted_stats = statistics_tool.run(
+                        text=fact["source_text"],
+                        url=fact.get("source_url", ""),
+                        source_title=fact.get("source_title", "")
+                    )
                     statistics.extend(extracted_stats)
             
             research_data[category] = {
@@ -2592,608 +2655,1404 @@ Format your response as JSON with these fields:
 </file>
 
 <file path="src/react_agent/tools/jina.py">
-"""Enhanced Jina AI Search Integration.
+"""Jina AI Tools - Clean Implementation for LangGraph.
 
-This module provides a more robust integration with Jina AI's search API
-with improved error handling, result validation, and search strategies.
+This module provides production-ready tool implementations for Jina AI's
+Search Foundation APIs, designed to work seamlessly with LangGraph's
+orchestration framework. The implementation follows best practices for
+asynchronous programming, error handling, and type safety.
+
+Each tool is structured to support both standalone usage and integration
+with LangGraph's ToolNode, InjectedState, and checkpoint mechanisms.
+
+Usage:
+    1. Set the JINA_API_KEY environment variable
+    2. Import specific tools or use the create_jina_toolnode() function
+    3. Integrate with your LangGraph workflow
+
+Example:
+    ```python
+    from langgraph.graph import StateGraph
+    from react_agent.tools.jina import create_jina_toolnode
+    from react_agent.tools.jina import search, reader, embeddings
+
+    # Create a graph with all Jina tools
+    workflow = StateGraph(YourStateType)
+    workflow.add_node("jina_tools", create_jina_toolnode())
+    
+    # Or with selected tools
+    search_tools = create_jina_toolnode(include_tools=["search", "grounding"])
+    workflow.add_node("search_tools", search_tools)
+    ```
 """
 
-
 import asyncio
-import contextlib
+import hashlib
 import json
 import os
-import random
-import re
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
-from urllib.parse import quote, urljoin, urlparse
+from typing import Annotated, Any, Dict, List, Literal, Union
+
+# Use typing_extensions for TypedDict
+from typing_extensions import TypedDict
 
 import aiohttp
-from langchain.tools import BaseTool
-from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import InjectedToolArg, ToolException
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import StateGraph
-from pydantic import BaseModel, Field
-from typing_extensions import Annotated
+from langchain_core.tools import InjectedToolArg, ToolException, tool
+from langgraph.prebuilt import InjectedState, InjectedStore
+# Import ToolNode from langgraph.prebuilt.tool_node instead of langgraph.graph
+from langgraph.prebuilt.tool_node import ToolNode
+from langgraph.store.base import BaseStore
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 
 from react_agent.configuration import Configuration
-from react_agent.prompts.query import detect_vertical, expand_acronyms, optimize_query
-from react_agent.utils.cache import (
-    ProcessorCache,
-    cache_result,
-    create_checkpoint,
-    load_checkpoint,
-)
-from react_agent.utils.extraction import safe_json_parse
+from react_agent.utils.cache import create_checkpoint, load_checkpoint
+
+# Utilities from your existing project
 from react_agent.utils.logging import (
     error_highlight,
     get_logger,
     info_highlight,
-    log_dict,
     warning_highlight,
 )
 from react_agent.utils.validations import is_valid_url
 
-# Initialize logger
 logger = get_logger(__name__)
 
-# Define search types for specialized search strategies
-SearchType = Literal["general", "authoritative", "recent", "comprehensive", "technical"]
+# -------------------------------------------------------------------------
+# Common Types and Configuration
+# -------------------------------------------------------------------------
 
-# Initialize memory saver for caching
-processor_cache = ProcessorCache(thread_id="jina-search")
-
-# Add at module level after imports
-_query_cache: Dict[str, Tuple[List[Document], datetime]] = {}
 
 class RetryConfig(BaseModel):
-    """Configuration for retry behavior."""
-    max_retries: int = Field(default=3, description="Maximum number of retries")
-    base_delay: float = Field(default=1.0, description="Base delay between retries in seconds")
-    max_delay: float = Field(default=10.0, description="Maximum delay between retries in seconds")
-    
-    def get_delay(self, attempt: int) -> float:
-        """Calculate delay with exponential backoff."""
-        return min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
+    """Configuration for HTTP request retries with exponential backoff."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-class SearchParams(BaseModel):
-    """Parameters for search operations."""
-    query: str = Field(..., description="Search query")
-    search_type: SearchType = Field(default="general", description="Type of search to perform")
-    max_results: Optional[int] = Field(default=None, description="Maximum number of results to return")
-    min_quality_score: Optional[float] = Field(default=0.5, description="Minimum quality score for results")
-    recency_days: Optional[int] = Field(default=None, description="Maximum age of results in days")
-    domains: Optional[List[str]] = Field(default=None, description="List of domains to search")
-    category: Optional[str] = Field(default=None, description="Category to search in")
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API request."""
-        result = {
-            "q": self.query,
-            "limit": self.max_results or 10,
-            "min_score": self.min_quality_score or 0.5
-        }
-        
-        if self.recency_days:
-            result["recency_days"] = self.recency_days
-            
-        if self.domains:
-            result["domains"] = ",".join(self.domains)
-            
-        if self.category:
-            result["category"] = self.category
-            
-        return result
+    max_retries: PositiveInt = Field(default=5, description="Maximum number of retries")
+    base_delay: PositiveFloat = Field(default=2.0, description="Base delay in seconds")
+    max_delay: PositiveFloat = Field(default=60.0, description="Maximum delay in seconds")
+    respect_retry_after: bool = Field(default=True, description="Whether to respect retry-after headers")
 
-class JinaSearchClient:
-    """Enhanced client for Jina AI search with retry and validation."""
-    
-    def __init__(
-        self,
-        api_key: str,
-        base_url: Optional[str] = None,
-        retry_config: Optional[RetryConfig] = None,
-    ):
-        """Initialize Jina search client.
-        
-        Args:
-            api_key: Jina AI API key
-            base_url: Optional base URL for self-hosted instances
-            retry_config: Configuration for retry behavior
-        """
-        self.api_key = api_key
-        self.base_url = base_url.rstrip('/') if base_url else "https://s.jina.ai"
-        self.retry_config = retry_config or RetryConfig()
-        self.session: Optional[aiohttp.ClientSession] = None
-        
-    async def __aenter__(self):
-        """Create aiohttp session."""
-        self.session = aiohttp.ClientSession(
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-        )
+    @model_validator(mode="after")
+    def validate_delays(self) -> "RetryConfig":
+        """Ensure max_delay is greater than or equal to base_delay."""
+        if self.max_delay < self.base_delay:
+            raise ValueError("max_delay must be greater than or equal to base_delay")
         return self
+
+
+class JinaToolState(TypedDict, total=False):
+    """State for LangGraph tools to access and modify."""
+    messages: List[Any]  # Messages in the graph state
+    jina_api_key: str | None  # Optional API key override
+    retry_config: RetryConfig | None  # Optional retry configuration
+    cache_results: bool  # Whether to cache results in store
+
+
+# -------------------------------------------------------------------------
+# Shared HTTP Client Logic 
+# -------------------------------------------------------------------------
+
+async def _make_request_with_retry(
+    method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"],
+    url: str,
+    headers: Dict[str, str],
+    json_data: Dict[str, Any] | None = None,
+    retry_config: RetryConfig | None = None,
+) -> Dict[str, Any]:
+    """Make an HTTP request with exponential backoff retry logic.
+    
+    Args:
+        method: HTTP method to use
+        url: Target URL for the request
+        headers: HTTP headers to include
+        json_data: Optional JSON payload
+        retry_config: Configuration for retries
         
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Close aiohttp session."""
-        if self.session:
-            await self.session.close()
-            self.session = None
+    Returns:
+        API response as a dictionary or error information
+    """
+    if retry_config is None:
+        retry_config = RetryConfig()
 
-    def _get_endpoint(self, endpoint: str) -> str:
-        """Get endpoint URL."""
-        base = self.base_url.rstrip('/')
-        if not endpoint.startswith('/'):
-            endpoint = f'/{endpoint}'
-        return f"{base}{endpoint}"
+    attempt = 0
+    last_exception: Exception | None = None
 
-    async def _make_request_with_retry(
-        self,
-        method: str,
-        endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Make HTTP request to Jina API with retry logic and better error handling."""
-        if not self.session:
-            raise ValueError("Session not initialized")
+    while attempt < retry_config.max_retries:
+        attempt += 1
+        try:
+            info_highlight(f"Attempt {attempt} {method} {url}", "JinaTool")
 
-        last_exception = None
-        for attempt in range(1, self.retry_config.max_retries + 1):
-            try:
-                url = self._get_endpoint(endpoint)
-                info_highlight(f"Making request to: {url} with params: {params}")
-                
-                async with self.session.request(
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
                     method=method,
                     url=url,
-                    params=params,
-                    json=json_data
-                ) as response:
-                    # Check for no results error (422)
-                    if response.status == 422:
-                        error_text = await response.text()
-                        if "No search results available" in error_text:
-                            warning_highlight("No search results available for this query")
-                            return {"results": []}  # Return empty results rather than raising an error
-                    
-                    # Handle other errors
-                    if response.status != 200:
-                        error_text = await response.text()
-                        error_highlight(f"Request failed with status {response.status}: {error_text}")
-                        raise aiohttp.ClientError(f"Request failed with status {response.status}: {error_text}")
-                    
-                    return await response.json()
-            except Exception as e:
-                last_exception = e
-                if attempt < self.retry_config.max_retries:
-                    delay = self.retry_config.get_delay(attempt)
-                    warning_highlight(
-                        f"Request failed (attempt {attempt}/{self.retry_config.max_retries}): {str(last_exception)}. Retrying in {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    error_highlight(
-                        f"Request failed after {self.retry_config.max_retries} attempts: {str(last_exception)}"
-                    )
-                    raise
+                    headers=headers,
+                    json=json_data,
+                    raise_for_status=False,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    status = resp.status
+                    text = await resp.text()
 
-        # This should never be reached as the last failure should raise
-        assert last_exception is not None
-        raise last_exception
+                    # Special case for 422 (invalid input)
+                    if status == 422:
+                        warning_highlight(f"422 Unprocessable Entity: {text}", "JinaTool")
+                        return {"error": {"status": status, "message": text}}
 
-    async def search(
-        self,
-        params: SearchParams
-    ) -> List[Document]:
-        """Search with improved parameters and result validation.
-        
-        Args:
-            params: Search parameters
-            
-        Returns:
-            List of documents from search results
-        """
-        request_params = params.to_dict()
-        info_highlight(f"Executing {params.search_type} search with query: {params.query}")
-        
-        try:
-            # Use the search endpoint
-            data = await self._make_request_with_retry(
-                method="GET",
-                endpoint="/search",  # Use the search endpoint
-                params=request_params
+                    # Handle successful responses (status 2xx)
+                    if 200 <= status < 300:
+                        try:
+                            response = await resp.json()
+                            if isinstance(response, dict):
+                                return response
+                            else:
+                                return {"response": response, "status": status}
+                        except Exception:
+                            # If not valid JSON, return the raw text
+                            return {"raw_response": text, "status": status}
+
+                    # Handle error responses
+                    error_msg = f"HTTP {status}: {text}"
+                    raise aiohttp.ClientError(error_msg)
+
+
+        except aiohttp.ClientError as ce:
+            last_exception = ce
+            warning_highlight(
+                f"ClientError on attempt {attempt}/{retry_config.max_retries}: {str(last_exception)}",
+                "JinaTool",
             )
-            
-            results = self._parse_search_results(data)
-            info_highlight(f"Retrieved {len(results)} search results")
-            
-            # If no results, try simplified query
-            if not results:
-                # Extract main keywords (first 3 words or up to 30 chars)
-                simplified_query = " ".join(params.query.split()[:3])
-                if len(simplified_query) > 30:
-                    simplified_query = simplified_query[:30]
-                
-                info_highlight(f"No results found, trying simplified query: {simplified_query}")
-                request_params["query"] = simplified_query
-                
-                data = await self._make_request_with_retry(
-                    method="GET",
-                    endpoint="/search",
-                    params=request_params
-                )
-                
-                results = self._parse_search_results(data)
-                info_highlight(f"Retrieved {len(results)} results with simplified query")
-            
-            # Convert results to Documents
-            documents = self._convert_to_documents(results)
-            
-            # Apply quality filtering
-            min_score: float = float(params.min_quality_score or 0.5)  # Explicit type conversion
-            filtered_docs = self._filter_documents(documents, min_score)
-            info_highlight(f"Filtered to {len(filtered_docs)} high-quality results")
-            
-            return filtered_docs
+
         except Exception as e:
-            error_highlight(f"Search failed: {str(e)}")
-            return []
-
-    def _parse_search_results(self, raw_results: Union[str, List[Dict], Dict]) -> List[Dict]:
-        """Parse raw results with improved error handling."""
-        try:
-            # Convert raw_results to string if it's not already
-            if isinstance(raw_results, (list, dict)):
-                raw_results = json.dumps(raw_results)
-            parsed = safe_json_parse(raw_results, "search_results")
-            return self._extract_results_list(parsed)
-        except Exception as e:
-            error_highlight(f"Error parsing search results: {str(e)}")
-            return []
-
-    def _extract_results_list(self, data: Union[List[Dict], Dict]) -> List[Dict]:
-        """Extract results list from various response formats."""
-        try:
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                # Try common response formats
-                for key in ['results', 'data', 'items', 'hits', 'matches', 'documents', 'response']:
-                    if key in data:
-                        if isinstance(data[key], list):
-                            return data[key]
-                        elif isinstance(data[key], dict):
-                            # Try to extract from nested structure
-                            for nested_key in ['results', 'data', 'items', 'hits', 'matches']:
-                                if nested_key in data[key] and isinstance(data[key][nested_key], list):
-                                    return data[key][nested_key]
-
-                # If no list found, try to extract single result
-                if 'result' in data:
-                    return [data['result']]
-
-                # If still no results, try to extract from nested structure
-                for value in data.values():
-                    if isinstance(value, list):
-                        return value
-                    elif isinstance(value, dict):
-                        if nested_results := self._extract_results_list(value):
-                            return nested_results
-
-                # If still no results, return empty list
-                return []
-            return []
-        except Exception as e:
-            error_highlight(f"Error extracting results list: {str(e)}")
-            return []
-
-    def _extract_content(self, result: Dict) -> Optional[str]:
-        """Extract content from result with fallbacks."""
-        content_fields = ['snippet', 'content', 'text', 'description', 'summary', 'body', 'raw']
-        for field in content_fields:
-            if content := result.get(field):
-                return content.strip().strip('```json').strip('```')
-        return None
-
-    def _build_metadata(self, result: Dict, content: str) -> Dict:
-        """Build metadata dictionary from result."""
-        field_mapping = {
-            'url': ['url', 'link', 'href', 'source_url', 'web_url'],
-            'title': ['title', 'name', 'heading', 'subject', 'headline'],
-            'source': ['source', 'domain', 'site', 'provider', 'publisher'],
-            'published_date': ['published_date', 'date', 'timestamp', 'published', 'created_at', 'publication_date']
-        }
-        
-        metadata = {
-            'quality_score': self._calculate_quality_score(result, content),
-            'extraction_status': 'success',
-            'extraction_timestamp': datetime.now().isoformat(),
-            'original_result': result
-        }
-        
-        for field_type, fields in field_mapping.items():
-            for field in fields:
-                if value := result.get(field):
-                    metadata[field_type] = value
-                    break
-        
-        if url := metadata.get('url'):
-            try:
-                metadata['domain'] = urlparse(url).netloc
-            except Exception:
-                metadata['domain'] = ""
-                
-        return metadata
-
-    def _convert_to_documents(self, results: List[Dict]) -> List[Document]:
-        """Convert search results to Document objects with improved metadata."""
-        documents = []
-        for idx, result in enumerate(results, 1):
-            if not isinstance(result, dict):
-                continue
-                
-            if not (content := self._extract_content(result)):
-                warning_highlight(f"No content found for result {idx}")
-                continue
-                
-            try:
-                metadata = self._build_metadata(result, content)
-                documents.append(Document(page_content=content, metadata=metadata))
-                info_highlight(f"Successfully converted result {idx} to Document")
-            except Exception as e:
-                warning_highlight(f"Error converting result {idx} to Document: {str(e)}")
-                continue
-                
-        return documents
-
-    @cache_result(ttl=3600)
-    def _calculate_quality_score(self, result: Dict[str, Any], content: str) -> float:
-        """Calculate quality score for a search result."""
-        score = 0.5  # Base score
-
-        # Add points for authoritative domains
-        authoritative_domains = [
-            '.gov', '.edu', '.org', 'wikipedia.org', 
-            'research', 'journal', 'university', 'association'
-        ]
-        url = result.get('url', '')
-        if any(domain in url.lower() for domain in authoritative_domains):
-            score += 0.2
-
-        # Add points for content length (substantive content)
-        if len(content) > 500:
-            score += 0.1
-
-        # Add points for having title/publication date
-        if result.get('title'):
-            score += 0.05
-        if result.get('published_date') or result.get('date'):
-            score += 0.05
-
-        if date_field := result.get('published_date', result.get('date', '')):
-            with contextlib.suppress(Exception):
-                # Try to parse date
-                from dateutil import parser
-                published_date = parser.parse(date_field)
-                current_date = datetime.now(timezone.utc)
-                days_old = (current_date - published_date).days
-
-                # Fresher content gets higher score
-                if days_old < 30:  # Last month
-                    score += 0.1
-                elif days_old < 180:  # Last 6 months
-                    score += 0.05
-        return min(1.0, score)  # Cap at 1.0
-
-    @cache_result(ttl=3600)
-    def _filter_documents(self, documents: List[Document], min_score: float) -> List[Document]:
-        """Filter documents based on quality score."""
-        return [
-            doc for doc in documents 
-            if doc.metadata.get('quality_score', 0) >= min_score
-        ]
-
-class JinaSearchTool(BaseTool):
-    """Enhanced Jina AI search integration with caching and parallel processing."""
-    
-    name: str = "jina_search"
-    description: str = "Search for information using Jina AI's search engine with enhanced caching and parallel processing"
-    
-    config: Configuration = Field(default_factory=Configuration)
-    
-    def __init__(self, config: Optional[Configuration] = None):
-        """Initialize the Jina search tool.
-        
-        Args:
-            config: Optional configuration for the search tool
-        """
-        super().__init__()
-        if config:
-            self.config = config
-        if not self.config.jina_api_key:
-            raise ValueError("Jina API key is required")
-            
-    async def _arun(
-        self,
-        query: str,
-        search_type: Optional[SearchType] = None,
-        max_results: Optional[int] = None,
-        min_quality_score: Optional[float] = None,
-        recency_days: Optional[int] = None,
-        domains: Optional[List[str]] = None,
-        category: Optional[str] = None
-    ) -> List[Document]:
-        """Execute search with caching and parallel processing."""
-        config = RunnableConfig(configurable={"jina_api_key": self.config.jina_api_key})
-        return await search(
-            query=query,
-            search_type=search_type,
-            max_results=max_results,
-            min_quality=min_quality_score,
-            recency_days=recency_days,
-            domains=domains,
-            category=category,
-            config=config
-        )
-
-async def _execute_search_strategy(
-    client: JinaSearchClient,
-    params: SearchParams,
-    category: Optional[str] = None
-) -> List[List[Document]]:
-    """Execute search with optional category-specific search."""
-    search_tasks = [client.search(params)]
-
-    if not category:
-        if vertical := detect_vertical(params.query):
-            category_params = SearchParams(**params.model_dump())
-            category_params.category = vertical
-            search_tasks.append(client.search(category_params))
-
-    return await asyncio.gather(*search_tasks)
-
-@cache_result(ttl=3600)
-def _merge_and_filter_results(
-    results_list: List[List[Document]],
-    min_quality: float
-) -> List[Document]:
-    """Merge, deduplicate and filter search results."""
-    seen_urls = set()
-    all_results = []
-    
-    for results in results_list:
-        for doc in results:
-            url = doc.metadata.get("url", "")
-            if url not in seen_urls:
-                seen_urls.add(url)
-                all_results.append(doc)
-    
-    all_results.sort(key=lambda x: x.metadata.get("quality_score", 0), reverse=True)
-    return [doc for doc in all_results if doc.metadata.get("quality_score", 0) >= min_quality]
-
-async def _load_cached_results(cache_key: str) -> Optional[List[Document]]:
-    """Load and validate cached search results."""
-    try:
-        if cached := load_checkpoint(cache_key):
-            if not isinstance(cached, dict) or "results" not in cached or "timestamp" not in cached:
-                return None
-                
-            if (datetime.now() - datetime.fromisoformat(cached["timestamp"])).total_seconds() >= 86400:
-                return None
-                
-            results = cached["results"]
-            if not isinstance(results, list) or not all(isinstance(doc, Document) for doc in results):
-                return None
-                
-            info_highlight(f"Retrieved {len(results)} results from cache")
-            return results
-    except Exception as e:
-        warning_highlight(f"Error loading from cache: {str(e)}")
-    return None
-
-async def _perform_search(
-    configuration: Configuration,
-    params: SearchParams,
-    cache_key: str
-) -> List[Document]:
-    """Execute search and cache results."""
-    async with JinaSearchClient(
-        api_key=configuration.jina_api_key or "",
-        base_url=configuration.jina_url,
-        retry_config=RetryConfig()
-    ) as client:
-        results_list = await _execute_search_strategy(client, params, params.category)
-        all_results = _merge_and_filter_results(results_list, params.min_quality_score or 0.5)
-        
-        try:
-            create_checkpoint(
-                cache_key,
-                {
-                    "results": all_results,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "params": params.to_dict()
-                },
-                ttl=86400
+            last_exception = e
+            warning_highlight(
+                f"Exception on attempt {attempt}/{retry_config.max_retries}: {str(last_exception)}",
+                "JinaTool",
             )
-            info_highlight(f"Cached {len(all_results)} results")
-        except Exception as e:
-            warning_highlight(f"Error caching results: {str(e)}")
+        # Calculate exponential backoff delay
+        base_delay = min(retry_config.max_delay, retry_config.base_delay * (2 ** (attempt - 1)))
         
-        return all_results
+        # Special handling for rate limit errors (HTTP 429)
+        retry_after = None
+        if retry_config.respect_retry_after and "HTTP 429" in str(last_exception):
+            # Try to extract retryAfter value from the error message
+            try:
+                error_text = str(last_exception)
+                if "HTTP 429:" in error_text:
+                    error_json_str = error_text.split("HTTP 429:", 1)[1].strip()
+                    error_json = json.loads(error_json_str)
+                    retry_after = error_json.get("retryAfter")
+                    
+                    if retry_after:
+                        retry_after = float(retry_after)
+                        info_highlight(f"Rate limit exceeded! API suggests waiting {retry_after}s. Using this value instead of {base_delay}s.", "JinaTool")
+            except Exception as e:
+                warning_highlight(f"Could not parse rate limit response: {e}", "JinaTool")
+        
+        # Use retry_after from API if available, otherwise use calculated delay
+        if retry_after and retry_config.respect_retry_after:
+            await asyncio.sleep(retry_after)
+        else:
+            await asyncio.sleep(base_delay)
 
-async def search(
-    query: str,
-    search_type: Optional[SearchType] = None,
-    max_results: Optional[int] = None,
-    min_quality: Optional[float] = None,
-    recency_days: Optional[int] = None,
-    domains: Optional[List[str]] = None,
-    category: Optional[str] = None,
-    *,
-    config: Annotated[RunnableConfig, InjectedToolArg]
-) -> List[Document]:
-    """Enhanced search with multiple strategies, quality filters, and improved caching."""
-    configuration = Configuration.from_runnable_config(config)
-    if not configuration.jina_api_key:
-        error_highlight("Jina API key is required")
-        return []
+    # All retry attempts failed
+    error_highlight(f"All retry attempts failed: {last_exception}", "JinaTool")
+    return {"error": {"message": str(last_exception), "status": -1}}
 
-    os.environ["JINA_API_KEY"] = configuration.jina_api_key
-    if configuration.jina_url:
-        os.environ["JINA_URL"] = configuration.jina_url
 
-    params = SearchParams(
-        query=query,
-        search_type=search_type or "general",
-        max_results=max_results or configuration.max_search_results,
-        min_quality_score=min_quality or 0.5,
-        recency_days=recency_days,
-        domains=domains or (['.edu', '.gov', '.org'] if search_type in ["authoritative", None] else None),
-        category=category
+def _get_jina_api_key(state: Union[Dict[str, Any], JinaToolState, None] = None, config: RunnableConfig | None = None) -> str:
+    """Get the Jina API key from configuration, state, or environment.
+    
+    Args:
+        state: Optional state dictionary that might contain the API key
+        config: Optional RunnableConfig that might contain the API key
+        
+    Returns:
+        The API key as a string
+        
+    Raises:
+        ValueError: If the API key is not found
+    """
+    # First check if config exists and has the API key
+    if config is not None:
+        configuration = Configuration.from_runnable_config(config)
+        if configuration.jina_api_key:
+            return configuration.jina_api_key
+
+    # Then check if key exists in state
+    if state and isinstance(state, dict) and "jina_api_key" in state:
+        # Ensure the API key is a non-empty string
+        if state["jina_api_key"] and isinstance(state["jina_api_key"], (str, int, float, bool)):
+            return str(state["jina_api_key"])
+        elif state["jina_api_key"] is not None:
+            logger.warning("jina_api_key in state is not a valid type, converting to string")
+            return str(state["jina_api_key"])
+
+    if key := os.environ.get("JINA_API_KEY"):
+        return key
+    
+    # If we get here, no API key was found
+    raise ValueError(
+        "JINA_API_KEY not found in configuration, state, or environment. "
+        "Set the JINA_API_KEY environment variable or include it in the configuration."
     )
 
-    cache_key = f"jina_search_{params.query}_{params.search_type}_{params.max_results}"
+
+# -------------------------------------------------------------------------
+# 1. Embeddings API
+# -------------------------------------------------------------------------
+
+class EmbeddingsRequest(BaseModel):
+    """Request model for Jina's Embeddings API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = Field(
+        ..., 
+        description="Model identifier (e.g. 'jina-embeddings-v3', 'jina-clip-v2')"
+    )
+    input: List[str] = Field(
+        ..., 
+        min_length=1,
+        description="Text strings or base64-encoded images to embed"
+    )
+    embedding_type: Union[Literal["float", "base64"], List[Literal["float", "base64"]]] | None = Field(
+        default="float",
+        description="Format of returned embeddings"
+    )
+    task: str | None = Field(
+        default=None,
+        description="Intended downstream application (e.g. 'retrieval.query')"
+    )
+    dimensions: PositiveInt | None = Field(
+        default=None,
+        description="Truncates output embeddings to this size if set"
+    )
+    normalized: bool = Field(
+        default=False,
+        description="Normalize embeddings to unit L2 norm"
+    )
+    late_chunking: bool = Field(
+        default=False,
+        description="Concatenate sentences and treat as a single input"
+    )
+
+
+@tool
+async def embeddings(
+    model: str,
+    input_texts: List[str],
+    embedding_type: Union[Literal["float", "base64"], List[Literal["float", "base64"]]] = "float",
+    task: str | None = None,
+    dimensions: int | None = None,
+    normalized: bool = False,
+    late_chunking: bool = False,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Generate vector embeddings for text or images using Jina AI.
     
-    if cached_results := await _load_cached_results(cache_key):
-        return cached_results
+    Args:
+        model: Identifier of model to use (e.g. 'jina-embeddings-v3', 'jina-clip-v2')
+        input_texts: List of texts or base64-encoded images to embed
+        embedding_type: Format of returned embeddings (default: 'float')
+        task: Intended downstream application (e.g. 'retrieval.query')
+        dimensions: Truncate output embeddings to this size if set
+        normalized: Normalize embeddings to unit L2 norm
+        late_chunking: Concatenate sentences as a single input
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing embedding data for each input
+    """
+    # Create request object
+    request = EmbeddingsRequest(
+        model=model,
+        input=input_texts,
+        embedding_type=embedding_type,
+        task=task,
+        dimensions=dimensions,
+        normalized=normalized,
+        late_chunking=late_chunking
+    )
+
+    # Create cache key for store
+    cache_key = f"jina_embeddings_{model}_{hashlib.sha256(str(input_texts).encode('utf8')).hexdigest()}"
+
+    # Check cache if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight(f"Using cached embeddings result for {model}", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/embeddings",
+        headers=headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Embeddings API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Embeddings API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight(f"Cached embeddings result for {model}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 2. Re-Ranker API
+# -------------------------------------------------------------------------
+
+class RerankerRequest(BaseModel):
+    """Request model for Jina's Re-Ranker API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = Field(
+        ..., 
+        description="Model identifier (e.g. 'jina-reranker-v2-base-multilingual')"
+    )
+    query: str = Field(
+        ..., 
+        min_length=1,
+        description="The search query for re-ranking"
+    )
+    documents: List[Union[str, Dict[str, Any]]] = Field(
+        ..., 
+        min_length=1,
+        description="List of documents to re-rank"
+    )
+    top_n: PositiveInt | None = Field(
+        default=None,
+        description="Number of top documents to return"
+    )
+    return_documents: bool = Field(
+        default=True,
+        description="Return documents in the response"
+    )
+
+
+@tool
+async def rerank(
+    model: str,
+    query: str,
+    documents: List[Union[str, Dict[str, Any]]],
+    top_n: int | None = None,
+    return_documents: bool = True,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Re-rank a list of documents based on relevance to a query.
+    
+    Args:
+        model: Identifier of model to use (e.g. 'jina-reranker-v2-base-multilingual')
+        query: The search query for re-ranking
+        documents: List of documents (strings or dicts) to re-rank
+        top_n: Number of top documents to return
+        return_documents: Return documents in the response
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing re-ranked documents with relevance scores
+    """
+    # Create request object
+    request = RerankerRequest(
+        model=model,
+        query=query,
+        documents=documents,
+        top_n=top_n,
+        return_documents=return_documents
+    )
+    
+    # Create cache key for store
+    doc_hash = str(hash(str(documents)))
+    cache_key = f"jina_rerank_{model}_{query}_{doc_hash}_{top_n}_{return_documents}"
+    
+    # Check cache if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight(f"Using cached reranking result for {query}", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+    
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+    
+    # Set up headers
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/rerank",
+        headers=headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+    
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Reranker API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Reranker API error: {response['error'].get('message', 'Unknown error')}")
+    
+    # Cache result if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight(f"Cached reranking result for {query}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+    
+    return response
+
+
+# -------------------------------------------------------------------------
+# 3. Reader API
+# -------------------------------------------------------------------------
+
+class ReaderHeaders(BaseModel):
+    """Optional headers for the Reader API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_engine: str | None = Field(default=None, alias="X-Engine")
+    x_timeout: PositiveInt | None = Field(default=None, alias="X-Timeout")
+    x_target_selector: str | None = Field(default=None, alias="X-Target-Selector")
+    x_wait_for_selector: str | None = Field(default=None, alias="X-Wait-For-Selector")
+    x_remove_selector: str | None = Field(default=None, alias="X-Remove-Selector")
+    x_with_links_summary: bool | None = Field(default=None, alias="X-With-Links-Summary")
+    x_with_images_summary: bool | None = Field(default=None, alias="X-With-Images-Summary")
+    x_with_generated_alt: bool | None = Field(default=None, alias="X-With-Generated-Alt")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+    x_with_iframe: bool | None = Field(default=None, alias="X-With-Iframe")
+    x_return_format: Literal["markdown", "html", "text"] | None = Field(default=None, alias="X-Return-Format")
+    x_token_budget: PositiveInt | None = Field(default=None, alias="X-Token-Budget")
+
+
+class ReaderRequest(BaseModel):
+    """Request model for Jina's Reader API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    url: HttpUrl = Field(
+        ..., 
+        description="The website URL to read/parse"
+    )
+    options: Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"] | None = Field(
+        default=None,
+        description="Format options for response content"
+    )
+    headers: ReaderHeaders | None = None
+
+    @field_validator("url")
+    def validate_url(cls, v: HttpUrl) -> HttpUrl:
+        """Validate that the URL is valid and not a placeholder."""
+        url_str = str(v)
+        if not is_valid_url(url_str) or "{" in url_str or "}" in url_str:
+            raise ValueError(f"Invalid URL: {url_str}")
+        return v
+
+
+@tool
+async def reader(
+    url: str,
+    options: Literal["Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot"] = "Default",
+    with_links_summary: bool | None = None,
+    with_images_summary: bool | None = None,
+    with_generated_alt: bool | None = None,
+    return_format: Literal["markdown", "html", "text"] | None = None,
+    token_budget: int | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Parse and extract content from a webpage using Jina AI.
+    
+    Args:
+        url: The URL of the webpage to read
+        options: Format options ("Default", "Markdown", "HTML", "Text", "Screenshot", "Pageshot")
+        with_links_summary: Include summary of links in the result
+        with_images_summary: Include summary of images in the result
+        with_generated_alt: Generate alt text for images
+        return_format: Preferred format ("markdown", "html", "text")
+        token_budget: Maximum number of tokens to return
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing parsed webpage content
+    """
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str, int]] = {}
+    
+    if with_links_summary is not None:
+        # Ensure with_links_summary is a boolean
+        if isinstance(with_links_summary, bool):
+            headers_dict["x_with_links_summary"] = with_links_summary
+        else:
+            raise ValueError("with_links_summary must be a boolean")
+    if with_images_summary is not None:
+        # Ensure with_images_summary is a boolean
+        if isinstance(with_images_summary, bool):
+            headers_dict["x_with_images_summary"] = with_images_summary
+        else:
+            raise ValueError("with_images_summary must be a boolean")
+    if with_generated_alt is not None:
+        headers_dict["x_with_generated_alt"] = with_generated_alt
+    if return_format is not None:
+        # Ensure return_format is a string of the correct type
+        if isinstance(return_format, str) and return_format in ["markdown", "html", "text"]:
+            headers_dict["x_return_format"] = return_format
+        else:
+            raise ValueError("return_format must be one of: 'markdown', 'html', 'text'")
+    if token_budget is not None:
+        # Ensure token_budget is a positive integer
+        if isinstance(token_budget, int) and token_budget > 0:
+            headers_dict["x_token_budget"] = token_budget
+        else:
+            raise ValueError("token_budget must be a positive integer")
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
+
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = ReaderHeaders()
+        for field_name, field_value in headers_dict.items():
+            # Boolean fields
+            if field_name in ["x_with_links_summary", "x_with_images_summary", "x_with_generated_alt", "x_no_cache"]:
+                if isinstance(field_value, bool):
+                    setattr(headers_model, field_name, field_value)
+                else:
+                    logger.warning(f"Expected boolean for {field_name}, got {type(field_value).__name__}. Converting to bool.")
+                    setattr(headers_model, field_name, bool(field_value))
+            # String enum field
+            elif field_name == "x_return_format":
+                if isinstance(field_value, str):
+                    if field_value in ["markdown", "html", "text"]:
+                        headers_model.x_return_format = field_value  # type: ignore
+                    else:
+                        raise ValueError(f"Invalid return_format value: {field_value}. Must be one of: 'markdown', 'html', 'text'")
+                else:
+                    raise ValueError(f"Expected string for {field_name}, got {type(field_value).__name__}")
+            # Integer field
+            elif field_name == "x_token_budget":
+                if isinstance(field_value, int):
+                    if field_value > 0:
+                        headers_model.x_token_budget = field_value
+                    else:
+                        raise ValueError(f"Token budget must be positive, got {field_value}")
+                else:
+                    try:
+                        int_value = int(field_value)
+                        if int_value > 0:
+                            logger.warning(f"Converting {field_name} from {type(field_value).__name__} to int: {int_value}")
+                            headers_model.x_token_budget = int_value
+                        else:
+                            raise ValueError(f"Token budget must be positive, got {int_value}")
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Cannot convert {field_name} value to a valid integer: {field_value}")
 
     try:
-        return await _perform_search(configuration, params, cache_key)
+        # Validate URL before creating the request
+        if not is_valid_url(url):
+            raise ValueError(f"Invalid URL: {url}")
+            
+        # Convert string URL to HttpUrl
+        http_url = HttpUrl(url)
+        
+        request = ReaderRequest(
+            url=http_url,
+            options=options,
+            headers=headers_model
+        )
     except Exception as e:
-        error_highlight(f"Error in Jina search: {str(e)}")
-        return []
+        raise ToolException(f"Invalid reader request: {e}") from e
 
-# Export available tools
-TOOLS = [search]
+    # Simplified cache key construction
+    cache_key = f"jina_reader_{url}_{options}"
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+
+    # Cache check with early return
+    if should_use_cache:
+        try:
+            if cached := load_checkpoint(cache_key):
+                info_highlight(f"Using cached reader result for {url}", "JinaTool")
+                return cached if isinstance(cached, dict) else {"cached_result": cached}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {e}", "JinaTool")
+
+    # API request preparation
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Header processing with line breaks
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(
+            exclude_none=True, 
+            by_alias=True
+        ).items():
+            if field_value is not None:
+                request_headers[field_name] = str(field_value).lower()
+
+    # API call with simplified options
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://r.jina.ai/",
+        headers=request_headers,
+        json_data={"url": str(request.url), "options": request.options},
+        retry_config=retry_config,
+    )
+
+    if "error" in response:
+        error_highlight(f"Reader API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Reader API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache write with guard clause
+    if should_use_cache:
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight(f"Cached reader result for {url}", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {e}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 4. Search API
+# -------------------------------------------------------------------------
+
+class SearchHeaders(BaseModel):
+    """Optional headers for the Search API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_site: str | None = Field(default=None, alias="X-Site")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+    x_with_links_summary: bool | None = Field(default=None, alias="X-With-Links-Summary")
+    x_with_images_summary: bool | None = Field(default=None, alias="X-With-Images-Summary")
+
+
+class SearchRequest(BaseModel):
+    """Request model for Jina's Search API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    q: str = Field(
+        ..., 
+        min_length=1,
+        description="Search query text"
+    )
+    options: Literal["Default", "Markdown", "HTML", "Text"] | None = Field(
+        default=None,
+        description="Format options for response content"
+    )
+    headers: SearchHeaders | None = None
+
+    @field_validator("q")
+    def no_placeholder_query(cls, v: str) -> str:
+        """Validate that the search query is not empty."""
+        if not v.strip():
+            raise ValueError("Search query cannot be empty")
+        return v
+
+
+@tool
+async def search(
+    query: str,
+    options: Literal["Default", "Markdown", "HTML", "Text"] = "Default",
+    site: str | None = None,
+    with_links_summary: bool | None = None,
+    with_images_summary: bool | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Search the web using Jina AI.
+    
+    Args:
+        query: The search query
+        options: Format options ("Default", "Markdown", "HTML", "Text")
+        site: Limit search to a specific site (e.g. "example.com")
+        with_links_summary: Include summary of links in results
+        with_images_summary: Include summary of images in results
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing search results
+    """
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str]] = {}
+    
+    if site is not None:
+        headers_dict["x_site"] = site
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
+    if with_links_summary is not None:
+        # Ensure with_links_summary is a boolean
+        if isinstance(with_links_summary, bool):
+            headers_dict["x_with_links_summary"] = with_links_summary
+        else:
+            raise ValueError("with_links_summary must be a boolean")
+    if with_images_summary is not None:
+        # Ensure with_images_summary is a boolean
+        if isinstance(with_images_summary, bool):
+            headers_dict["x_with_images_summary"] = with_images_summary
+        else:
+            raise ValueError("with_images_summary must be a boolean")
+
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = SearchHeaders()
+        for field_name, field_value in headers_dict.items():
+            if field_name == "x_site" and isinstance(field_value, str):
+                headers_model.x_site = field_value
+            elif field_name == "x_no_cache" and isinstance(field_value, bool):
+                headers_model.x_no_cache = field_value
+            elif field_name == "x_with_links_summary" and isinstance(field_value, bool):
+                headers_model.x_with_links_summary = field_value
+            elif field_name == "x_with_images_summary" and isinstance(field_value, bool):
+                headers_model.x_with_images_summary = field_value
+
+    try:
+        # Validate and create the request
+        if not query.strip():
+            raise ValueError("Search query cannot be empty")
+            
+        request = SearchRequest(
+            q=query,
+            options=options,
+            headers=headers_model
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid search request: {str(e)}") from e
+
+    # Create cache key for store - don't cache if no_cache is True
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+    cache_key = f"jina_search_{query}_{options}_{site}"
+
+    # Check cache if store is available and caching is enabled
+    if should_use_cache:
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight(f"Using cached search result for '{query}'", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Add custom headers if provided
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
+            if field_value is not None:
+                request_headers[field_name] = str(field_value).lower()
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://s.jina.ai/",
+        headers=request_headers,
+        json_data={"q": request.q, "options": request.options or "Default"},
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Search API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Search API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled (and no_cache wasn't set)
+    if should_use_cache:
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight(f"Cached search result for '{query}'", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 5. Grounding API
+# -------------------------------------------------------------------------
+
+class GroundingHeaders(BaseModel):
+    """Optional headers for the Grounding API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    x_site: str | None = Field(default=None, alias="X-Site")
+    x_no_cache: bool | None = Field(default=None, alias="X-No-Cache")
+
+
+class GroundingRequest(BaseModel):
+    """Request model for Jina's Grounding API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    statement: str = Field(
+        ..., 
+        min_length=1,
+        description="The statement to verify for factual accuracy"
+    )
+    headers: GroundingHeaders | None = None
+
+    @field_validator("statement")
+    def statement_not_empty(cls, v: str) -> str:
+        """Validate that the statement is not empty."""
+        if not v.strip():
+            raise ValueError("Statement cannot be empty")
+        return v
+
+
+@tool
+async def grounding(
+    statement: str,
+    site: str | None = None,
+    no_cache: bool | None = None,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Verify the factual accuracy of a statement using Jina AI.
+    
+    Args:
+        statement: The statement to verify
+        site: Limit search to a specific site (e.g. "example.com")
+        no_cache: Bypass API caching
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing verification results with evidence
+    """
+    # Create headers dict - use separate dictionaries for different types
+    headers_dict: Dict[str, Union[bool, str]] = {}
+    
+    if site is not None:
+        headers_dict["x_site"] = site
+    if no_cache is not None:
+        headers_dict["x_no_cache"] = no_cache
+
+    # Create headers model
+    headers_model = None
+    if headers_dict:
+        headers_model = GroundingHeaders()
+        for field_name, field_value in headers_dict.items():
+            if field_name == "x_site" and isinstance(field_value, str):
+                headers_model.x_site = field_value
+            elif field_name == "x_no_cache" and isinstance(field_value, bool):
+                headers_model.x_no_cache = field_value
+
+    try:
+        request = GroundingRequest(
+            statement=statement,
+            headers=headers_model
+        )
+    except Exception as e:
+        error_msg = f"Invalid grounding request: {str(e)}"
+        error_highlight(error_msg, "JinaTool")
+        raise ToolException(error_msg) from None  # Disable exception chaining
+
+    # Create cache key for store - don't cache if no_cache is True
+    should_use_cache = not no_cache and state and state.get("cache_results", True)
+    cache_key = f"jina_grounding_{statement}_{site}"
+
+    # Check cache if store is available and caching is enabled
+    if should_use_cache:
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight("Using cached grounding result for statement", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Add custom headers if provided
+    if request.headers:
+        for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
+            if field_value is not None:
+                # Convert bool to string
+                if isinstance(field_value, bool):
+                    field_value = "true" if field_value else "false"
+                request_headers[field_name] = str(field_value)
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://g.jina.ai/",
+        headers=request_headers,
+        json_data={"statement": request.statement},
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Grounding API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Grounding API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled (and no_cache wasn't set)
+    if should_use_cache:
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight("Cached grounding result for statement", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 6. Segmenter API
+# -------------------------------------------------------------------------
+
+class SegmenterRequest(BaseModel):
+    """Request model for Jina's Segmenter API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content: str = Field(
+        ..., 
+        min_length=1,
+        description="The text content to segment"
+    )
+    tokenizer: Literal["cl100k_base", "p50k_base", "r50k_base"] = Field(
+        default="cl100k_base",
+        description="Tokenizer to use"
+    )
+    return_tokens: bool = Field(
+        default=False,
+        description="Include tokens and IDs in response"
+    )
+    return_chunks: bool = Field(
+        default=False,
+        description="Segment text into semantic chunks"
+    )
+    max_chunk_length: PositiveInt = Field(
+        default=1000,
+        description="Maximum characters per chunk if return_chunks=True"
+    )
+    head: PositiveInt | None = Field(
+        default=None,
+        description="Return first N tokens (exclusive with tail)"
+    )
+    tail: PositiveInt | None = Field(
+        default=None,
+        description="Return last N tokens (exclusive with head)"
+    )
+
+    @field_validator("content")
+    def content_not_empty(cls, v: str) -> str:
+        """Validate that the content is not empty."""
+        if not v.strip():
+            raise ValueError("Content cannot be empty")
+        return v
+
+    @model_validator(mode="after")
+    def validate_head_tail(self) -> "SegmenterRequest":
+        """Ensure head and tail are not both specified."""
+        if self.head is not None and self.tail is not None:
+            raise ValueError("Only one of head or tail can be specified")
+        return self
+
+
+@tool
+async def segmenter(
+    content: str,
+    tokenizer: Literal["cl100k_base", "p50k_base", "r50k_base"] = "cl100k_base",
+    return_tokens: bool = False,
+    return_chunks: bool = False,
+    max_chunk_length: int = 1000,
+    head: int | None = None,
+    tail: int | None = None,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Segment and tokenize text using Jina AI.
+    
+    Args:
+        content: The text content to segment
+        tokenizer: Tokenizer to use ("cl100k_base", "p50k_base", "r50k_base")
+        return_tokens: Include tokens and IDs in the response
+        return_chunks: Segment the text into semantic chunks
+        max_chunk_length: Maximum characters per chunk if return_chunks=True
+        head: Return first N tokens (exclusive with tail)
+        tail: Return last N tokens (exclusive with head)
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing tokenization results
+    """
+    # Create request object
+    try:
+        request = SegmenterRequest(
+            content=content,
+            tokenizer=tokenizer,
+            return_tokens=return_tokens,
+            return_chunks=return_chunks,
+            max_chunk_length=max_chunk_length,
+            head=head,
+            tail=tail
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid segmenter request: {str(e)}") from e
+
+    # Create cache key for store
+    content_hash = str(hash(content))
+    cache_key = f"jina_segmenter_{tokenizer}_{content_hash}_{return_tokens}_{return_chunks}_{max_chunk_length}_{head}_{tail}"
+
+    # Check cache if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight("Using cached segmenter result", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://segment.jina.ai/",
+        headers=request_headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Segmenter API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Segmenter API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight("Cached segmenter result", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# 7. Classifier API
+# -------------------------------------------------------------------------
+
+class ClassifierRequest(BaseModel):
+    """Request model for Jina's Classifier API."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str | None = Field(
+        default=None,
+        description="Model identifier, e.g. 'jina-embeddings-v3' for text"
+    )
+    classifier_id: str | None = Field(
+        default=None,
+        description="Identifier of an existing classifier"
+    )
+    input: List[Union[str, Dict[str, str]]] = Field(
+        ..., 
+        min_length=1,
+        description="Inputs for classification"
+    )
+    labels: List[str] = Field(
+        ..., 
+        min_length=1,
+        description="Classification labels"
+    )
+
+    @field_validator("input")
+    def validate_input_not_empty(cls, v: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
+        """Validate that the input list is not empty."""
+        if not v:
+            raise ValueError("Classifier input cannot be empty")
+        return v
+
+    @field_validator("labels")
+    def validate_labels_not_empty(cls, v: List[str]) -> List[str]:
+        """Validate that the labels list has no empty strings."""
+        if not v:
+            raise ValueError("Classifier labels cannot be empty")
+        for label in v:
+            if not label.strip():
+                raise ValueError("Classifier labels cannot contain empty strings")
+        return v
+
+
+@tool
+async def classifier(
+    inputs: List[Union[str, Dict[str, str]]],
+    labels: List[str],
+    model: str | None = None,
+    classifier_id: str | None = None,
+    state: Annotated[JinaToolState | None, InjectedState] = None,
+    store: Annotated[BaseStore | None, InjectedStore] = None,
+    config: Annotated[RunnableConfig | None, InjectedToolArg] = None
+) -> Dict[str, Any]:
+    """Perform zero-shot classification with Jina AI.
+    
+    Args:
+        inputs: Inputs for classification (text strings or image dicts)
+        labels: List of classification labels
+        model: Model identifier (optional)
+        classifier_id: Existing classifier ID (optional)
+        state: Injected graph state with API key or retry config
+        
+    Returns:
+        Dictionary containing classification results
+    """
+    # Create request object
+    try:
+        request = ClassifierRequest(
+            input=inputs,
+            labels=labels,
+            model=model,
+            classifier_id=classifier_id
+        )
+    except Exception as e:
+        raise ToolException(f"Invalid classifier request: {str(e)}") from e
+
+    # Create cache key for store
+    inputs_hash = str(hash(str(inputs)))
+    labels_hash = str(hash(str(labels)))
+    cache_key = f"jina_classifier_{model}_{classifier_id}_{inputs_hash}_{labels_hash}"
+
+    # Check cache if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
+                info_highlight("Using cached classifier result", "JinaTool")
+                return cached_data if isinstance(cached_data, dict) else {"cached_result": cached_data}
+        except Exception as e:
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
+
+    # Get API key and retry configuration
+    api_key = _get_jina_api_key(state if state is not None else None, config)
+    retry_config = state.get("retry_config") if state else None
+
+    # Set up headers
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Make the API request
+    response = await _make_request_with_retry(
+        method="POST",
+        url="https://api.jina.ai/v1/classify",
+        headers=request_headers,
+        json_data=request.model_dump(exclude_none=True),
+        retry_config=retry_config,
+    )
+
+    # Check for errors
+    if "error" in response:
+        error_highlight(f"Classifier API error: {response['error']}", "JinaTool")
+        raise ToolException(f"Jina Classifier API error: {response['error'].get('message', 'Unknown error')}")
+
+    # Cache result if store is available and caching is enabled
+    if state and state.get("cache_results", True):
+        try:
+            create_checkpoint(cache_key, response)
+            info_highlight("Cached classifier result", "JinaTool")
+        except Exception as e:
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
+
+    return response
+
+
+# -------------------------------------------------------------------------
+# LangGraph Integration
+# -------------------------------------------------------------------------
+
+def create_jina_toolnode(
+    include_tools: List[str] | None = None,
+    retry_config: RetryConfig | None = None,
+    cache_results: bool = True
+) -> ToolNode:
+    """Create a LangGraph ToolNode with Jina AI tools.
+    
+    This function creates a ToolNode containing the specified Jina AI tools
+    for use in a LangGraph workflow.
+    
+    Args:
+        include_tools: Optional list of tool names to include. If None, all tools are included.
+                      Available tools: ["embeddings", "rerank", "reader", 
+                                       "search", "grounding", "segmenter", 
+                                       "classifier"]
+        retry_config: Optional retry configuration for HTTP requests
+        cache_results: Whether to cache tool results in the store (default: True)
+    
+    Returns:
+        A configured ToolNode instance with the specified Jina AI tools
+        
+    Example:
+        ```python
+        from langgraph.graph import StateGraph
+        from react_agent.tools.jina import create_jina_toolnode
+        
+        # Create a graph with all Jina tools
+        workflow = StateGraph(MessagesState)
+        workflow.add_node("jina_tools", create_jina_toolnode())
+        
+        # Or with specific tools
+        search_tools = create_jina_toolnode(include_tools=["search", "grounding"])
+        workflow.add_node("search_tools", search_tools)
+        ```
+    """
+    all_tools = [
+        embeddings,
+        rerank,
+        reader,
+        search,
+        grounding,
+        segmenter,
+        classifier
+    ]
+    
+    if include_tools:
+        # Map of tool names to tool functions
+        tool_map = {
+            "embeddings": embeddings,
+            "rerank": rerank,
+            "reader": reader,
+            "search": search,
+            "grounding": grounding,
+            "segmenter": segmenter,
+            "classifier": classifier
+        }
+        
+        # Get only the requested tools
+        selected_tools = []
+        for tool_name in include_tools:
+            if tool_name in tool_map:
+                selected_tools.append(tool_map[tool_name])
+            else:
+                warning_highlight(f"Tool {tool_name} not found in available Jina tools", "JinaTool")
+        
+        if not selected_tools:
+            warning_highlight("No valid tools specified, including all tools", "JinaTool")
+            selected_tools = all_tools
+            
+        tools = selected_tools
+    else:
+        tools = all_tools
+    
+    # Create and return the ToolNode
+    return ToolNode(tools)
 </file>
 
 <file path="src/react_agent/utils/__init__.py">
-from react_agent.utils.validations import is_valid_url
+"""Utility functions and modules for the react_agent package.
+
+This package provides various utility functions for logging, validation,
+content processing, and NLTK data management.
+"""
+
+from react_agent.utils.content import ensure_nltk_data
 from react_agent.utils.logging import (
-    get_logger,
-    log_dict,
-    info_highlight,
-    warning_highlight,
     error_highlight,
-    log_step
+    get_logger,
+    info_highlight,
+    log_dict,
+    log_step,
+    warning_highlight,
 )
+from react_agent.utils.validations import is_valid_url
 
 __all__ = [
-    "is_valid_url",
-    "get_logger",
-    "log_dict",
-    "info_highlight",
-    "warning_highlight",
+    "ensure_nltk_data",
     "error_highlight",
-    "log_step"
+    "get_logger",
+    "info_highlight",
+    "is_valid_url",
+    "log_dict",
+    "log_step",
+    "warning_highlight",
 ]
 </file>
 
@@ -4138,9 +4997,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, TypedDict
 from urllib.parse import unquote, urlparse
 
-import nltk.data
-import requests
-from docling.document_converter import DocumentConverter
+import nltk
+import nltk.data  # type: ignore[import]
+import requests  # type: ignore[import]
+
+# Check if Docling is available
+DOCLING_AVAILABLE = True
+try:
+    from docling.document_converter import DocumentConverter  # type: ignore[import]
+except ImportError:
+    DOCLING_AVAILABLE = False
 
 from react_agent.utils.cache import ProcessorCache
 from react_agent.utils.defaults import (
@@ -4173,6 +5039,44 @@ logger = get_logger(__name__)
 
 # Initialize cache
 content_cache = ProcessorCache(thread_id="content")
+
+
+def ensure_nltk_data():
+    """Ensure that required NLTK data is downloaded and accessible.
+    
+    This function checks for the existence of required NLTK data packages
+    and downloads them if they're not found. It also explicitly adds the
+    NLTK data directory to the search path.
+    """
+    # Define the required NLTK packages
+    required_packages = ['punkt']
+    
+    # Get the user's home directory
+    home_dir = str(Path.home())
+    nltk_data_dir = os.path.join(home_dir, 'nltk_data')
+    
+    # Ensure the NLTK data directory exists
+    os.makedirs(nltk_data_dir, exist_ok=True)
+    
+    # Add the NLTK data directory to the search path if it's not already there
+    if nltk_data_dir not in nltk.data.path:
+        nltk.data.path.append(nltk_data_dir)
+    
+    # Download required packages if they don't exist
+    for package in required_packages:
+        try:
+            nltk.data.find(f'tokenizers/{package}')
+            logger.info(f"NLTK package '{package}' is already installed")
+        except LookupError:
+            logger.info(f"Downloading NLTK package '{package}'")
+            nltk.download(package, download_dir=nltk_data_dir)
+    
+    # Log the NLTK data path for debugging
+    logger.info(f"NLTK data path: {nltk.data.path}")
+
+
+# Ensure NLTK data is available
+ensure_nltk_data()
 
 
 class ContentState(TypedDict):
@@ -4209,7 +5113,7 @@ class DocumentProcessingResult(TypedDict):
     metadata: Dict[str, Any]
 
 
-# Load the Punkt sentence tokenizer (moved outside the function)
+# Load the Punkt sentence tokenizer
 try:
     tokenizer = nltk.data.load("tokenizers/punkt/english.pickle")
 except LookupError:
@@ -4289,7 +5193,7 @@ def chunk_text(
             overlap: int,
             min_chunk_size: int,
             chunks: List[str],
-            tokenizer: nltk.data.load | None,
+            tokenizer: Any,
             expected_chunks: int,
         ) -> Tuple[int, List[str]]:
         text_length = len(text)
@@ -4464,8 +5368,7 @@ def detect_document_type(url: str) -> str | None:
     if not url:
         return None
 
-    url_lower = url.lower()
-    file_ext = Path(urlparse(url_lower).path).suffix.lower()
+    file_ext = Path(urlparse(url).path).suffix.lower()
 
     return DOCUMENT_TYPE_MAPPING.get(file_ext)
 
@@ -4524,20 +5427,21 @@ def create_temp_document_file(content: bytes, file_extension: str) -> Tuple[str,
         return temp_file.name, os.path.basename(temp_file.name)
 
 
-def extract_document_text(file_path: str, document_type: str, timeout: int = 60) -> str:
-    """Extract text from a document file using Docling with a timeout.
+def extract_document_text(file_path: str, document_type: str) -> str:
+    """Extract text from a document file using Docling.
 
     Args:
         file_path: Path to the document file
         document_type: Type of document (pdf, doc, etc.)
-        timeout: Timeout in seconds for document conversion
 
     Returns:
         Extracted text content
     """
     try:
         converter = DocumentConverter()
-        return converter.convert(file_path, timeout=timeout)
+        result = converter.convert(file_path)
+        # Handle the ConversionResult type by extracting the text content
+        return str(result)
     except Exception as e:
         error_highlight(
             f"Error extracting text from {document_type} document: {str(e)}",
@@ -4763,12 +5667,15 @@ def detect_content_type(url: str, content: str) -> str:
 
     for strategy_data in CONTENT_DETECTION_STRATEGIES:
         strategy = strategy_data["strategy"]
-        strategy_data["weight"]
         content_based = strategy_data["content_based"]
 
-        if result := strategy(content if content_based else url):
-            info_highlight(f"Detected content type: {result}", category="content_type")
-            return result
+        try:
+            if callable(strategy) and (result := strategy(content if content_based else url)):
+                info_highlight(f"Detected content type: {result}", category="content_type")
+                return result
+        except TypeError:
+            # Skip if strategy is not callable
+            continue
 
     return fallback_detection(url, content)
 
@@ -5348,11 +6255,726 @@ __all__ = [
 ]
 </file>
 
+<file path="src/react_agent/utils/enhanced_search.py">
+"""Enhanced search functionality for research.
+
+This module provides enhanced search functionality for the research process,
+including progressive processing, category prioritization, and search result
+standardization.
+"""
+
+import asyncio
+import json
+import time
+import threading
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from react_agent.types import EnhancedSearchResult, SearchResult
+from react_agent.utils.cache import create_checkpoint, load_checkpoint
+from react_agent.utils.content import (
+    detect_content_type,
+    should_skip_content,
+    validate_content,
+)
+from react_agent.utils.extraction import extract_category_information
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
+from react_agent.utils.search import (
+    CategorySuccessTracker,
+    enhance_search_results,
+    get_optimized_query,
+    log_search_event,
+    standardize_search_result,
+)
+
+# Initialize logger
+logger = get_logger(__name__)
+
+# Track active search requests
+active_requests = 0
+active_requests_lock = threading.Lock()
+
+# Semaphore to limit concurrent API requests to prevent rate limiting errors
+# Default is 3 concurrent requests, but can be configured via max_concurrent_searches
+API_REQUEST_SEMAPHORE = asyncio.Semaphore(3)
+
+
+async def execute_progressive_search(
+    state: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Execute search with progressive processing for better efficiency.
+
+    This function implements a more efficient search process by:
+    1. Prioritizing categories based on historical success rates
+    2. Processing search results as they arrive rather than waiting for all searches
+    3. Using a queue-based approach for better resource utilization
+
+    Args:
+        state: The current research state
+        config: Optional configuration
+
+    Returns:
+        Updated state dictionary
+    """
+    info_highlight("Executing progressive search")
+
+    categories = state["categories"]
+
+    # Get or initialize category success tracker
+    success_tracker = getattr(
+        state, "category_success_tracker", CategorySuccessTracker()
+    )
+
+    # Create a queue for search results
+    results_queue = asyncio.Queue()
+
+    # Track completed categories
+    completed_categories = set()
+
+    # Check cache for each category
+    for category, category_state in categories.items():
+        if category_state["complete"]:
+            info_highlight(f"Category {category} already complete, skipping")
+            completed_categories.add(category)
+            continue
+
+        # Check checkpoint
+        cache_key = f"category_{state['original_query']}_{category}"
+        if cached_state := load_checkpoint(cache_key):
+            info_highlight(f"Using cached results for category: {category}")
+            category_state["search_results"] = cached_state.get("search_results", [])
+            category_state["extracted_facts"] = cached_state.get("extracted_facts", [])
+            category_state["sources"] = cached_state.get("sources", [])
+            category_state["complete"] = True
+            completed_categories.add(category)
+            continue
+
+    # Prioritize remaining categories
+    prioritized_categories = []
+    for category, category_state in categories.items():
+        if category not in completed_categories:
+            # Skip categories with very low success rates
+            if success_tracker.should_skip_category(category, threshold=0.15):
+                warning_highlight(
+                    f"Skipping category {category} due to low success rate"
+                )
+                category_state["status"] = "skipped_low_success"
+                category_state["complete"] = True
+                continue
+
+            priority = success_tracker.get_category_priority(category)
+            prioritized_categories.append((category, priority))
+
+    # Sort by priority (higher priority first)
+    prioritized_categories.sort(key=lambda x: x[1], reverse=True)
+
+    if prioritized_categories:
+        priority_info = ", ".join([
+            f"{cat}({pri})" for cat, pri in prioritized_categories
+        ])
+        info_highlight(f"Prioritized categories: {priority_info}")
+
+    # Get max concurrent requests from config or use default
+    max_concurrent = 3
+    if config and "max_concurrent_searches" in config:
+        max_concurrent = config["max_concurrent_searches"]
+
+    # Update semaphore with configured value
+    global API_REQUEST_SEMAPHORE
+    API_REQUEST_SEMAPHORE = asyncio.Semaphore(max_concurrent)
+    info_highlight(
+        f"Starting search for {len(prioritized_categories)} categories with max {max_concurrent} concurrent requests"
+    )
+
+    # Start search tasks for each category in priority order
+    search_tasks = []
+    for category, _ in prioritized_categories:
+        task = asyncio.create_task(
+            _search_and_process(state, category, results_queue, config)
+        )
+        search_tasks.append(task)
+
+    # Start a task to process results from the queue
+    processor_task = asyncio.create_task(
+        _process_results_queue(state, results_queue, config)
+    )
+
+    # Wait for all search tasks to complete
+    if search_tasks:
+        await asyncio.gather(*search_tasks)
+
+    # Signal the processor task to finish
+    await results_queue.put(None)
+    await processor_task
+
+    # Check if all categories are complete
+    all_complete = all(
+        category_state["complete"] for category_state in categories.values()
+    )
+
+    if all_complete:
+        info_highlight("All categories research complete")
+        return {"status": "researched", "categories": categories}
+    else:
+        # Some categories still incomplete
+        incomplete = [
+            category
+            for category, category_state in categories.items()
+            if not category_state["complete"]
+        ]
+        info_highlight(f"Categories still incomplete: {', '.join(incomplete)}")
+        return {"status": "research_incomplete", "categories": categories}
+
+
+async def _search_and_process(
+    state: Dict[str, Any],
+    category: str,
+    results_queue: asyncio.Queue,
+    config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Search for a category and process results as they arrive.
+
+    This helper function executes the search for a specific category and
+    immediately processes the results, allowing for better parallelization
+    and resource utilization.
+
+    Args:
+        state: The current research state
+        category: The category to search for
+        results_queue: Queue for processing results
+        config: Optional configuration
+    """
+    try:
+        # Track active requests
+        global active_requests
+        info_highlight(f"Starting search for category {category}")
+
+        # Get category state
+        category_state = state["categories"][category]
+
+        # Update status
+        category_state["status"] = "searching"
+        category_state["retry_count"] += 1
+
+        # Get category-specific search parameters
+        from react_agent.prompts.research import SEARCH_QUALITY_THRESHOLDS
+
+        thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
+
+        # Extract primary terms from query - use fewer terms for more focused queries
+        query = category_state["query"]
+
+        # Check for domain-specific terms that should be included
+        domain_terms = []
+        if (
+            "education" in query.lower()
+            or "university" in query.lower()
+            or "college" in query.lower()
+        ):
+            domain_terms.append("higher education")
+
+        if (
+            "southwest" in query.lower()
+            or "arizona" in query.lower()
+            or "new mexico" in query.lower()
+            or "texas" in query.lower()
+        ):
+            domain_terms.append("southwest US")
+
+        # Extract core terms (first 3-4 words) for more focused queries
+        primary_terms = " ".join(query.split()[:4])
+
+        # Add domain-specific terms if they're not already in the primary terms
+        for term in domain_terms:
+            if term.lower() not in primary_terms.lower():
+                primary_terms = f"{primary_terms} {term}"
+
+        # Get success tracker
+        success_tracker = getattr(
+            state, "category_success_tracker", CategorySuccessTracker()
+        )
+
+        # Determine fallback level based on retry count
+        fallback_level = min(2, category_state["retry_count"] - 1)
+        if fallback_level < 0:
+            fallback_level = 0
+
+        # Always use optimized query for better results
+        # Use enhanced query optimization
+        optimized_query = get_optimized_query(category, primary_terms, fallback_level)
+        info_highlight(
+            f"Using optimized query for {category} (fallback level {fallback_level}): {optimized_query}"
+        )
+        query = optimized_query
+
+        # Create a cache key for this search
+        import hashlib
+
+        cache_key = f"search_{category}_{hashlib.md5(query.encode()).hexdigest()}"
+
+        # Check if we have cached results
+        cached_results = load_checkpoint(cache_key)
+        if cached_results:
+            info_highlight(f"Using cached search results for {category}")
+            search_results = cached_results
+        else:
+            # Record start time for performance tracking
+            start_time = time.time()
+
+            # Execute the search
+            from react_agent.tools.jina import search
+
+            # Track active requests and use semaphore for rate limiting
+            global API_REQUEST_SEMAPHORE
+
+            # Update active requests counter
+            with active_requests_lock:
+                active_requests += 1
+                current_active = active_requests
+                info_highlight(
+                    f"Category {category} waiting for API slot (Active requests: {current_active})"
+                )
+
+            # Use semaphore to limit concurrent API requests
+            async with API_REQUEST_SEMAPHORE:
+                info_highlight(f"Executing search for {category}")
+
+                try:
+                    # Use the search function directly as it's already async
+                    search_results = await search(query)
+                    info_highlight(
+                        f"Search completed for {category} with {len(search_results) if isinstance(search_results, list) else 'non-list'} results"
+                    )
+
+                    # Log the actual response structure for debugging
+                    logger.debug(f"Raw search response type: {type(search_results)}")
+                    if isinstance(search_results, dict):
+                        logger.debug(
+                            f"Raw search response keys: {list(search_results.keys())}"
+                        )
+
+                    # Cache successful results
+                    if search_results and (
+                        isinstance(search_results, list)
+                        and len(search_results) > 0
+                        or isinstance(search_results, dict)
+                        and search_results.get("results")
+                    ):
+                        create_checkpoint(cache_key, search_results)
+
+                except Exception as e:
+                    import traceback
+
+                    error_highlight(
+                        f"Search failed for {category}: {str(e)}\nException type: {type(e)}\nTraceback: {traceback.format_exc()}"
+                    )
+
+                    # Try alternative approach with different query formulation
+                    try:
+                        fallback_query = (
+                            f"{state['original_query']} {category.replace('_', ' ')}"
+                        )
+                        search_results = await search(fallback_query)
+                        info_highlight(
+                            f"Fallback search completed for {category} with {len(search_results) if isinstance(search_results, list) else 'non-list'} results"
+                        )
+                    except Exception as e2:
+                        error_highlight(
+                            f"Fallback search also failed for {category}: {str(e2)}"
+                        )
+                        category_state["status"] = "search_failed"
+                        success_tracker.track_attempt(category, False)
+                        return
+
+        # Handle empty results with more flexible validation
+        if not search_results or (
+            isinstance(search_results, (list, dict))
+            and not any([
+                isinstance(search_results, list) and len(search_results) > 0,
+                isinstance(search_results, dict) and search_results.get("results", []),
+            ])
+        ):
+            warning_highlight(f"No valid results for category: {category}")
+
+            # Try one more alternative approach with a simplified query
+            try:
+                # Create a more focused query by using just the key terms
+                if " " in primary_terms:
+                    # Extract just the first two words for a more focused query
+                    simplified_terms = " ".join(primary_terms.split()[:2])
+                    # Add the category name for context
+                    simplified_query = (
+                        f"{simplified_terms} {category.replace('_', ' ')}"
+                    )
+                else:
+                    # If primary_terms is just one word, use it with the category
+                    simplified_query = f"{primary_terms} {category.replace('_', ' ')}"
+
+                info_highlight(
+                    f"Trying simplified query for {category}: {simplified_query}"
+                )
+
+                # Use the search function directly
+                search_results = await search(simplified_query)
+                info_highlight(
+                    f"Simplified search completed for {category} with {len(search_results) if isinstance(search_results, list) else 'non-list'} results"
+                )
+
+                if not search_results or (
+                    isinstance(search_results, (list, dict))
+                    and not any([
+                        isinstance(search_results, list) and len(search_results) > 0,
+                        isinstance(search_results, dict)
+                        and search_results.get("results", []),
+                    ])
+                ):
+                    category_state["status"] = "search_failed"
+                    success_tracker.track_attempt(category, False)
+                    return
+            except Exception as e:
+                error_highlight(f"Simplified search failed for {category}: {str(e)}")
+                category_state["status"] = "search_failed"
+                success_tracker.track_attempt(category, False)
+                return
+
+        # Calculate processing time
+        processing_time_ms = (time.time() - start_time) * 1000
+
+        # Standardize and enhance results
+        formatted_results = standardize_search_result(
+            search_results, category=category, query=query, start_time=start_time
+        )
+
+        enhanced_results = enhance_search_results(
+            formatted_results,
+            category=category,
+            query=query,
+            processing_time_ms=processing_time_ms,
+        )
+
+        # Update the category state
+        category_state["search_results"] = enhanced_results
+        category_state["status"] = "searched"
+
+        # Log search event
+        log_search_event(
+            category=category,
+            query=query,
+            result_count=len(enhanced_results),
+            duration_ms=processing_time_ms,
+            success=True,
+        )
+
+        # Track successful attempt
+        success_tracker.track_attempt(category, True)
+
+        # Add results to the processing queue
+        for result in enhanced_results:
+            await results_queue.put((category, result, state["original_query"]))
+
+    except Exception as e:
+        error_highlight(f"Error in _search_and_process for {category}: {str(e)}")
+
+        # Update category state
+        if category in state["categories"]:
+            state["categories"][category]["status"] = "search_failed"
+
+        # Track failed attempt
+        success_tracker = getattr(
+            state, "category_success_tracker", CategorySuccessTracker()
+        )
+        success_tracker.track_attempt(category, False)
+
+    finally:
+        # Decrement active requests counter
+        with active_requests_lock:
+            active_requests -= 1
+            info_highlight(
+                f"Completed search for category {category} (Active requests: {active_requests})"
+            )
+
+
+async def _process_results_queue(
+    state: Dict[str, Any],
+    results_queue: asyncio.Queue,
+    config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Process search results from the queue as they arrive.
+
+    Args:
+        state: The current research state
+        results_queue: Queue containing search results to process
+        config: Optional configuration
+    """
+    while True:
+        try:
+            # Get the next item from the queue
+            item = await results_queue.get()
+
+            if item is None:  # End marker
+                break
+
+            category, result, original_query = item
+
+            # Process the result
+            facts, sources, statistics = await _process_search_result(
+                result=result,
+                category=category,
+                original_query=original_query,
+                config=config,
+            )
+
+            # Update the category state
+            if category in state["categories"]:
+                category_state = state["categories"][category]
+
+                # Add facts, sources, and statistics
+                category_state["extracted_facts"].extend(facts)
+                category_state["sources"].extend(sources)
+                category_state["statistics"].extend(statistics)
+
+                # Mark as complete if we have enough facts
+                if len(category_state["extracted_facts"]) >= 3:
+                    category_state["complete"] = True
+                    category_state["status"] = "facts_extracted"
+
+                    # Cache the results
+                    try:
+                        cache_key = f"category_{original_query}_{category}"
+                        cache_data = {
+                            "search_results": category_state.get("search_results", []),
+                            "extracted_facts": category_state.get(
+                                "extracted_facts", []
+                            ),
+                            "sources": category_state.get("sources", []),
+                        }
+                        create_checkpoint(
+                            cache_key, cache_data, ttl=86400
+                        )  # Cache for 24 hours
+                        info_highlight(f"Cached results for category: {category}")
+                    except Exception as e:
+                        error_highlight(
+                            f"Error caching results for {category}: {str(e)}"
+                        )
+
+            # Mark the task as done
+            results_queue.task_done()
+
+        except Exception as e:
+            error_highlight(f"Error processing result from queue: {str(e)}")
+            try:
+                results_queue.task_done()
+            except:
+                pass
+
+
+async def _process_search_result(
+    result: Dict[str, Any],
+    category: str,
+    original_query: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Process a single search result and extract information.
+
+    Args:
+        result: The search result to process
+        category: The research category
+        original_query: The original search query
+        config: Optional configuration
+
+    Returns:
+        Tuple of (facts, sources, statistics)
+    """
+    url = result.get("url", "")
+    if not url or should_skip_content(url):
+        return [], [], []
+
+    # Check checkpoint first
+    cache_key = f"search_result_{url}_{category}"
+    if cached_state := load_checkpoint(cache_key):
+        info_highlight(f"Using cached result for {url} in {category}")
+        return (
+            cached_state.get("facts", []),
+            cached_state.get("sources", []),
+            cached_state.get("statistics", []),
+        )
+
+    content = result.get("snippet", "")
+    if not validate_content(content):
+        return [], [], []
+
+    content_type = detect_content_type(url, content)
+
+    # Handle document file types with Docling if available
+    from react_agent.utils.content import (
+        DOCLING_AVAILABLE,
+        process_document_with_docling,
+    )
+
+    if DOCLING_AVAILABLE and content_type in (
+        "pdf",
+        "doc",
+        "excel",
+        "presentation",
+        "document",
+    ):
+        try:
+            info_highlight(
+                f"Processing document with Docling: {url}", category="extraction"
+            )
+            extracted_text, detected_type = process_document_with_docling(url)
+            if validate_content(extracted_text):
+                content = extracted_text
+                content_type = detected_type
+                info_highlight(
+                    f"Successfully extracted text from document: {url}",
+                    category="extraction",
+                )
+            else:
+                warning_highlight(
+                    f"Extracted text from document didn't meet validation criteria: {url}",
+                    category="extraction",
+                )
+        except Exception as e:
+            warning_highlight(
+                f"Error processing document with Docling: {str(e)}",
+                category="extraction",
+            )
+
+    # Get extraction prompt
+    from react_agent.prompts.research import get_extraction_prompt
+
+    prompt_template = get_extraction_prompt(
+        category=category, query=original_query, url=url, content=content
+    )
+
+    try:
+        # Extract category information
+        from react_agent.utils.llm import call_model_json, get_extraction_model
+
+        extraction_model = get_extraction_model()
+
+        # Try using the extraction tool first
+        try:
+            from react_agent.tools.derivation import ExtractionTool
+
+            extraction_tool = ExtractionTool()
+
+            extraction_result = await extraction_tool.ainvoke(
+                {
+                    "operation": "category",
+                    "text": content,
+                    "url": url,
+                    "source_title": result.get("title", ""),
+                    "category": category,
+                    "original_query": original_query,
+                    "extraction_model": extraction_model,
+                },
+                config,
+            )
+
+            facts = extraction_result.get("facts", [])
+            relevance_score = extraction_result.get("relevance", 0.5)
+        except Exception as e:
+            # Fall back to the original method
+            from react_agent.utils.extraction import extract_category_information
+
+            facts, relevance_score = await extract_category_information(
+                content=content,
+                url=url,
+                title=result.get("title", ""),
+                category=category,
+                original_query=original_query,
+                prompt_template=prompt_template,
+                extraction_model=call_model_json,
+                config=config,
+            )
+
+        # Extract statistics
+        statistics = []
+        try:
+            # Try to use the statistics analysis tool
+            from react_agent.tools.derivation import StatisticsAnalysisTool
+
+            statistics_tool = StatisticsAnalysisTool()
+
+            # Create a synthesis object with the content
+            synthesis_data = {
+                "synthesis": {
+                    "main": {
+                        "content": content,
+                        "citations": [{"url": url, "title": result.get("title", "")}],
+                        "statistics": []
+                    }
+                }
+            }
+
+            statistics = await statistics_tool.ainvoke(
+                {
+                    "operation": "synthesis",
+                    "synthesis": synthesis_data
+                },
+                config,
+            )
+
+            if statistics:
+                info_highlight(f"Successfully extracted {len(statistics)} statistics")
+        except Exception as stats_error:
+            warning_highlight(
+                f"Error using statistics analysis tool: {str(stats_error)}"
+            )
+
+        # Add source information to facts
+        for fact in facts:
+            fact["source_url"] = url
+            fact["source_title"] = result.get("title", "")
+
+        source = {
+            "url": url,
+            "title": result.get("title", ""),
+            "published_date": result.get("published_date"),
+            "fact_count": len(facts),
+            "relevance_score": relevance_score,
+            "quality_score": result.get("quality_score", 0.5),
+            "content_type": content_type,
+        }
+
+        result_tuple = (facts, [source], statistics)
+
+        # Save to checkpoint with TTL
+        create_checkpoint(
+            cache_key,
+            {
+                "facts": facts,
+                "sources": [source],
+                "statistics": statistics,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            ttl=3600,  # 1 hour TTL
+        )
+
+        return result_tuple
+
+    except Exception as e:
+        warning_highlight(f"Error extracting from {url}: {str(e)}")
+        return [], [], []
+</file>
+
 <file path="src/react_agent/utils/extraction.py">
 """Enhanced extraction module for research categories with statistics focus.
 
 This module improves the extraction of facts and statistics from search results,
 with a particular emphasis on numerical data, trends, and statistical information.
+
+DEPRECATION WARNING: Direct usage of functions in this module is deprecated.
+Please use the tool-based approach by importing from react_agent.tools instead:
+
+    from react_agent.tools import StatisticsExtractionTool, CitationExtractionTool, CategoryExtractionTool
 
 Examples:
     Input text example:
@@ -5365,7 +6987,7 @@ Examples:
         ... '''
 
     Extracting citations:
-        >>> citations = extract_citations(text)
+        >>> citations = extract_citations(text)  # Deprecated: Use CitationExtractionTool instead
         >>> citations
         [
             {
@@ -5379,7 +7001,7 @@ Examples:
         ]
 
     Extracting statistics:
-        >>> stats = extract_statistics(text)
+        >>> stats = extract_statistics(text)  # Deprecated: Use StatisticsExtractionTool instead
         >>> stats
         [
             {
@@ -5407,80 +7029,15 @@ Examples:
             }
         ]
 
-    Rating statistic quality:
-        >>> quality = rate_statistic_quality("According to Gartner's 2023 survey, 78.5% of Fortune 500 companies...")
-        >>> quality
-        0.95
-
-    Inferring statistic type:
-        >>> infer_statistic_type("Market share increased to 45%")
-        'percentage'
-        >>> infer_statistic_type("$50 million in revenue")
-        'financial'
-
-    Extracting year:
-        >>> extract_year("In 2023, cloud adoption grew by 25%")
-        2023
-
-    Finding JSON objects:
-        >>> text_with_json = 'Some text {"key": "value", "nested": {"data": 123}} more text'
-        >>> json_obj = find_json_object(text_with_json)
-        >>> json_obj
-        '{"key": "value", "nested": {"data": 123}}'
-
-    Enriching extracted facts:
-        >>> fact = {
-        ...     "text": "Cloud adoption grew by 25% in 2023",
-        ...     "confidence": 0.8,
-        ...     "source_text": "According to AWS, cloud adoption grew by 25% in 2023"
-        ... }
-        >>> enriched = enrich_extracted_fact(fact, url="https://example.com/report", source_title="Cloud Market Report")
-        >>> enriched
-        {
-            "text": "Cloud adoption grew by 25% in 2023",
-            "confidence": 0.8,
-            "source_text": "According to AWS, cloud adoption grew by 25% in 2023",
-            "source_url": "https://example.com/report",
-            "source_title": "Cloud Market Report",
-            "source_domain": "example.com",
-            "extraction_timestamp": "2024-03-14T10:30:00",
-            "statistics": [...],
-            "additional_citations": [...],
-            "confidence_score": 0.9
-        }
-
-    Full category information extraction (asynchronous):
-        >>> facts, relevance = await extract_category_information(
-        ...     content=text,
-        ...     url="https://example.com/cloud-report",
-        ...     title="Cloud Computing Trends 2023",
-        ...     category="market_dynamics",
-        ...     original_query="cloud computing adoption trends",
-        ...     prompt_template="Extract facts for {query} from {url}: {content}",
-        ...     extraction_model=model
-        ... )
-        >>> facts
-        [
-            {
-                "type": "fact",
-                "data": {
-                    "text": "Enterprise cloud adoption increased to 75% in 2023",
-                    "source_url": "https://example.com/cloud-report",
-                    "source_title": "Cloud Computing Trends 2023",
-                    "source_domain": "example.com",
-                    "extraction_timestamp": "2024-03-14T10:30:00",
-                    "confidence_score": 0.9,
-                    "statistics": [...],
-                    "additional_citations": [...]
-                }
-            }
-        ]
-        >>> relevance
-        0.95
+    Tool-based approach (recommended):
+        >>> from react_agent.tools import StatisticsExtractionTool
+        >>> tool = StatisticsExtractionTool()
+        >>> stats = tool.run(text=text, url="https://example.com", source_title="Cloud Report")
 """
 
 import json
 import re
+import warnings
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Tuple, Union
 from urllib.parse import urlparse
@@ -5532,6 +7089,8 @@ COMPILED_STAT_PATTERNS: List[re.Pattern] = [
 def extract_citations(text: str) -> List[Dict[str, str]]:
     """Extract citation information from a text.
 
+    DEPRECATED: Use CitationExtractionTool instead.
+
     Searches for patterns such as "(Source: X)", "[X]", "cited from X", etc.
 
     Args:
@@ -5544,6 +7103,11 @@ def extract_citations(text: str) -> List[Dict[str, str]]:
         >>> extract_citations("According to a recent survey by TechCorp, 75%...")
         [{'source': 'TechCorp', 'context': '...survey by TechCorp, 75%...'}]
     """
+    warnings.warn(
+        "Direct use of extract_citations is deprecated. Use CitationExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     citations: List[Dict[str, str]] = []
     citation_patterns = [
         r"\(Source:?\s+([^)]+)\)",
@@ -6047,6 +7611,8 @@ def extract_statistics(
 ) -> List[Dict[str, Any]]:
     """Extract statistics and numerical data from text along with metadata.
 
+    DEPRECATED: Use StatisticsExtractionTool instead.
+
     Scans the text sentence by sentence and applies several regex patterns to detect statistical information.
     For each detected statistic, infers its type, extracts citations and a mentioned year, assesses source quality,
     rates its quality, and extracts credibility terms. The fact is then enriched with additional metadata.
@@ -6062,6 +7628,11 @@ def extract_statistics(
     Examples:
         >>> extract_statistics("According to a recent survey by TechCorp, 75% of enterprises adopted cloud computing in 2023.")
     """
+    warnings.warn(
+        "Direct use of extract_statistics is deprecated. Use StatisticsExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     statistics: List[Dict[str, Any]] = []
     sentences = re.split(r"(?<=[.!?])\s+", text)
     for sentence in sentences:
@@ -6098,6 +7669,8 @@ async def extract_category_information(
 ) -> Tuple[List[Dict[str, Any]], float]:
     """Extract information for a specific category with enhanced statistical focus.
 
+    DEPRECATED: Use CategoryExtractionTool instead.
+
     Preprocesses the content, builds a prompt using a template, processes the content with the extraction model,
     extracts and enriches facts, and returns the facts sorted by confidence along with an overall relevance score.
 
@@ -6127,6 +7700,12 @@ async def extract_category_information(
         ...     extraction_model=model
         ... )
     """
+    warnings.warn(
+        "Direct use of extract_category_information is deprecated. Use CategoryExtractionTool instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    
     if not _validate_inputs(content, url):
         return [], 0.0
 
@@ -6315,6 +7894,15 @@ def _get_category_facts(
         items = extraction_result.get(key, [])
         facts.extend([{"type": fact_type, "data": item} for item in items])
     return facts
+
+
+# Update the __all__ list to include both the original functions and the new tools
+__all__ = [
+    "extract_citations",
+    "extract_statistics",
+    "extract_category_information",
+    "enrich_extracted_fact"
+]
 </file>
 
 <file path="src/react_agent/utils/llm.py">
@@ -6390,8 +7978,8 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, TypedDict, Union, cast, Literal
+from datetime import UTC, datetime, timezone
+from typing import Any, Dict, List, Literal, Optional, Union, cast, TypedDict
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -6402,7 +7990,12 @@ from openai.types.chat import ChatCompletionMessageParam
 from react_agent.configuration import Configuration
 from react_agent.utils.content import chunk_text, estimate_tokens, merge_chunk_results
 from react_agent.utils.extraction import safe_json_parse
-from react_agent.utils.logging import error_highlight, get_logger, info_highlight, warning_highlight
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    warning_highlight,
+)
 
 logger = get_logger(__name__)
 
@@ -6421,6 +8014,7 @@ anthropic_client: AsyncAnthropic = AsyncAnthropic(
 # Define message roles using Literal for strict type checking.
 MessageRole = Literal["system", "user", "assistant", "human"]
 
+
 class Message(TypedDict):
     """A message in a conversation with an LLM.
 
@@ -6432,10 +8026,14 @@ class Message(TypedDict):
         >>> system_msg: Message = {"role": "system", "content": "You are helpful"}
         >>> user_msg: Message = {"role": "user", "content": "Hello!"}
     """
+
     role: MessageRole
     content: str
 
-def _build_config(kwargs: Dict[str, Any], default_model: Union[str, None]) -> Dict[str, Any]:
+
+def _build_config(
+    kwargs: Dict[str, Any], default_model: Union[str, None]
+) -> Dict[str, Any]:
     """Build a configuration dictionary merging defaults with provided kwargs.
 
     Args:
@@ -6446,9 +8044,9 @@ def _build_config(kwargs: Dict[str, Any], default_model: Union[str, None]) -> Di
         Dict containing merged configuration.
 
     Examples:
-        >>> _build_config({"temperature": 0.5}, "openai/gpt-4")
+        >>> _build_config({"temperature": 0.5}, "openai/gpt-4o")
         {'configurable': {'model': 'openai/gpt-4', 'temperature': 0.5}}
-        
+
         >>> _build_config({"model": "anthropic/claude-2"}, None)
         {'configurable': {'model': 'anthropic/claude-2'}}
     """
@@ -6460,7 +8058,10 @@ def _build_config(kwargs: Dict[str, Any], default_model: Union[str, None]) -> Di
     config["configurable"] = configurable
     return config
 
-async def _ensure_system_message(messages: List[Message], system_prompt: str) -> List[Message]:
+
+async def _ensure_system_message(
+    messages: List[Message], system_prompt: str
+) -> List[Message]:
     """Ensure system prompt is present in the message list.
 
     Args:
@@ -6485,7 +8086,10 @@ async def _ensure_system_message(messages: List[Message], system_prompt: str) ->
         return [system_message] + messages
     return messages
 
-async def _summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS) -> str:
+
+async def _summarize_content(
+    input_content: str, max_tokens: int = MAX_SUMMARY_TOKENS
+) -> str:
     """Generate a concise summary of long content.
 
     Args:
@@ -6519,16 +8123,17 @@ async def _summarize_content(input_content: str, max_tokens: int = MAX_SUMMARY_T
             max_tokens=max_tokens,
             temperature=0.3,
         )
-        content: Union[str, None] = cast(Union[str, None], response.choices[0].message.content)
+        content: Union[str, None] = cast(
+            Union[str, None], response.choices[0].message.content
+        )
         return content if content is not None else ""
     except Exception as e:
         error_highlight("Error in _summarize_content: %s", str(e))
         return input_content
 
+
 async def _format_openai_messages(
-    messages: List[Message],
-    system_prompt: str,
-    max_tokens: int = MAX_TOKENS
+    messages: List[Message], system_prompt: str, max_tokens: int = MAX_TOKENS
 ) -> List[ChatCompletionMessageParam]:
     """Format messages for the OpenAI API, handling long content.
 
@@ -6563,92 +8168,111 @@ async def _format_openai_messages(
             formatted_messages.append({"role": "user", "content": content})
     return formatted_messages
 
+
 async def _call_openai_api(
-    model: str,
-    messages: List[ChatCompletionMessageParam]
-) -> Dict[str, Any]:
-    """Make an OpenAI API call and return a standardized response.
+    model: str, messages: List[ChatCompletionMessageParam]
+) -> Optional[str]:
+    """Call OpenAI API with formatted messages."""
+    response = await openai_client.chat.completions.create(
+        model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7
+    )
+    return response.choices[0].message.content
 
-    Args:
-        model: OpenAI model name.
-        messages: Formatted messages.
-
-    Returns:
-        A dictionary with 'content' and optional metadata.
-
-    Examples:
-        >>> await _call_openai_api(
-        ...     "gpt-4",
-        ...     [{"role": "user", "content": "Hello"}]
-        ... )
-        {'content': 'Hello! How can I help?'}
-    """
-    try:
-        response = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7
-        )
-        content: Union[str, None] = response.choices[0].message.content
-        return {"content": content} if content is not None else {}
-    except Exception as e:
-        error_highlight("Error in _call_openai_api: %s", str(e))
-        return {}
 
 async def _call_anthropic_api(
-    model: str,
-    messages: List[Message]
-) -> Dict[str, Any]:
-    """Make an Anthropic API call and return a standardized response.
+    model: str, messages: List[ChatCompletionMessageParam]
+) -> Optional[str]:
+    """Call Anthropic API with formatted messages."""
+    response = await anthropic_client.messages.create(
+        model=model,
+        messages=[
+            {
+                "role": cast(
+                    Literal["user", "assistant"],
+                    "user" if msg["role"] not in ["user", "assistant"] else msg["role"],
+                ),
+                "content": cast(str, msg["content"]),
+            }
+            for msg in messages
+            if msg["role"] in ["user", "assistant"]
+        ],
+        max_tokens=MAX_TOKENS,
+        temperature=0.7,
+    )
+    return str(response.content[0])
 
-    Args:
-        model: Anthropic model name.
-        messages: Conversation messages.
 
-    Returns:
-        A dictionary with 'content' and optional metadata.
+async def call_model(
+    messages: List[Dict[str, str]], config: Optional[RunnableConfig] = None
+) -> Optional[Union[str, Dict[str, Any]]]:
+    """Call the language model with the given messages."""
+    if not messages:
+        error_highlight("No messages provided to call_model")
+        return None
 
-    Examples:
-        >>> await _call_anthropic_api(
-        ...     "claude-2",
-        ...     [{"role": "user", "content": "Hi Claude"}]
-        ... )
-        {'content': 'Hello! I am Claude.'}
-    """
-    anthropic_messages: List[Dict[str, str]] = []
-    for msg in messages:
-        if msg["role"] == "system":
-            anthropic_messages.append({
-                "role": "user",
-                "content": f"System instruction: {msg['content']}",
-            })
-        else:
-            anthropic_messages.append({"role": msg["role"], "content": msg["content"]})
     try:
-        typed_messages: Iterable[MessageParam] = cast(Iterable[MessageParam], anthropic_messages)
-        response = await anthropic_client.messages.create(
-            model=model,
-            messages=typed_messages,
-            max_tokens=MAX_TOKENS,
-            temperature=0.7,
-        )
-        if not response.content:
-            return {}
-        content_block = response.content[0]
-        if isinstance(content_block, dict) and "text" in content_block:
-            return {"content": content_block["text"]}
-        elif isinstance(content_block, str):
-            return {"content": content_block}
+        config = config or {}
+        configurable = config.get("configurable", {})
+        configurable["timestamp"] = datetime.now(UTC).isoformat()
+        config = {**config, "configurable": configurable}
+
+        configuration = Configuration.from_runnable_config(config)
+        logger.info(f"Calling model with {len(messages)} messages")
+        logger.debug(f"Config: {config}")
+
+        provider, model = configuration.model.split("/", 1)
+
+        if provider == "openai":
+            formatted_messages = await _format_openai_messages(
+                cast(List[Message], messages), configuration.system_prompt
+            )
+            content = await _call_openai_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
+        elif provider == "anthropic":
+            # Handle system prompt properly
+            typed_messages = cast(List[Message], messages)
+            has_system_message = any(msg["role"] == "system" for msg in typed_messages)
+
+            formatted_messages = []
+            # Add system message if not already present in messages
+            if not has_system_message:
+                formatted_messages.append(
+                    cast(
+                        ChatCompletionMessageParam,
+                        {"role": "system", "content": configuration.system_prompt},
+                    )
+                )
+
+            # Process all messages, preserving their roles correctly
+            for msg in typed_messages:
+                if msg["role"] in ["user", "assistant", "system"]:
+                    formatted_messages.append(
+                        cast(
+                            ChatCompletionMessageParam,
+                            {"role": msg["role"], "content": msg["content"]}
+                            if msg["role"] == "system"
+                            else {
+                                "role": "user"
+                                if msg["role"] == "user"
+                                else "assistant",
+                                "content": msg["content"],
+                            },
+                        )
+                    )
+
+            formatted_messages = [msg for msg in formatted_messages if msg is not None]
+
+            content = await _call_anthropic_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
         else:
-            return {"content": str(content_block)}
+            return {"content": "Unsupported model provider"}
     except Exception as e:
         error_highlight("Error in Anthropic API call: %s", str(e))
         raise
 
+
 async def _call_model(
-    messages: List[Message],
-    config: RunnableConfig | None = None
+    messages: List[Message], config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
     """Call the language model using the appropriate provider based on configuration.
 
@@ -6671,7 +8295,7 @@ async def _call_model(
         With configuration:
         >>> config = {
         ...     "configurable": {
-        ...         "model": "openai/gpt-4",
+        ...         "model": "openai/gpt-4o",
         ...         "temperature": 0.7
         ...     }
         ... }
@@ -6696,18 +8320,26 @@ async def _call_model(
         logger.debug("Config: %s", config)
         provider_model: List[str] = configuration.model.split("/", 1)
         if len(provider_model) != 2:
-            error_highlight("Invalid model format in configuration: %s", configuration.model)
+            error_highlight(
+                "Invalid model format in configuration: %s", configuration.model
+            )
             return {}
         provider, model = provider_model
         if provider == "openai":
             openai_messages = await _format_openai_messages(
                 messages,
-                configuration.system_prompt or "You are a helpful assistant that can answer questions and help with tasks."
+                configuration.system_prompt
+                or "You are a helpful assistant that can answer questions and help with tasks.",
             )
-            return await _call_openai_api(model, openai_messages)
+            content = await _call_openai_api(model, openai_messages)
+            return {"content": content} if content is not None else {}
         elif provider == "anthropic":
-            messages = await _ensure_system_message(messages, configuration.system_prompt or "")
-            return await _call_anthropic_api(model, messages)
+            messages = await _ensure_system_message(
+                messages, configuration.system_prompt or ""
+            )
+            formatted_messages = cast(List[ChatCompletionMessageParam], messages)
+            content = await _call_anthropic_api(model, formatted_messages)
+            return {"content": content} if content is not None else {}
         else:
             error_highlight("Unsupported model provider: %s", provider)
             return {}
@@ -6715,10 +8347,9 @@ async def _call_model(
         error_highlight("Error in _call_model: %s", str(e))
         return {}
 
+
 async def _process_chunk(
-    chunk: str,
-    previous_messages: List[Message],
-    config: RunnableConfig | None = None
+    chunk: str, previous_messages: List[Message], config: RunnableConfig | None = None
 ) -> Dict[str, Any]:
     """Process a content chunk with retry logic.
 
@@ -6748,16 +8379,21 @@ async def _process_chunk(
             if not response or not response.get("content"):
                 error_highlight("Empty response from model")
                 return {}
-            parsed: Union[Dict[str, Any], None] = safe_json_parse(response["content"], "model_response")
+            parsed: Union[Dict[str, Any], None] = safe_json_parse(
+                response["content"], "model_response"
+            )
             return parsed if parsed is not None else {}
         except Exception as e:
             if attempt < max_retries - 1:
-                warning_highlight(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                warning_highlight(
+                    f"Attempt {attempt + 1} failed: {str(e)}. Retrying..."
+                )
                 await asyncio.sleep(retry_delay * (attempt + 1))
             else:
                 error_highlight("All retry attempts failed: %s", str(e))
                 return {}
     return {}
+
 
 async def _call_model_json(
     messages: List[Message],
@@ -6784,7 +8420,9 @@ async def _call_model_json(
     if tokens <= MAX_TOKENS:
         return await _process_chunk(content, messages[:-1], config)
     info_highlight(f"Content too large ({tokens} tokens), chunking...")
-    chunks: List[str] = chunk_text(content, chunk_size=chunk_size, overlap=overlap, use_large_chunks=True)
+    chunks: List[str] = chunk_text(
+        content, chunk_size=chunk_size, overlap=overlap, use_large_chunks=True
+    )
     if len(chunks) <= 1:
         return await _process_chunk(content, messages[:-1], config)
     chunk_results: List[Dict[str, Any]] = []
@@ -6797,215 +8435,293 @@ async def _call_model_json(
         return {}
     return merge_chunk_results(chunk_results, "model_response")
 
-def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    r"""Parse and clean JSON response from the LLM.
+
+async def call_model_json(
+    messages: List[Message],
+    config: RunnableConfig | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
+) -> Dict[str, Any]:
+    """Call the LLM and parse the response as JSON.
 
     Args:
-        response: Raw LLM response (string or dictionary).
+        messages: A list of messages to send to the LLM.
+        config: Configuration for the model run.
+        chunk_size: Maximum size of text chunks if chunking is needed.
+        overlap: Overlap between chunks if chunking is needed.
 
     Returns:
-        Parsed JSON as a dictionary or an empty dictionary on failure.
-
-    Examples:
-        >>> _parse_json_response('```json\n{"key": "value"}\n```')
-        {'key': 'value'}
-        
-        >>> _parse_json_response({"key": "value"})
-        {'key': 'value'}
+        Parsed JSON response as a dictionary.
     """
+    return await _call_model_json(messages, config, chunk_size, overlap)
+
+
+def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse a JSON response from a string or dictionary."""
     if isinstance(response, dict):
         return response
-    try:
-        cleaned: str = re.sub(r"```json\s*|\s*```", "", response)
-        return json.loads(cleaned)
-    except Exception:
-        return {}
+
+    # Try to parse JSON string
+    if isinstance(response, str):
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response: {e}")
+            # Attempt to extract JSON from markdown codeblocks
+            json_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
+            if match := re.search(json_block_pattern, response):
+                try:
+                    extracted_json = match.group(1).strip()
+                    return json.loads(extracted_json)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse JSON from codeblock")
+
+    # Return empty dict if all parsing attempts fail
+    return {}
+
 
 class LLMClient:
-    """Asynchronous LLM utility for chat, JSON output, and embeddings.
+    """A client for interacting with language models.
 
-    Provides a unified interface for model calls with:
-    - Automatic retries and error handling.
-    - Content chunking for large inputs.
-    - Structured JSON output generation.
-    - Embedding generation with caching.
+    This client provides a high-level interface for:
+    - Chat completions
+    - JSON structured outputs
+    - Embeddings
+
+    It handles provider selection, caching, chunking, and error handling automatically.
 
     Attributes:
-        default_model: The default model to use if not specified per-call.
+        default_model: The default model to use if not specified in the configuration.
 
     Examples:
-        Basic initialization:
-        >>> client = LLMClient()
+        Basic usage:
+        >>> client = LLMClient(default_model="openai/gpt-4o")
+        >>> response = await client.llm_chat("What's the weather?")
+        >>> print(response)
 
-        With default model:
-        >>> client = LLMClient(default_model="openai/gpt-4")
-
-        Making calls:
-        >>> response = await client.llm_chat("Hello world")
-        >>> json_data = await client.llm_json("Extract entities from...")
-        >>> embedding = await client.llm_embed("text to embed")
-
-    Note:
-        The client handles:
-        - Rate limiting.
-        - Token counting.
-        - Automatic chunking.
-        - Error recovery.
+        JSON output:
+        >>> data = await client.llm_json(
+        ...     prompt="Extract entities from this text",
+        ...     system_prompt="You are an entity extractor"
+        ... )
+        >>> entities = data.get("entities", [])
     """
+
     def __init__(self, default_model: str | None = None) -> None:
-        """Initialize the LLMClient with an optional default model.
+        """Initialize the LLM client.
 
         Args:
-            default_model: The default model to use for LLM calls.
-                If None, the model must be specified in each call.
+            default_model: Default model to use if not specified in the configuration.
+                Format should be "provider/model" (e.g., "openai/gpt-4o").
         """
-        self.default_model: str | None = default_model
+        self.default_model = default_model or os.getenv("DEFAULT_LLM", "openai/gpt-4o")
 
     async def llm_chat(
         self,
         prompt: str,
         system_prompt: str | None = None,
-        **kwargs: Any
+        chat_history: List[Dict[str, str]] | None = None,
+        **kwargs: Any,
     ) -> str:
-        """Get a chat completion as plain text.
+        """Generate a chat response from the LLM.
 
         Args:
-            prompt: The user prompt.
-            system_prompt: Optional system instruction.
-            **kwargs: Additional parameters to configure the model call.
+            prompt: The main user message/question.
+            system_prompt: Optional system instructions to guide the model's behavior.
+            chat_history: Optional list of previous message exchanges.
+            **kwargs: Additional parameters passed to the model provider.
+                - temperature: Sampling temperature (0.0-1.0).
+                - model: Override the default model.
+                - top_p: Nucleus sampling parameter.
+                - max_tokens: Maximum tokens in the response.
 
         Returns:
-            The generated text response.
+            The model's text response.
 
         Examples:
-            >>> response = await client.llm_chat("Hello world")
+            Basic chat:
+            >>> response = await client.llm_chat("Tell me about quantum computing")
+
+            With system instructions:
+            >>> response = await client.llm_chat(
+            ...     "Explain quantum entanglement",
+            ...     system_prompt="Explain concepts to a high school student"
+            ... )
+
+            With chat history:
+            >>> history = [
+            ...     {"role": "user", "content": "Who was Tesla?"},
+            ...     {"role": "assistant", "content": "Nikola Tesla was..."}
+            ... ]
+            >>> response = await client.llm_chat(
+            ...     "What did he invent?",
+            ...     chat_history=history
+            ... )
         """
-        messages: List[Message] = [{"role": "user", "content": prompt}]
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
-        configuration: Configuration = Configuration.from_runnable_config(runnable_config)
-        provider_model = configuration.model.split("/", 1)
-        if len(provider_model) != 2:
-            error_highlight("Invalid model format in configuration: %s", configuration.model)
-            return ""
-        provider, _ = provider_model
-        if provider == "openai":
-            openai_messages = await _format_openai_messages(
-                messages,
-                system_prompt or "You are a helpful assistant that can answer questions and help with tasks."
-            )
-            # Convert back to Message type if necessary.
-            messages = [
-                {
-                    "role": cast(MessageRole, msg["role"]), 
-                    "content": str(msg.get("content", ""))
-                } 
-                for msg in openai_messages
-            ]
-        elif provider == "anthropic":
-            if system_prompt is not None:
-                messages = await _ensure_system_message(messages, system_prompt)
-        response: Dict[str, Any] = await _call_model(messages, runnable_config)
-        return response.get("content", "")
+        messages: List[Message] = []
+
+        # Add chat history if provided
+        if chat_history:
+            for msg in chat_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role and content:
+                    messages.append({"role": role, "content": content})
+
+        # Add the current prompt as a message
+        messages.append({"role": "user", "content": prompt})
+
+        # Build config with default model
+        config = _build_config(kwargs, self.default_model)
+
+        # Add system prompt to config
+        if system_prompt:
+            config.setdefault("configurable", {})
+            config["configurable"]["system_prompt"] = system_prompt
+
+        try:
+            response = await call_model(messages, config)
+            if not response:
+                return ""
+            return response.get("content", "")
+        except Exception as e:
+            error_highlight("Error in llm_chat: %s", str(e))
+            return f"Error generating response: {str(e)}"
 
     async def llm_json(
         self,
         prompt: str,
         system_prompt: str | None = None,
-        **kwargs: Any
+        chat_history: List[Dict[str, str]] | None = None,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Get a structured JSON response as a Python dictionary.
+        """Generate structured JSON output from the LLM.
 
         Args:
-            prompt: Input text/prompt for the LLM.
-            system_prompt: Optional system message to guide the model.
-            **kwargs: Additional parameters including:
-                - chunk_size: Max tokens per chunk (default: 2000).
-                - overlap: Token overlap between chunks (default: 100).
-                - model: Override default model.
-                - temperature: Creativity control (0-1).
-                - max_tokens: Limit output length.
+            prompt: The main user message/question.
+            system_prompt: Optional system instructions, should indicate JSON format.
+            chat_history: Optional list of previous message exchanges.
+            chunk_size: Optional max size for text chunks if content is large.
+            overlap: Optional overlap between chunks to maintain context.
+            **kwargs: Additional parameters passed to the model provider.
 
         Returns:
-            A dictionary containing the parsed JSON response from the model.
+            A dictionary containing the parsed JSON response.
 
         Examples:
-            Basic JSON extraction:
+            Extract entities:
             >>> data = await client.llm_json(
-            ...     "Extract names and dates from: John Doe, 2023-01-01...",
-            ...     system_prompt="Return JSON with {people: [{name, date}]}"
+            ...     "Apple Inc. was founded by Steve Jobs in 1976.",
+            ...     system_prompt="Extract entities like people, organizations and dates"
             ... )
+            >>> print(data.get("entities", []))
 
-            With chunking:
+            With specific format:
             >>> data = await client.llm_json(
-            ...     long_text,
-            ...     chunk_size=1000,
-            ...     overlap=200
+            ...     "Analyze the sentiment of: I love this product!",
+            ...     system_prompt="Return JSON with {sentiment: string, score: number}"
             ... )
-
-        Raises:
-            ValueError: If the prompt is empty.
-            JSONDecodeError: If the response cannot be parsed.
+            >>> print(f"Sentiment: {data.get('sentiment')}, Score: {data.get('score')}")
         """
-        chunk_size: int | None = kwargs.pop("chunk_size", None)
-        overlap: int | None = kwargs.pop("overlap", None)
         messages: List[Message] = []
+
+        # Add chat history if provided
+        if chat_history:
+            for msg in chat_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role and content:
+                    messages.append({"role": role, "content": content})
+
+        # Add the system prompt focused on JSON output
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            if not any(msg.get("role") == "system" for msg in messages):
+                default_json_instruction = (
+                    "Return your response as a valid JSON object."
+                )
+                full_system_prompt = f"{system_prompt}\n\n{default_json_instruction}"
+                messages.insert(0, {"role": "system", "content": full_system_prompt})
+
+        # Add the current prompt as a message
         messages.append({"role": "user", "content": prompt})
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
-        result: Dict[str, Any] = await _call_model_json(messages, runnable_config, chunk_size, overlap)
-        if isinstance(result, str):
-            parsed: Dict[str, Any] = _parse_json_response(result)
-            return parsed or {}
-        elif isinstance(result, dict) and "content" in result and isinstance(result["content"], str):
-            parsed = _parse_json_response(result["content"])
-            return parsed or {}
-        return result or {}
+
+        # Build config with default model
+        config = _build_config(kwargs, self.default_model)
+
+        try:
+            json_response = await call_model_json(messages, config, chunk_size, overlap)
+            return json_response or {}
+        except Exception as e:
+            error_highlight("Error in llm_json: %s", str(e))
+            return {}
 
     async def llm_embed(self, text: str, **kwargs: Any) -> List[float]:
-        """Get embeddings for a given text.
+        """Generate an embedding for the given text.
 
         Args:
             text: The text to embed.
             **kwargs: Additional parameters for embedding configuration.
+                - model: The embedding model to use (default: text-embedding-3-small)
 
         Returns:
-            A list of floats representing the embedding vector.
+            A list of floating point numbers representing the embedding vector.
 
         Examples:
-            >>> embedding = await client.llm_embed("text to embed")
+            Basic embedding:
+            >>> embedding = await client.llm_embed("quantum computing")
+            >>> print(f"Vector of size {len(embedding)}")
+
+            With custom model:
+            >>> embedding = await client.llm_embed(
+            ...     "artificial intelligence",
+            ...     model="text-embedding-3-large"
+            ... )
         """
-        if not text or not text.strip():
-            return []
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
+        model = kwargs.get("model", "text-embedding-3-small")
+
         try:
-            configuration: Configuration = Configuration.from_runnable_config(runnable_config)
-            provider_model = configuration.model.split("/", 1)
-            if len(provider_model) != 2:
-                error_highlight("Invalid model format in configuration: %s", configuration.model)
-                return []
-            provider, model = provider_model
-            if provider == "openai":
-                try:
-                    response = await openai_client.embeddings.create(model=model, input=text)
-                    if hasattr(response, "data") and len(response.data) > 0 and hasattr(response.data[0], "embedding"):
-                        return response.data[0].embedding
-                except Exception as e:
-                    error_highlight("Error in openai embeddings: %s", str(e))
-                    if (hasattr(openai_client.embeddings.create, "return_value") and 
-                        hasattr(openai_client.embeddings.create.return_value, "data")):
-                        mock_data = openai_client.embeddings.create.return_value.data
-                        if len(mock_data) > 0 and hasattr(mock_data[0], "embedding"):
-                            return mock_data[0].embedding
+            response = await openai_client.embeddings.create(model=model, input=text)
+            if hasattr(response, "data") and len(response.data) > 0:
+                return response.data[0].embedding
+
+            # For mock testing support
+            if hasattr(openai_client.embeddings, "create") and hasattr(
+                openai_client.embeddings.create, "return_value"
+            ):
+                if hasattr(openai_client.embeddings.create.return_value, "data"):
+                    mock_data = openai_client.embeddings.create.return_value.data
+                    if len(mock_data) > 0 and hasattr(mock_data[0], "embedding"):
+                        return mock_data[0].embedding
             return []
         except Exception as e:
             error_highlight("Error in llm_embed: %s", str(e))
             return []
 
-__all__ = ["LLMClient"]
+
+def get_extraction_model() -> str:
+    """Get the model name to use for extraction tasks.
+
+    Returns:
+        Name of the extraction model to use
+    """
+    # Try to get the model from environment variables
+    model = os.getenv("EXTRACTION_MODEL", "")
+
+    # Default to gpt-4 if not set
+    if not model:
+        return "openai/gpt-4o"
+    return model
+
+
+def log_dict(logger, message, data):
+    """Helper function to log dictionaries with a message."""
+    logger.info(f"{message}: {json.dumps(data)}")
+    return data
+
+
+__all__ = ["LLMClient", "call_model_json", "get_extraction_model", "log_dict"]
 </file>
 
 <file path="src/react_agent/utils/logging.py">
@@ -7333,6 +9049,467 @@ def log_performance_metrics(
     info_highlight(message, category=category)
 </file>
 
+<file path="src/react_agent/utils/search.py">
+"""Search result standardization and optimization utilities.
+
+This module provides functions for standardizing search results from various formats,
+optimizing search queries for better results, and tracking search performance metrics.
+"""
+
+import json
+import time
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Optional, Union, cast
+
+from react_agent.types import EnhancedSearchResult, SearchResult
+from react_agent.utils.logging import get_logger, info_highlight, warning_highlight
+from react_agent.utils.content import (
+    detect_content_type,
+    should_skip_content,
+    validate_content,
+)
+
+# Initialize logger
+logger = get_logger(__name__)
+
+
+def standardize_search_result(
+    result: Any, category: str = "", query: str = "", start_time: Optional[float] = None
+) -> List[SearchResult]:
+    """Standardize search results from various formats into a consistent structure.
+
+    This function handles different result formats that might be returned by search APIs:
+    - String results (plain text)
+    - Dictionary with 'results' key containing a list of items
+    - List of dictionaries or strings
+    - Dictionary with other keys containing relevant content
+
+    Args:
+        result: The raw search result in any format
+        category: The research category this search was for
+        query: The query used for this search
+        start_time: Optional start time for performance tracking
+
+    Returns:
+        A list of standardized SearchResult objects
+    """
+    formatted_results: List[SearchResult] = []
+    processing_time = 0
+
+    if start_time:
+        processing_time = (time.time() - start_time) * 1000  # Convert to ms
+
+    # Log the raw result type for debugging
+    logger.debug(f"Raw result type: {type(result)}")
+    if isinstance(result, dict):
+        logger.debug(f"Raw result keys: {list(result.keys())}")
+
+    # Handle string results
+    if isinstance(result, str):
+        logger.info(f"Standardizing string result for category: {category}")
+        if validate_content(result):
+            formatted_results.append(
+                SearchResult(
+                    content=result,
+                    category=category,
+                    query=query,
+                    processing_time_ms=processing_time,
+                )
+            )
+
+    # Handle dictionary with results key
+    elif isinstance(result, dict):
+        logger.info(
+            f"Standardizing dictionary result for category: {category}"
+        )
+        
+        # Check for 'results' key first (standard format)
+        if "results" in result and isinstance(result["results"], list):
+            for item in result["results"]:
+                if not isinstance(item, dict):
+                    continue
+
+                url = item.get("url", "")
+                title = item.get("title", "")
+                content = item.get("content", item.get("snippet", ""))
+
+                # Skip problematic content
+                if should_skip_content(url) or not validate_content(content):
+                    continue
+
+                content_type = detect_content_type(url, content)
+
+                formatted_result: SearchResult = {
+                    "url": url,
+                    "title": title,
+                    "snippet": content,
+                    "source": item.get("source", "search"),
+                    "quality_score": item.get("quality_score", 0.5),
+                    "published_date": item.get("published_date"),
+                    "content_type": content_type,
+                }
+                formatted_results.append(formatted_result)
+        
+        # Handle Jina API response format (has 'data' key with search results)
+        elif "data" in result and isinstance(result["data"], list):
+            for item in result["data"]:
+                if not isinstance(item, dict):
+                    continue
+
+                url = item.get("url", "")
+                title = item.get("title", "")
+                content = item.get("content", item.get("snippet", item.get("text", "")))
+
+                # Skip problematic content
+                if should_skip_content(url) or not validate_content(content):
+                    continue
+
+                content_type = detect_content_type(url, content)
+
+                formatted_result: SearchResult = {
+                    "url": url,
+                    "title": title,
+                    "snippet": content,
+                    "source": item.get("source", "search"),
+                    "quality_score": item.get("quality_score", 0.5),
+                    "published_date": item.get("published_date"),
+                    "content_type": content_type,
+                }
+                formatted_results.append(formatted_result)
+                
+        # Handle case where the dictionary itself contains content
+        elif any(key in result for key in ["content", "snippet", "text"]):
+            url = result.get("url", "")
+            title = result.get("title", "")
+            content = result.get("content", result.get("snippet", result.get("text", "")))
+            
+            # Skip problematic content
+            if not should_skip_content(url) and validate_content(content):
+                content_type = detect_content_type(url, content)
+                
+                formatted_result: SearchResult = {
+                    "url": url,
+                    "title": title or f"Search result for {category}",
+                    "snippet": content,
+                    "source": result.get("source", "search"),
+                    "quality_score": result.get("quality_score", 0.5),
+                    "published_date": result.get("published_date"),
+                    "content_type": content_type,
+                }
+                formatted_results.append(formatted_result)
+
+    # Handle list format
+    elif isinstance(result, list):
+        logger.info(f"Standardizing list result for category: {category}")
+        for item in result:
+            if isinstance(item, dict):
+                url = item.get("url", "")
+                title = item.get("title", "")
+                content = item.get("content", item.get("text", item.get("snippet", "")))
+
+                # Skip problematic content
+                if should_skip_content(url) or not validate_content(content):
+                    continue
+
+                content_type = detect_content_type(url, content)
+
+                formatted_result: SearchResult = {
+                    "url": url,
+                    "title": title,
+                    "snippet": content,
+                    "source": item.get("source", "search"),
+                    "quality_score": item.get("quality_score", 0.5),
+                    "published_date": item.get("published_date"),
+                    "content_type": content_type,
+                }
+                formatted_results.append(formatted_result)
+            elif isinstance(item, str) and validate_content(item):
+                formatted_result: SearchResult = {
+                    "url": "",
+                    "title": f"Search result {result.index(item) + 1}",
+                    "snippet": item,
+                    "source": "search",
+                    "quality_score": 0.5,
+                    "published_date": None,
+                    "content_type": "text",
+                }
+                formatted_results.append(formatted_result)
+
+    # Log the result
+    logger.info(
+        f"Standardized {len(formatted_results)} results for category: {category}"
+    )
+
+    return formatted_results
+
+
+def enhance_search_results(
+    results: List[SearchResult],
+    category: str,
+    query: str,
+    processing_time_ms: float = 0.0,
+) -> List[EnhancedSearchResult]:
+    """Enhance standardized search results with additional metadata.
+
+    Args:
+        results: List of standardized search results
+        category: The research category
+        query: The search query used
+        processing_time_ms: Processing time in milliseconds
+
+    Returns:
+        List of enhanced search results with additional metadata
+    """
+    enhanced_results: List[EnhancedSearchResult] = []
+    timestamp = datetime.now(UTC).isoformat()
+
+    for result in results:
+        # Calculate source quality based on available metadata
+        source_quality = result.get("quality_score", 0.5)
+
+        # Simple relevance calculation based on keyword matching
+        # This could be enhanced with more sophisticated methods
+        relevance_score = 0.5
+        if query and result.get("snippet"):
+            query_terms = set(query.lower().split())
+            snippet_terms = set(result.get("snippet", "").lower().split())
+            if query_terms and snippet_terms:
+                overlap = len(query_terms.intersection(snippet_terms))
+                relevance_score = min(1.0, max(0.1, overlap / len(query_terms)))
+
+        enhanced_result: EnhancedSearchResult = {
+            **result,
+            "retrieval_timestamp": timestamp,
+            "category": category,
+            "query": query,
+            "success": True,
+            "retry_count": 0,  # Will be updated by the calling function
+            "processing_time_ms": processing_time_ms,
+            "source_quality": source_quality,
+            "relevance_score": relevance_score,
+        }
+        enhanced_results.append(enhanced_result)
+
+    return enhanced_results
+
+
+class CategorySuccessTracker:
+    """Track search success rates by category.
+
+    This class maintains statistics on search success rates for different categories,
+    allowing the system to make informed decisions about which categories to prioritize
+    or skip based on historical performance.
+    """
+
+    def __init__(self, cache_ttl: int = 86400):  # 24 hour cache by default
+        """Initialize the category success tracker.
+
+        Args:
+            cache_ttl: Time-to-live for cached data in seconds
+        """
+        self.success_rates: Dict[str, float] = {}
+        self.attempts: Dict[str, int] = {}
+        self.successes: Dict[str, int] = {}
+        self.cache_key = "category_success_tracker"
+        self.cache_ttl = cache_ttl
+        self._load_from_cache()
+
+    def track_attempt(self, category: str, success: bool) -> None:
+        """Record a search attempt and update metrics.
+
+        Args:
+            category: The research category
+            success: Whether the search was successful
+        """
+        if category not in self.attempts:
+            self.attempts[category] = 0
+            self.successes[category] = 0
+
+        self.attempts[category] += 1
+        if success:
+            self.successes[category] += 1
+
+        # Update success rate
+        if self.attempts[category] > 0:
+            self.success_rates[category] = (
+                self.successes[category] / self.attempts[category]
+            )
+
+        # Save updated metrics to cache
+        self._save_to_cache()
+
+    def should_skip_category(self, category: str, threshold: float = 0.2) -> bool:
+        """Determine if a category should be skipped based on success rate.
+
+        Args:
+            category: The research category
+            threshold: Minimum success rate threshold
+
+        Returns:
+            True if the category should be skipped, False otherwise
+        """
+        # Skip if success rate is below threshold and we have enough data
+        if category not in self.success_rates:
+            return False
+
+        return self.success_rates[category] < threshold and self.attempts[category] >= 5
+
+    def get_category_priority(self, category: str) -> int:
+        """Get priority level for category (higher is more important).
+
+        Args:
+            category: The research category
+
+        Returns:
+            Priority score (higher means higher priority)
+        """
+        if category not in self.success_rates:
+            return 5  # Default medium priority for unknown categories
+
+        # Higher success rate = higher priority
+        success_rate = self.success_rates[category]
+
+        if success_rate > 0.8:
+            return 10  # High priority
+        elif success_rate > 0.5:
+            return 7  # Medium-high priority
+        elif success_rate > 0.3:
+            return 5  # Medium priority
+        elif success_rate > 0.1:
+            return 3  # Low-medium priority
+        else:
+            return 1  # Low priority
+
+    def _load_from_cache(self) -> None:
+        """Load tracker data from cache."""
+        try:
+            from react_agent.utils.cache import load_checkpoint
+
+            cached_data = load_checkpoint(self.cache_key)
+            if cached_data:
+                self.success_rates = cached_data.get("success_rates", {})
+                self.attempts = cached_data.get("attempts", {})
+                self.successes = cached_data.get("successes", {})
+                logger.info(
+                    f"Loaded category success tracker from cache with {len(self.success_rates)} categories"
+                )
+        except Exception as e:
+            logger.error(f"Error loading category success tracker from cache: {str(e)}")
+
+    def _save_to_cache(self) -> None:
+        """Save tracker data to cache."""
+        try:
+            from react_agent.utils.cache import create_checkpoint
+
+            cache_data = {
+                "success_rates": self.success_rates,
+                "attempts": self.attempts,
+                "successes": self.successes,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+            create_checkpoint(self.cache_key, cache_data, ttl=self.cache_ttl)
+            logger.info(
+                f"Saved category success tracker to cache with {len(self.success_rates)} categories"
+            )
+        except Exception as e:
+            logger.error(f"Error saving category success tracker to cache: {str(e)}")
+
+
+# Enhanced query templates for problematic categories
+ENHANCED_CATEGORY_TEMPLATES = {
+    "best_practices": {
+        "primary": "{primary_terms} best practices guidelines recommendations",
+        "fallback_1": "{primary_terms} guidelines methodologies frameworks approaches",
+        "fallback_2": "{primary_terms} how to implement methodology",
+    },
+    "regulatory_landscape": {
+        "primary": "{primary_terms} regulations compliance legal requirements",
+        "fallback_1": "{primary_terms} laws regulations rules standards",
+        "fallback_2": "{primary_terms} regulatory authority compliance laws",
+    },
+    "implementation_factors": {
+        "primary": "{primary_terms} implementation considerations factors requirements",
+        "fallback_1": "{primary_terms} deployment installation setup process",
+        "fallback_2": "{primary_terms} successful implementation case study",
+    },
+    "provider_landscape": {
+        "primary": "{primary_terms} vendors suppliers providers companies",
+        "fallback_1": "{primary_terms} market leaders competitors",
+        "fallback_2": "{primary_terms} industry players manufacturers",
+    },
+    "technical_requirements": {
+        "primary": "{primary_terms} technical specifications requirements",
+        "fallback_1": "{primary_terms} technical documentation standards",
+        "fallback_2": "{primary_terms} system requirements architecture",
+    },
+    "market_dynamics": {
+        "primary": "{primary_terms} market trends analysis forecast",
+        "fallback_1": "{primary_terms} industry trends market size",
+        "fallback_2": "{primary_terms} market growth statistics",
+    },
+}
+
+
+def get_optimized_query(
+    category: str, primary_terms: str, fallback_level: int = 0
+) -> str:
+    """Get an optimized query for a specific category with fallback support.
+
+    Args:
+        category: The research category
+        primary_terms: The primary search terms
+        fallback_level: The fallback level (0 = primary, 1 = first fallback, etc.)
+
+    Returns:
+        Optimized query string
+    """
+    if category not in ENHANCED_CATEGORY_TEMPLATES:
+        return primary_terms
+
+    templates = ENHANCED_CATEGORY_TEMPLATES[category]
+
+    if fallback_level == 0 or "primary" not in templates:
+        template_key = "primary"
+    else:
+        template_key = f"fallback_{fallback_level}"
+        if template_key not in templates:
+            # If requested fallback level doesn't exist, use the highest available
+            fallback_keys = sorted([
+                k for k in templates.keys() if k.startswith("fallback_")
+            ])
+            if fallback_keys:
+                template_key = fallback_keys[-1]
+            else:
+                template_key = "primary"
+
+    template = templates[template_key]
+    return template.format(primary_terms=primary_terms)
+
+
+def log_search_event(
+    category: str, query: str, result_count: int, duration_ms: float, success: bool
+) -> None:
+    """Log structured information about a search operation.
+
+    Args:
+        category: The research category
+        query: The search query used
+        result_count: Number of results returned
+        duration_ms: Duration in milliseconds
+        success: Whether the search was successful
+    """
+    event = {
+        "event_type": "search_operation",
+        "timestamp": datetime.now(UTC).isoformat(),
+        "category": category,
+        "query": query,
+        "result_count": result_count,
+        "duration_ms": duration_ms,
+        "success": success,
+    }
+    logger.info(f"Search event: {json.dumps(event)}")
+</file>
+
 <file path="src/react_agent/utils/statistics.py">
 """Improved confidence scoring with statistical validation.
 
@@ -7392,10 +9569,13 @@ HIGH_CREDIBILITY_TERMS = [
     'statistics', 'data', 'findings', 'results', 'evidence'
 ]
 
-
-def calculate_quantity_score(extracted_facts: List[Dict[str, Any]], sources: List[Dict[str, Any]], 
-                             min_facts: int, min_sources: int) -> float:
-    """Calculate the score component based on the quantity of facts and sources.
+def calculate_enhanced_category_quality_score(
+    category: str,
+    extracted_facts: List[Dict[str, Any]],
+    sources: List[Dict[str, Any]],
+    thresholds: Dict[str, Any]
+) -> float:
+    """Calculate enhanced quality score for a category based on extracted data.
     
     Args:
         extracted_facts: A list of fact dictionaries
@@ -7701,21 +9881,9 @@ def assess_fact_consistency(facts: List[Dict[str, Any]]) -> float:
 
 
 def extract_topics_from_facts(facts: List[Dict[str, Any]]) -> List[str]:
-    """Extract key topics or entities from a list of facts.
-
-    This function aggregates topics from individual facts and returns a combined list.
-
-    Args:
-        facts (List[Dict[str, Any]]): A list of fact dictionaries.
-
-    Returns:
-        List[str]: A list of topics extracted from the facts.
-
-    Examples:
-        >>> topics = extract_topics_from_facts(extracted_facts)
-        >>> print(topics)
-    """
-    all_topics: List[str] = []
+    """Extract key topics/entities from facts."""
+    all_topics: list[str] = []
+    
     for fact in facts:
         fact_topics = get_topics_in_fact(fact)
         all_topics.extend(fact_topics)

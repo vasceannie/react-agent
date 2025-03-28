@@ -595,7 +595,13 @@ def safe_json_parse(
     """
     if isinstance(response, dict):
         return response
-    if not isinstance(response, str) or not response.strip():
+    
+    # Handle non-string, non-dict types (like float, int, etc.)
+    if not isinstance(response, str):
+        warning_highlight(f"Received non-string, non-dict response of type {type(response)} for category {category}. Using default extraction result.")
+        return get_default_extraction_result(category)
+        
+    if not response.strip():
         return get_default_extraction_result(category)
     
     # Special handling for test cases to ensure they pass
@@ -802,7 +808,7 @@ async def _process_content(
         content (str): Preprocessed content.
         prompt (str): The prompt to send to the model.
         category (str): The extraction category.
-        extraction_model (Any): The extraction model.
+        extraction_model (Any): The extraction model to use.
         config (Optional[RunnableConfig]): Additional configuration.
         url (str): The source URL.
         title (str): The source title.

@@ -1,8 +1,8 @@
 import asyncio
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
-
+from typing import Any, Callable, Dict, List, Literal, Union
 from langchain.tools import BaseTool
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import InjectedToolArg
 from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
 from langgraph.store.base import BaseStore
@@ -43,7 +43,7 @@ class ExtractCategoryInfoInput(BaseModel):
     title: str = Field(..., description="The source title")
     category: str = Field(..., description="The extraction category (e.g., 'market_dynamics')")
     original_query: str = Field(..., description="The original search query")
-    prompt_template: Optional[str] = Field(default=None, description="Optional custom prompt template")
+    prompt_template: str | None = Field(default=None, description="Optional custom prompt template")
 
 
 # New consolidated Pydantic models
@@ -52,28 +52,28 @@ class ExtractionInput(BaseModel):
     operation: Literal["statistics", "citations", "category", "enrich"] = Field(
         ..., description="The extraction operation to perform"
     )
-    text: Optional[str] = Field(
+    text: str | None = Field(
         default=None, description="The text to extract from"
     )
-    url: Optional[str] = Field(
+    url: str | None = Field(
         default="", description="Optional source URL"
     )
-    source_title: Optional[str] = Field(
+    source_title: str | None = Field(
         default="", description="Optional source title"
     )
-    category: Optional[str] = Field(
+    category: str | None = Field(
         default=None, description="The extraction category (e.g., 'market_dynamics')"
     )
-    original_query: Optional[str] = Field(
+    original_query: str | None = Field(
         default=None, description="The original search query"
     )
-    prompt_template: Optional[str] = Field(
+    prompt_template: str | None = Field(
         default=None, description="Optional custom prompt template"
     )
-    fact: Optional[Dict[str, Any]] = Field(
+    fact: Dict[str, Any] | None = Field(
         default=None, description="Fact to enrich"
     )
-    extraction_model: Optional[Any] = Field(
+    extraction_model: Any | None = Field(
         default=None, description="Model to use for extraction"
     )
 
@@ -83,28 +83,28 @@ class StatisticsAnalysisInput(BaseModel):
     operation: Literal["quality", "sources", "confidence", "synthesis", "validate", "consistency"] = Field(
         ..., description="The statistics analysis operation to perform"
     )
-    category: Optional[str] = Field(
+    category: str | None = Field(
         default=None, description="The category to analyze"
     )
-    facts: Optional[List[Dict[str, Any]]] = Field(
+    facts: List[Dict[str, Any]] | None = Field(
         default=None, description="Extracted facts to analyze"
     )
-    sources: Optional[List[Dict[str, Any]]] = Field(
+    sources: List[Dict[str, Any]] | None = Field(
         default=None, description="Sources to analyze"
     )
-    thresholds: Optional[Dict[str, Any]] = Field(
+    thresholds: Dict[str, Any] | None = Field(
         default=None, description="Thresholds for quality assessment"
     )
-    category_scores: Optional[Dict[str, float]] = Field(
+    category_scores: Dict[str, float] | None = Field(
         default=None, description="Category scores for confidence calculation"
     )
-    synthesis_quality: Optional[float] = Field(
+    synthesis_quality: float | None = Field(
         default=None, description="Synthesis quality score"
     )
-    validation_score: Optional[float] = Field(
+    validation_score: float | None = Field(
         default=None, description="Validation score"
     )
-    synthesis: Optional[Dict[str, Any]] = Field(
+    synthesis: Dict[str, Any] | None = Field(
         default=None, description="Synthesis data to assess"
     )
 
@@ -114,19 +114,19 @@ class ResearchValidationInput(BaseModel):
     operation: Literal["content", "facts", "sources", "overall"] = Field(
         ..., description="The validation operation to perform"
     )
-    content: Optional[str] = Field(
+    content: str | None = Field(
         default=None, description="Content to validate"
     )
-    url: Optional[str] = Field(
+    url: str | None = Field(
         default=None, description="URL to validate"
     )
-    facts: Optional[List[Dict[str, Any]]] = Field(
+    facts: List[Dict[str, Any]] | None = Field(
         default=None, description="Facts to cross-validate"
     )
-    sources: Optional[List[Dict[str, Any]]] = Field(
+    sources: List[Dict[str, Any]] | None = Field(
         default=None, description="Sources to assess quality"
     )
-    scores: Optional[Dict[str, float]] = Field(
+    scores: Dict[str, float] | None = Field(
         default=None, description="Scores to calculate overall score"
     )
 
@@ -187,12 +187,22 @@ class CategoryExtractionTool(BaseTool):
     
     def __init__(self, extraction_model: Any, default_prompt_template: str = ""):
         """Initialize the category extraction tool."""
-        self.extraction_model = extraction_model
-        self.default_prompt_template = default_prompt_template
         super().__init__()
+        self._extraction_model = extraction_model
+        self._default_prompt_template = default_prompt_template
+    
+    @property
+    def extraction_model(self) -> Any:
+        """Get the extraction model used by this tool."""
+        return self._extraction_model
+        
+    @property
+    def default_prompt_template(self) -> str:
+        """Get the default prompt template used by this tool."""
+        return self._default_prompt_template
     
     def _run(self, content: str, url: str, title: str, category: str, 
-             original_query: str, prompt_template: Optional[str] = None) -> Dict[str, Any]:
+             original_query: str, prompt_template: str | None = None) -> Dict[str, Any]:
         """Extract category information synchronously.
         
         Note: This tool is maintained for backward compatibility.
@@ -213,7 +223,7 @@ class CategoryExtractionTool(BaseTool):
         return {"facts": facts, "relevance": relevance}
     
     async def _arun(self, content: str, url: str, title: str, category: str, 
-                   original_query: str, prompt_template: Optional[str] = None) -> Dict[str, Any]:
+                   original_query: str, prompt_template: str | None = None) -> Dict[str, Any]:
         """Extract category information asynchronously.
         
         Note: This tool is maintained for backward compatibility.
@@ -242,14 +252,14 @@ class ExtractionTool(BaseTool):
     def _run(
         self, 
         operation: Literal["statistics", "citations", "category", "enrich"],
-        text: Optional[str] = None,
+        text: str | None = None,
         url: str = "",
         source_title: str = "",
-        category: Optional[str] = None,
-        original_query: Optional[str] = None,
-        prompt_template: Optional[str] = None,
-        fact: Optional[Dict[str, Any]] = None,
-        extraction_model: Optional[Any] = None,
+        category: str | None = None,
+        original_query: str | None = None,
+        prompt_template: str | None = None,
+        fact: Dict[str, Any] | None = None,
+        extraction_model: Any | None = None,
     ) -> Any:
         """Run the appropriate extraction function based on operation."""
         if operation == "statistics":
@@ -292,15 +302,15 @@ class ExtractionTool(BaseTool):
     async def _arun(
         self, 
         operation: Literal["statistics", "citations", "category", "enrich"],
-        text: Optional[str] = None,
+        text: str | None = None,
         url: str = "",
         source_title: str = "",
-        category: Optional[str] = None,
-        original_query: Optional[str] = None,
-        prompt_template: Optional[str] = None,
-        fact: Optional[Dict[str, Any]] = None,
-        extraction_model: Optional[Any] = None,
-        config: Optional[RunnableConfig] = None,
+        category: str | None = None,
+        original_query: str | None = None,
+        prompt_template: str | None = None,
+        fact: Dict[str, Any] | None = None,
+        extraction_model: Any | None = None,
+        config: RunnableConfig | None = None,
         state: Annotated[Dict[str, Any], InjectedState] = None,
         store: Annotated[BaseStore, InjectedStore] = None,
     ) -> Any:
@@ -472,7 +482,7 @@ class ResearchValidationTool(BaseTool):
 
 
 def create_derivation_toolnode(
-    include_tools: Optional[List[str]] = None
+    include_tools: List[str] | None = None
 ) -> ToolNode:
     """Create a ToolNode with the derivation tools.
     
@@ -501,5 +511,45 @@ def create_derivation_toolnode(
     else:
         tools = list(all_tools.values())
     
-    # Create and return the ToolNode
-    return ToolNode(tools)
+    # Create the base ToolNode
+    base_tool_node = ToolNode(tools)
+    
+    # Create a wrapper function to ensure the last message is an AIMessage
+    async def tool_node_wrapper(state: Dict[str, Any], config: RunnableConfig | None = None) -> Dict[str, Any]:
+        try:
+            # Try to run the ToolNode as is
+            return await base_tool_node.ainvoke(state, config)
+        except ValueError as e:
+            # Check if it's the specific error we're trying to handle
+            if "Last message is not an AIMessage" in str(e):
+                logger.warning("Caught 'Last message is not an AIMessage' error, attempting to fix")
+                
+                # If we have messages, ensure the last one is an AIMessage
+                if "messages" in state and state["messages"]:
+                    # Get the last message
+                    last_message = state["messages"][-1]
+                    
+                    # If it's not an AIMessage, convert it
+                    if not isinstance(last_message, AIMessage):
+                        # Create a new AIMessage with the content from the last message
+                        if hasattr(last_message, "content"):
+                            content = last_message.content
+                        elif isinstance(last_message, dict) and "content" in last_message:
+                            content = last_message["content"]
+                        else:
+                            content = str(last_message)
+                        
+                        # Replace the last message with an AIMessage
+                        state["messages"] = list(state["messages"][:-1]) + [AIMessage(content=content)]
+                        logger.info("Converted last message to AIMessage")
+                        
+                        # Try again with the fixed state
+                        return await base_tool_node.ainvoke(state, config)
+            
+            # If it's a different error or we couldn't fix it, re-raise
+            raise e
+    
+    # Create a new ToolNode that uses our wrapper function
+    wrapped_node = RunnableLambda(tool_node_wrapper)
+    
+    return wrapped_node

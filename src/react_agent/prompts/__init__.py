@@ -14,6 +14,9 @@ from react_agent.prompts.market import (
     MARKET_DATA_PROMPT,
     MARKET_PROMPT,
 )
+from react_agent.prompts.enhanced_templates import (
+    ENHANCED_CATEGORY_TEMPLATES,
+)
 from react_agent.prompts.reflection import (
     REFLECTION_PROMPT,
 )
@@ -84,6 +87,7 @@ __all__ = [
     "COUNTERFACTUAL_PROMPT",
     "METACOGNITION_PROMPT",
     # Functions
+    "ENHANCED_CATEGORY_TEMPLATES",
     "get_report_template",
     "get_analysis_template",
 ]

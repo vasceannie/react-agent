@@ -3,7 +3,7 @@
 This module defines the types used by the research graph and related components.
 """
 
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union, Sequence
 
 
 class TextContent(TypedDict):
@@ -57,6 +57,18 @@ class SearchResult(TypedDict):
     quality_score: float
     published_date: Optional[str]
     content_type: str
+
+
+class EnhancedSearchResult(SearchResult):
+    """Enhanced search result with additional metadata for better tracking."""
+    retrieval_timestamp: str
+    category: str
+    query: str
+    success: bool
+    retry_count: int
+    processing_time_ms: float
+    source_quality: float
+    relevance_score: float
 
 
 class ExtractedFact(TypedDict):

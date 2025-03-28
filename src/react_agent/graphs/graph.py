@@ -19,7 +19,7 @@ from react_agent.state import InputState, State
 from react_agent.tools.tavily import TOOLS
 from react_agent.utils.llm import LLMClient
 
-llm_client = LLMClient(default_model="openai/gpt-4")
+llm_client = LLMClient(default_model="openai/gpt-4o")
 builder = StateGraph(State, input=InputState, config_schema=Configuration)
 
 # Define the two nodes we will cycle between

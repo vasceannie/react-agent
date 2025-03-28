@@ -31,6 +31,7 @@ Example:
 
 import asyncio
 import hashlib
+import json
 import os
 from typing import Annotated, Any, Dict, List, Literal, Union
 
@@ -78,9 +79,10 @@ class RetryConfig(BaseModel):
     """Configuration for HTTP request retries with exponential backoff."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_retries: PositiveInt = Field(default=3, description="Maximum number of retries")
-    base_delay: PositiveFloat = Field(default=1.0, description="Base delay in seconds")
-    max_delay: PositiveFloat = Field(default=5.0, description="Maximum delay in seconds")
+    max_retries: PositiveInt = Field(default=5, description="Maximum number of retries")
+    base_delay: PositiveFloat = Field(default=2.0, description="Base delay in seconds")
+    max_delay: PositiveFloat = Field(default=60.0, description="Maximum delay in seconds")
+    respect_retry_after: bool = Field(default=True, description="Whether to respect retry-after headers")
 
     @model_validator(mode="after")
     def validate_delays(self) -> "RetryConfig":
@@ -165,12 +167,14 @@ async def _make_request_with_retry(
                     error_msg = f"HTTP {status}: {text}"
                     raise aiohttp.ClientError(error_msg)
 
+
         except aiohttp.ClientError as ce:
             last_exception = ce
             warning_highlight(
                 f"ClientError on attempt {attempt}/{retry_config.max_retries}: {str(last_exception)}",
                 "JinaTool",
             )
+
         except Exception as e:
             last_exception = e
             warning_highlight(
@@ -178,8 +182,30 @@ async def _make_request_with_retry(
                 "JinaTool",
             )
         # Calculate exponential backoff delay
-        delay = min(retry_config.max_delay, retry_config.base_delay * (2 ** (attempt - 1)))
-        await asyncio.sleep(delay)
+        base_delay = min(retry_config.max_delay, retry_config.base_delay * (2 ** (attempt - 1)))
+        
+        # Special handling for rate limit errors (HTTP 429)
+        retry_after = None
+        if retry_config.respect_retry_after and "HTTP 429" in str(last_exception):
+            # Try to extract retryAfter value from the error message
+            try:
+                error_text = str(last_exception)
+                if "HTTP 429:" in error_text:
+                    error_json_str = error_text.split("HTTP 429:", 1)[1].strip()
+                    error_json = json.loads(error_json_str)
+                    retry_after = error_json.get("retryAfter")
+                    
+                    if retry_after:
+                        retry_after = float(retry_after)
+                        info_highlight(f"Rate limit exceeded! API suggests waiting {retry_after}s. Using this value instead of {base_delay}s.", "JinaTool")
+            except Exception as e:
+                warning_highlight(f"Could not parse rate limit response: {e}", "JinaTool")
+        
+        # Use retry_after from API if available, otherwise use calculated delay
+        if retry_after and retry_config.respect_retry_after:
+            await asyncio.sleep(retry_after)
+        else:
+            await asyncio.sleep(base_delay)
 
     # All retry attempts failed
     error_highlight(f"All retry attempts failed: {last_exception}", "JinaTool")

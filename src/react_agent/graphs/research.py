@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime, timezone
+import time
+from collections import defaultdict
 from typing import (
     Any,
     Callable,
@@ -25,6 +26,7 @@ from typing import (
     cast,
 )
 
+from datetime import UTC, datetime, timezone
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -46,6 +48,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.managed import IsLastStep
 from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
 from langgraph.store.base import BaseStore
+import operator
 from pydantic import BaseModel, Field
 from typing_extensions import (
     Annotated,
@@ -67,6 +70,9 @@ from react_agent.prompts.research import (
     VALIDATION_PROMPT,
     get_default_extraction_result,
     get_extraction_prompt,
+)
+from react_agent.prompts.enhanced_templates import (
+    ENHANCED_CATEGORY_TEMPLATES,
 )
 from react_agent.tools.derivation import (
     CategoryExtractionTool,
@@ -97,6 +103,16 @@ from react_agent.utils.content import (
     process_document_with_docling,
     should_skip_content,
     validate_content,
+)
+from react_agent.utils.search import (
+    CategorySuccessTracker,
+    standardize_search_result,
+    enhance_search_results,
+    get_optimized_query,
+    log_search_event,
+)
+from react_agent.utils.enhanced_search import (
+    execute_progressive_search,
 )
 from react_agent.utils.extraction import enrich_extracted_fact
 from react_agent.utils.extraction import (
@@ -159,7 +175,7 @@ class EnhancedResearchState(TypedDict):
     human_feedback: Optional[str]
     
     # Category-specific research
-    categories: Dict[str, ResearchCategoryState]
+    categories: Annotated[Dict[str, ResearchCategoryState], operator.or_]
     
     # Synthesis and validation
     synthesis: Optional[Dict[str, Any]]
@@ -167,7 +183,7 @@ class EnhancedResearchState(TypedDict):
     consolidated_report: Optional[Dict[str, Any]]
     
     # Overall status
-    status: Literal["initialized", "analyzed", "clarified", "researched", "synthesized", "validated", "report_generated", "complete", "error"]
+    status: Annotated[Literal["initialized", "analyzed", "clarified", "researched", "synthesized", "validated", "report_generated", "complete", "error"], operator.add]
     error: Optional[Dict[str, Any]]
     complete: bool
     is_last_step: NotRequired[IsLastStep]
@@ -189,14 +205,14 @@ class ResearchState(TypedDict):
     human_feedback: Optional[str]
 
     # Category-specific research
-    categories: Dict[str, ResearchCategoryState]
+    categories: Annotated[Dict[str, ResearchCategoryState], operator.or_]
 
     # Synthesis and validation
     synthesis: Optional[Dict[str, Any]]
     validation_result: Optional[Dict[str, Any]]
 
     # Overall status
-    status: str
+    status: Annotated[Literal["initialized", "analyzed", "clarified", "researched", "synthesized", "validated", "report_generated", "complete", "error"], operator.add]
     error: Optional[Dict[str, Any]]
     complete: bool
 
@@ -425,6 +441,7 @@ async def process_clarification(state: ResearchState) -> Dict[str, Any]:
 async def execute_category_search(
         state: ResearchState,
         category: str,
+        fallback_level: int = 0,
         config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
     """Execute search for a specific research category."""
@@ -434,7 +451,7 @@ async def execute_category_search(
     if category not in categories:
         warning_highlight(f"Unknown category: {category}")
         return {}
-
+    
     category_state = categories[category]
     query = category_state["query"]
 
@@ -445,6 +462,9 @@ async def execute_category_search(
     # Update status
     category_state["status"] = "searching"
     category_state["retry_count"] += 1
+    
+    # Initialize category success tracker if not already present in state
+    success_tracker = getattr(state, "category_success_tracker", CategorySuccessTracker())
 
     # Get category-specific search parameters
     thresholds = SEARCH_QUALITY_THRESHOLDS.get(category, {})
@@ -462,71 +482,118 @@ async def execute_category_search(
     }
 
     search_type = search_type_mapping.get(category, "general")
+    
+    # Extract primary terms from query
+    primary_terms = " ".join(query.split()[:5])  # Use first 5 terms as primary
+    
+    # Check if we should use optimized query
+    if fallback_level > 0 or category in ["best_practices", "regulatory_landscape", "implementation_factors"]:
+        # Use our enhanced query optimization
+        optimized_query = get_optimized_query(category, primary_terms, fallback_level)
+        info_highlight(f"Using optimized query for {category} (fallback level {fallback_level}): {optimized_query}")
+        query = optimized_query
+    
+    # Record start time for performance tracking
+    start_time = time.time()
 
-    info_highlight(f"Executing {search_type} search for {category} with query: {query}")
+    info_highlight(f"Executing {search_type} search for {category} with query: {query} (attempt {category_state['retry_count']})")
 
     try:
         # Keep track of the query for retry tracking
         category_state["last_search_query"] = query
 
-        # Execute the search with category parameter
-        search_results = await search(
-            query=query,
-            search_type=search_type,
-            recency_days=recency_days,
-            category=category,  # Pass the category parameter
-            config=ensure_config(config)
-        )
-
-        if not search_results:
-            warning_highlight(f"No search results for {category}")
+        # Execute the search with proper parameters using ainvoke
+        from langchain.tools import StructuredTool
+        
+        # Convert the imported search function to a StructuredTool if it's not already
+        if not isinstance(search, StructuredTool):
+            from langchain.tools import Tool
+            search_tool = Tool.from_function(
+                func=search,
+                name="search",
+                description="Search the web for information",
+                coroutine=search
+            )
+        else:
+            search_tool = search
+            
+        # Use ainvoke to call the tool asynchronously
+        try:
+            # Call the search tool with just the query parameter
+            search_results = await search_tool.ainvoke(query)
+            info_highlight(f"Search completed for {category} with {len(search_results) if isinstance(search_results, list) else 'non-list'} results")
+        except Exception as e:
+            error_highlight(f"Search failed for {category}: {str(e)}")
             category_state["status"] = "search_failed"
             return {"categories": categories}
-
-        # Convert to the expected format and filter problematic content
-        formatted_results = []
         
-        # Use the imported utility functions to process search results
-        from react_agent.utils.content import should_skip_content, validate_content, detect_content_type
+        if not search_results:
+            warning_highlight(f"No search results for {category}")
+            
+            # Try fallback if we haven't reached max retries
+            if fallback_level < 2 and category_state["retry_count"] < 3:
+                info_highlight(f"Attempting fallback query for {category} (level {fallback_level + 1})")
+                # Track the failed attempt
+                success_tracker.track_attempt(category, False)
+                # Try again with fallback
+                return await execute_category_search(state, category, fallback_level + 1, config)
+            else:
+                category_state["status"] = "search_failed"
+                # Track the failed attempt
+                success_tracker.track_attempt(category, False)
+                return {"categories": categories}
+
+        # Calculate processing time
+        processing_time_ms = (time.time() - start_time) * 1000
+
+        # Use our standardization utility to handle different result formats
+        formatted_results = standardize_search_result(
+            search_results, 
+            category=category,
+            query=query,
+            start_time=start_time
+        )
         
-        for doc in search_results:
-            url = doc.metadata.get("url", "")
-
-            # Skip problematic content types
-            if should_skip_content(url):
-                info_highlight(f"Skipping problematic content type: {url}")
-                continue
-
-            # Validate and detect content type
-            content = doc.page_content
-            if not validate_content(content):
-                info_highlight(f"Invalid content from {url}, skipping")
-                continue
-
-            content_type = detect_content_type(url, content)
-            info_highlight(f"Detected content type: {content_type} for {url}")
-
-            result = {
-                "url": url,
-                "title": doc.metadata.get("title", ""),
-                "snippet": content,
-                "source": doc.metadata.get("source", ""),
-                "quality_score": doc.metadata.get("quality_score", 0.5),
-                "published_date": doc.metadata.get("published_date"),
-                "content_type": content_type
-            }
-            formatted_results.append(result)
-
+        # Enhance results with additional metadata
+        enhanced_results = enhance_search_results(
+            formatted_results,
+            category=category,
+            query=query,
+            processing_time_ms=processing_time_ms
+        )
+        
         # Update the category state
-        category_state["search_results"] = formatted_results
+        category_state["search_results"] = enhanced_results
         category_state["status"] = "searched"
 
-        info_highlight(f"Found {len(formatted_results)} results for {category}")
+        # Log search event
+        log_search_event(
+            category=category,
+            query=query,
+            result_count=len(enhanced_results),
+            duration_ms=processing_time_ms,
+            success=True
+        )
+        
+        # Track successful attempt
+        success_tracker.track_attempt(category, True)
+        
+        # Store success tracker in state for future use
+        state["category_success_tracker"] = success_tracker
+
+        info_highlight(f"Found {len(enhanced_results)} results for {category}")
         return {"categories": categories}
 
     except Exception as e:
         error_highlight(f"Error in search for {category}: {str(e)}")
         category_state["status"] = "search_failed"
+        
+        # Track failed attempt
+        success_tracker.track_attempt(category, False)
+        
+        # Store success tracker in state for future use
+        state["category_success_tracker"] = success_tracker
+        
         return {"categories": categories}
 
 
@@ -610,10 +677,15 @@ async def _process_search_result(
                 
                 # Use the statistics analysis tool
                 statistics = await statistics_tool.ainvoke({
-                    "operation": "statistics",
+                    "operation": "synthesis",  
                     "text": content,
                     "url": url,
-                    "source_title": result.get("title", "")
+                    "source_title": result.get("title", ""),
+                    "synthesis": {  
+                        "content": content,
+                        "url": url,
+                        "title": result.get("title", "")
+                    }
                 }, config)
                 
                 if statistics:
@@ -622,11 +694,12 @@ async def _process_search_result(
                 warning_highlight(f"Error using statistics analysis tool: {str(stats_error)}")
                 # Fall back to the original statistics tool
                 info_highlight(f"Falling back to original statistics tool for {url}")
-                statistics = statistics_tool.run(
-                    text=content,
-                    url=url,
-                    source_title=result.get("title", "")
-                )
+                statistics = statistics_tool.run(tool_input={
+                    "operation": "statistics",  # Add required operation parameter
+                    "text": content,
+                    "url": url,
+                    "source_title": result.get("title", "")
+                })
         except Exception as e:
             logger.error(f"Error extracting statistics: {str(e)}")
             logger.exception(e)
@@ -665,6 +738,7 @@ async def _process_search_result(
     except Exception as e:
         warning_highlight(f"Error extracting from {url}: {str(e)}")
         return [], [], []
+
 
 async def extract_with_tool(
     content: str,
@@ -709,6 +783,7 @@ async def extract_with_tool(
     except Exception as e:
         warning_highlight(f"Error using extraction tool: {str(e)}")
         raise
+
 
 async def extract_category_facts(
         state: ResearchState,
@@ -774,17 +849,18 @@ async def extract_category_facts(
                     # Extract statistics using the statistics tool
                     try:
                         info_highlight(f"Extracting statistics for result {i+1}/{len(extraction_tasks)} in {category}")
-                        
-                        # Use the statistics analysis tool
+
+                        # Use the statistics extraction tool with the correct operation
                         stats_input = {
-                            "operation": "statistics",
+                            "operation": "statistics",  # Add required operation parameter
                             "text": result.get("snippet", ""),
                             "url": result.get("url", ""),
                             "source_title": result.get("title", "")
                         }
-                        
+
                         # Create a task to invoke the statistics tool
                         stats_result = await statistics_tool.ainvoke(stats_input, config)
+
                         if stats_result:
                             info_highlight(f"Extracted {len(stats_result)} statistics from result {i+1}")
                             all_statistics.extend(stats_result)
@@ -816,6 +892,24 @@ async def extract_category_facts(
         category_state["statistics"] = all_statistics
         category_state["status"] = "extracted" if all_facts else "extraction_failed"
         category_state["complete"] = True
+        
+        # Save results to cache if category processing is complete
+        if category_state.get("complete", False):
+            try:
+                cache_key = f"category_{state['original_query']}_{category}"
+                cache_data = {
+                    "search_results": category_state.get("search_results", []),
+                    "extracted_facts": category_state.get("extracted_facts", []),
+                    "sources": category_state.get("sources", [])
+                }
+                from react_agent.utils.cache import create_checkpoint
+                create_checkpoint(cache_key, cache_data, ttl=86400)  # Cache for 24 hours
+                info_highlight(f"Cached results for category: {category}")
+            except Exception as e:
+                error_highlight(f"Error caching results for {category}: {str(e)}")
+        
+        return {"categories": categories}
+
     except Exception as e:
         error_highlight(f"Error extracting facts for category {category}: {str(e)}")
         category_state["status"] = "extraction_failed"
@@ -866,11 +960,12 @@ async def extract_category_information(
                 extraction_result = await extraction_tool.ainvoke({
                     "operation": "category",
                     "text": content.content,
-                    "category": category,
                     "url": url,
+                    "source_title": getattr(content, "title", ""),
+                    "category": category,
                     "original_query": state.get("original_query", ""),
                     "extraction_model": state.get("extraction_model")
-                })
+                }, config=ensure_config(extraction_model))
                 
                 extracted_info = extraction_result.get("facts", [])
             else:
@@ -897,10 +992,15 @@ async def extract_category_information(
                 
                 # Use the statistics tool
                 stats_input = {
-                    "operation": "statistics",
+                    "operation": "synthesis",  
                     "text": content.content,
                     "url": url,
-                    "source_title": getattr(content, "title", "")
+                    "source_title": getattr(content, "title", ""),
+                    "synthesis": {  
+                        "content": content.content,
+                        "url": url,
+                        "title": getattr(content, "title", "")
+                    }
                 }
                 
                 # Extract statistics
@@ -932,6 +1032,9 @@ async def execute_research_for_categories(
 
     categories = state["categories"]
     research_tasks = []
+    
+    # Get or initialize category success tracker
+    success_tracker = getattr(state, "category_success_tracker", CategorySuccessTracker())
 
     # Track completed categories to avoid reprocessing
     completed_categories = set()
@@ -952,10 +1055,37 @@ async def execute_research_for_categories(
             category_state["complete"] = True
             completed_categories.add(category)
             continue
-            
+        
+        # Check if we should skip this category based on success rate
+        if success_tracker.should_skip_category(category, threshold=0.15):
+            warning_highlight(f"Skipping category {category} due to low success rate: {success_tracker.success_rates.get(category, 0):.2f}")
+            category_state["status"] = "skipped_low_success"
+            category_state["complete"] = True
+            completed_categories.add(category)
+            continue
+    
+    # Prioritize categories based on success rates
+    prioritized_categories = []
+    for category, category_state in categories.items():
+        if category not in completed_categories:
+            priority = success_tracker.get_category_priority(category)
+            prioritized_categories.append((category, priority))
+    
+    # Sort by priority (higher priority first)
+    prioritized_categories.sort(key=lambda x: x[1], reverse=True)
+    
+    if prioritized_categories:
+        priority_info = ", ".join([f"{cat}({pri})" for cat, pri in prioritized_categories])
+        info_highlight(f"Prioritized categories: {priority_info}")
+    
+    # Process categories in priority order
+    for category, priority in prioritized_categories:
+        category_state = categories[category]
+        
         # Create async task for this category
         async def process_category(cat: str) -> None:
-            search_result = await execute_category_search(state, cat, config)
+            # Start with fallback level 0
+            search_result = await execute_category_search(state, cat, fallback_level=0, config=config)
             
             # Only proceed if search was successful
             if cat not in search_result.get("categories", {}) or search_result["categories"][cat]["status"] != "searched":
@@ -976,36 +1106,123 @@ async def execute_research_for_categories(
                 error_highlight(f"Error processing category {cat}: {str(e)}")
                 # Fall back to the original method
                 await extract_category_facts(state, cat, config)
+            
+            # Save results to cache if category processing is complete
+            if cat in state["categories"] and state["categories"][cat].get("complete", False):
+                try:
+                    cache_key = f"category_{state['original_query']}_{cat}"
+                    cache_data = {
+                        "search_results": state["categories"][cat].get("search_results", []),
+                        "extracted_facts": state["categories"][cat].get("extracted_facts", []),
+                        "sources": state["categories"][cat].get("sources", [])
+                    }
+                    from react_agent.utils.cache import create_checkpoint
+                    create_checkpoint(cache_key, cache_data, ttl=86400)  # Cache for 24 hours
+                    info_highlight(f"Cached results for category: {cat}")
+                except Exception as e:
+                    error_highlight(f"Error caching results for {cat}: {str(e)}")
         
         task = asyncio.create_task(process_category(category))
         research_tasks.append(task)
 
-    # Wait for all research tasks to complete
-    if research_tasks:
-        await asyncio.gather(*research_tasks)
 
-    # Check if all categories are complete
-    all_complete = all(
-        category_state["complete"] for category_state in categories.values()
-    )
+async def _search_and_process(
+        state: ResearchState,
+        category: str,
+        results_queue: asyncio.Queue,
+        config: Optional[RunnableConfig] = None
+) -> None:
+    """Search for a category and process results as they arrive.
+    
+    This helper function executes the search for a specific category and
+    immediately processes the results, allowing for better parallelization
+    and resource utilization.
+    
+    Args:
+        state: The current research state
+        category: The category to search for
+        results_queue: Queue for processing results
+        config: Optional runnable configuration
+    """
+    try:
+        # Execute search with fallback support
+        search_result = await execute_category_search(state, category, fallback_level=0, config=config)
+        
+        # Check if search was successful
+        if (category not in search_result.get("categories", {}) or 
+                search_result["categories"][category]["status"] != "searched"):
+            warning_highlight(f"Search failed for category: {category}")
+            return
+            
+        # Get the search results
+        category_state = state["categories"][category]
+        search_results = category_state.get("search_results", [])
+        
+        if not search_results:
+            warning_highlight(f"No search results for category: {category}")
+            return
+            
+        # Process each result immediately
+        for result in search_results:
+            # Add to processing queue
+            await results_queue.put((category, result, state["original_query"]))
+            
+        # Process results and extract facts
+        if "tools" in state:
+            info_highlight(f"Using tools node for category: {category}")
+            await state["tools"].ainvoke({
+                "category": category,
+                "state": state
+            }, config)
+        else:
+            # Fall back to the original method
+            await extract_category_facts(state, category, config)
+            
+        # Mark category as complete
+        category_state["complete"] = True
+        
+        # Cache results
+        try:
+            cache_key = f"category_{state['original_query']}_{category}"
+            cache_data = {
+                "search_results": category_state.get("search_results", []),
+                "extracted_facts": category_state.get("extracted_facts", []),
+                "sources": category_state.get("sources", [])
+            }
+            create_checkpoint(cache_key, cache_data, ttl=86400)  # Cache for 24 hours
+            info_highlight(f"Cached results for category: {category}")
+        except Exception as e:
+            error_highlight(f"Error caching results for {category}: {str(e)}")
+            
+    except Exception as e:
+        error_highlight(f"Error in _search_and_process for {category}: {str(e)}")
 
-    if all_complete:
-        info_highlight("All categories research complete")
-        return {
-            "status": "researched",
-            "categories": categories
-        }
-    else:
-        # Some categories still incomplete
-        incomplete = [
-            category for category, category_state in categories.items()
-            if not category_state["complete"]
-        ]
-        info_highlight(f"Categories still incomplete: {', '.join(incomplete)}")
-        return {
-            "status": "research_incomplete",
-            "categories": categories
-        }
+
+async def process_results_queue(
+        state: ResearchState,
+        results_queue: asyncio.Queue,
+        config: Optional[RunnableConfig] = None
+) -> None:
+    """Process search results from the queue as they arrive.
+    
+    Args:
+        state: The current research state
+        results_queue: Queue containing search results to process
+        config: Optional runnable configuration
+    """
+    while True:
+        try:
+            # Get the next item from the queue
+            item = await results_queue.get()
+            
+            if item is None:  # End marker
+                break
+                
+            category, result, original_query = item
+            # Process the result (implementation would go here)
+            
+        except Exception as e:
+            error_highlight(f"Error processing result from queue: {str(e)}")
 
 
 # --------------------------------------------------------------------
@@ -1223,6 +1440,25 @@ def check_retry_or_continue(state: ResearchState) -> Hashable:
         return "synthesize_research"
 
 
+def choose_research_approach(state: ResearchState) -> Hashable:
+    """Determine which research approach to use based on query complexity.
+    
+    Args:
+        state: The current research state
+        
+    Returns:
+        Next node to execute
+    """
+    # Check if we have a complex query with multiple categories
+    categories = state["categories"]
+    active_categories = sum(1 for cat_state in categories.values() if not cat_state["complete"])
+    
+    # Use progressive approach for complex queries with multiple categories
+    if active_categories >= 3:
+        return "execute_progressive_research"
+    return "execute_research_for_categories"
+
+
 def validate_or_complete(state: ResearchState) -> Hashable:
     """Determine if we should validate the synthesis or finish."""
     validation_result = state.get("validation_result", {})
@@ -1334,8 +1570,8 @@ def create_research_graph() -> CompiledStateGraph:
         # Initialize category tool if needed
         global category_tool
         if category_tool is None:
-            category_tool = CategoryExtractionTool(extraction_model)
-            info_highlight("Initialized category extraction tool")
+            model_name = extraction_model or get_extraction_model()
+            category_tool = CategoryExtractionTool(extraction_model=model_name)
         
         # Initialize the extraction tool if needed
         global extraction_tool
@@ -1410,10 +1646,11 @@ def create_research_graph() -> CompiledStateGraph:
     # Add conditional branch for clarification from analyze_query
     graph.add_conditional_edges(
         "analyze_query",
-        should_request_clarification,
+        lambda state: "request_clarification" if state.get("needs_clarification", False) and not state.get("human_feedback") else "choose_research_approach",
         {
             "request_clarification": "request_clarification",
-            "execute_research_for_categories": "execute_research_for_categories"
+            "choose_research_approach": "choose_research_approach"
+            
         }
     )
 
@@ -1427,6 +1664,28 @@ def create_research_graph() -> CompiledStateGraph:
         {
             "handle_error": "handle_error",
             "continue": "check_retry"
+        }
+    )
+
+    # Add progressive research node
+    graph.add_node(
+        "execute_progressive_research",
+        execute_progressive_search
+    )
+
+    # Add node to choose research approach
+    graph.add_node(
+        "choose_research_approach",
+        lambda state: {"next_step": choose_research_approach(state)}
+    )
+    
+    # Connect to appropriate research method
+    graph.add_conditional_edges(
+        "choose_research_approach",
+        lambda state: state.get("next_step", "execute_research_for_categories"),
+        {
+            "execute_research_for_categories": "execute_research_for_categories",
+            "execute_progressive_research": "execute_progressive_research"
         }
     )
 
@@ -1444,6 +1703,12 @@ def create_research_graph() -> CompiledStateGraph:
             "execute_research_for_categories": "execute_research_for_categories",
             "synthesize_research": "synthesize_research"
         }
+    )
+
+    # Connect progressive research to check_retry
+    graph.add_edge(
+        "execute_progressive_research",
+        "check_retry"
     )
 
     # Synthesis and validation (keep validation for now)
@@ -1518,9 +1783,9 @@ async def add_statistics_to_research_state(
             if hasattr(state, "tools") and state.tools:
                 info_highlight(f"Using statistics analysis tool for extraction")
                 
-                # Use the statistics analysis tool
+                # Use the statistics analysis tool with the correct operation
                 analysis_result = await statistics_tool.ainvoke({
-                    "operation": "statistics",
+                    "operation": "statistics",  # Add required operation parameter
                     "text": content.content,
                     "url": url,
                     "source_title": source_title
@@ -1530,19 +1795,21 @@ async def add_statistics_to_research_state(
             else:
                 # Fall back to the original statistics tool
                 info_highlight(f"Using original statistics tool for extraction")
-                extracted_statistics = statistics_tool.run(
-                    text=content.content,
-                    url=url,
-                    source_title=source_title
-                )
+                extracted_statistics = statistics_tool.run(tool_input={
+                    "operation": "statistics",  # Add required operation parameter
+                    "text": content.content, 
+                    "url": url, 
+                    "source_title": source_title
+                })
         except Exception as tool_error:
             warning_highlight(f"Error using statistics analysis tool: {str(tool_error)}")
             # Fall back to the original statistics tool
-            extracted_statistics = statistics_tool.run(
-                text=content.content,
-                url=url,
-                source_title=source_title
-            )
+            extracted_statistics = statistics_tool.run(tool_input={
+                "operation": "statistics",  # Add required operation parameter
+                "text": content.content,
+                "url": url,
+                "source_title": source_title
+            })
         log_dict(logger, "Extracted statistics", extracted_statistics)
     except Exception as e:
         logger.error(f"Error extracting statistics: {str(e)}")
@@ -1618,31 +1885,3 @@ async def extract_category_info(
         logger.error(f"Error extracting category information: {str(e)}")
         logger.exception(e)
         return [], 0.0
-
-# Enhanced function to use ExtractionTool directly
-async def extract_with_tool(
-    content: str,
-    url: str,
-    title: str,
-    category: str,
-    original_query: str,
-    state: Annotated[Dict[str, Any], InjectedState] = None,
-    store: Annotated[BaseStore, InjectedStore] = None,
-    config: Optional[RunnableConfig] = None
-) -> Dict[str, Any]:
-    """Extract information using the ExtractionTool asynchronously."""
-    try:
-        # Use the async version of the extraction tool
-        result = await extraction_tool.ainvoke({
-            "operation": "category",
-            "text": content,
-            "url": url,
-            "source_title": title,
-            "category": category,
-            "original_query": original_query
-        }, config)
-        return result
-    except Exception as e:
-        warning_highlight(f"Error using extraction tool: {str(e)}")
-        # Return empty result
-        return {"facts": [], "relevance": 0.0}

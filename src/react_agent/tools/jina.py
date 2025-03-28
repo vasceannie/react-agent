@@ -527,18 +527,15 @@ async def reader(
         Dictionary containing parsed webpage content
     """
     # Create headers if needed
-    headers_dict = {}
-    if any(v is not None for v in [with_links_summary, with_images_summary, with_generated_alt, return_format, token_budget, no_cache]):
-        headers_dict = {
-            "x_with_links_summary": with_links_summary,
-            "x_with_images_summary": with_images_summary,
-            "x_with_generated_alt": with_generated_alt,
-            "x_return_format": return_format,
-            "x_token_budget": token_budget,
-            "x_no_cache": no_cache
-        }
-        # Remove None values
-        headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+    headers_dict = {
+        "x_with_links_summary": with_links_summary,
+        "x_with_images_summary": with_images_summary,
+        "x_with_generated_alt": with_generated_alt,
+        "x_return_format": return_format,
+        "x_token_budget": token_budget,
+        "x_no_cache": no_cache,
+    }
+    headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
 
     headers_model = ReaderHeaders(**headers_dict) if headers_dict else None
 
@@ -581,10 +578,7 @@ async def reader(
     if request.headers:
         for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
             if field_value is not None:
-                # Convert bool to string
-                if isinstance(field_value, bool):
-                    field_value = "true" if field_value else "false"
-                request_headers[field_name] = str(field_value)
+                request_headers[field_name] = str(field_value).lower()
 
     # Make the API request
     response = await _make_request_with_retry(
@@ -676,16 +670,13 @@ async def search(
         Dictionary containing search results
     """
     # Create headers if needed
-    headers_dict = {}
-    if any(v is not None for v in [site, with_links_summary, with_images_summary, no_cache]):
-        headers_dict = {
-            "x_site": site,
-            "x_with_links_summary": with_links_summary,
-            "x_with_images_summary": with_images_summary,
-            "x_no_cache": no_cache
-        }
-        # Remove None values
-        headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
+    headers_dict = {
+        "x_site": site,
+        "x_with_links_summary": with_links_summary,
+        "x_with_images_summary": with_images_summary,
+        "x_no_cache": no_cache,
+    }
+    headers_dict = {k: v for k, v in headers_dict.items() if v is not None}
 
     headers_model = SearchHeaders(**headers_dict) if headers_dict else None
 
@@ -728,10 +719,7 @@ async def search(
     if request.headers:
         for field_name, field_value in request.headers.model_dump(exclude_none=True, by_alias=True).items():
             if field_value is not None:
-                # Convert bool to string
-                if isinstance(field_value, bool):
-                    field_value = "true" if field_value else "false"
-                request_headers[field_name] = str(field_value)
+                request_headers[field_name] = str(field_value).lower()
 
     # Make the API request
     response = await _make_request_with_retry(

@@ -275,11 +275,12 @@ async def call_model(
         provider, model = configuration.model.split("/", 1)
 
         if provider == "openai":
-            formatted_messages = await _format_openai_messages(messages, configuration.system_prompt)
+            formatted_messages = await _format_openai_messages(cast(List[Message], messages), configuration.system_prompt)
             return await _call_openai_api(model, formatted_messages)
         elif provider == "anthropic":
             # Handle system prompt properly
-            has_system_message = any(msg["role"] == "system" for msg in messages)
+            typed_messages = cast(List[Message], messages)
+            has_system_message = any(msg["role"] == "system" for msg in typed_messages)
             
             formatted_messages = []
             # Add system message if not already present in messages
@@ -287,7 +288,7 @@ async def call_model(
                 formatted_messages.append(cast(ChatCompletionMessageParam, {"role": "system", "content": configuration.system_prompt}))
                 
             # Process all messages, preserving their roles correctly
-            for msg in messages:
+            for msg in typed_messages:
                 if msg["role"] in ["user", "assistant", "system"]:
                     formatted_messages.append(cast(ChatCompletionMessageParam, {
                         "role": msg["role"],

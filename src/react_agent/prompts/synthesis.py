@@ -15,7 +15,7 @@ from langchain_core.runnables import RunnableConfig
 
 from react_agent.utils.logging import get_logger, info_highlight, warning_highlight, error_highlight
 from react_agent.utils.llm import call_model_json
-from react_agent.utils.extraction import extract_statistics
+from react_agent.tools import StatisticsExtractionTool
 from react_agent.utils.defaults import get_default_extraction_result
 from react_agent.utils.cache import ProcessorCache, create_checkpoint, load_checkpoint
 from langgraph.graph import StateGraph
@@ -29,6 +29,9 @@ synthesis_cache = ProcessorCache(thread_id="synthesis")
 
 # Initialize memory saver for caching
 memory_saver = MemorySaver()
+
+# Initialize tools
+statistics_tool = StatisticsExtractionTool()
 
 # Enhanced synthesis prompt template
 ENHANCED_SYNTHESIS_PROMPT = """Create a comprehensive synthesis of research findings for: {query}
@@ -294,8 +297,12 @@ async def synthesize_research(
                 if "statistics" in fact:
                     statistics.extend(fact["statistics"])
                 elif "source_text" in fact:
-                    # Extract statistics from source text
-                    extracted_stats = extract_statistics(fact["source_text"])
+                    # Extract statistics from source text using the tool
+                    extracted_stats = statistics_tool.run(
+                        text=fact["source_text"],
+                        url=fact.get("source_url", ""),
+                        source_title=fact.get("source_title", "")
+                    )
                     statistics.extend(extracted_stats)
             
             research_data[category] = {

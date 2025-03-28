@@ -1,4 +1,4 @@
-"""Jina Tools - Production-Ready Implementation
+"""Jina Tools - Production-Ready Implementation.
 
 Get your Jina AI API key for free: https://jina.ai/?sui=apikey
 
@@ -116,8 +116,8 @@ async def _make_request_with_retry(
     method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"],
     url: str,
     headers: Dict[str, str],
-    json_data: Optional[Dict[str, Any]] = None,
-    retry_config: Optional[RetryConfig] = None,
+    json_data: Dict[str, Any] | None = None,
+    retry_config: RetryConfig | None = None,
 ) -> ApiResponse:
     """Make an HTTP request with basic exponential backoff retries.
 

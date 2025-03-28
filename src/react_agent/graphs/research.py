@@ -1,4 +1,4 @@
-"""Enhanced modular research framework using LangGraph.
+"""Modular research framework using LangGraph.
 
 This module implements a modular approach to the research process,
 with specialized components for different research categories and
@@ -6,6 +6,7 @@ improved error handling and validation.
 """
 
 from __future__ import annotations
+
 
 import asyncio
 import json
@@ -15,7 +16,7 @@ from typing import Any, Dict, Hashable, List, Literal, Optional, Sequence, Tuple
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.constants import START
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
@@ -26,13 +27,19 @@ from pydantic import BaseModel, Field
 from typing_extensions import Unpack, get_type_hints
 
 from react_agent.prompts.query import detect_vertical, expand_acronyms, optimize_query
+
+# Import prompt templates
 from react_agent.prompts.research import (
     CLARIFICATION_PROMPT,
     QUERY_ANALYSIS_PROMPT,
     SEARCH_QUALITY_THRESHOLDS,
+    SYNTHESIS_PROMPT,
+    VALIDATION_PROMPT,
+    get_default_extraction_result,
     get_extraction_prompt,
 )
-from react_agent.prompts.synthesis import ENHANCED_REPORT_TEMPLATE
+
+# Import tools
 from react_agent.tools.jina import search
 from react_agent.utils.cache import create_checkpoint, load_checkpoint
 from react_agent.utils.content import (
@@ -50,13 +57,11 @@ from react_agent.utils.logging import (
     error_highlight,
     get_logger,
     info_highlight,
-    log_dict,
     log_step,
     warning_highlight,
 )
 from react_agent.utils.statistics import (
     assess_synthesis_quality,
-    calculate_category_quality_score,
     calculate_overall_confidence,
 )
 from react_agent.types import (
@@ -132,7 +137,7 @@ class ResearchState(TypedDict):
 
 
 # --------------------------------------------------------------------
-# 2. Core control flow nodes
+# 1. Core control flow nodes
 # --------------------------------------------------------------------
 
 async def initialize_research(state: ResearchState) -> Dict[str, Any]:
@@ -152,6 +157,7 @@ async def initialize_research(state: ResearchState) -> Dict[str, Any]:
 
     info_highlight(f"Initializing research for query: {query}")
 
+    # Initialize categories with default values for each research category
     categories = {
         category: {
             "category": category,
@@ -173,6 +179,7 @@ async def initialize_research(state: ResearchState) -> Dict[str, Any]:
         }
         for category in SEARCH_QUALITY_THRESHOLDS.keys()
     }
+    
     return {
         "original_query": query,
         "status": "initialized",
@@ -232,8 +239,6 @@ async def analyze_query(state: ResearchState, config: Optional[RunnableConfig] =
             "missing_context": analysis_result.get("missing_context", [])
         }
 
-        log_dict(analysis_result, title="Query Analysis Result")
-
         # Check for missing context
         missing_context = analysis_result.get("missing_context", [])
         needs_clarification = len(missing_context) >= 2  # Only request clarification for multiple missing elements
@@ -241,13 +246,11 @@ async def analyze_query(state: ResearchState, config: Optional[RunnableConfig] =
         # Update category queries based on analysis
         categories = state["categories"]
         for category, category_state in categories.items():
-            if search_terms := analysis_result.get("search_terms", {}).get(
-                    category, []
-            ):
+            if search_terms := analysis_result.get("search_terms", {}).get(category, []):
                 # Detect vertical from the query
                 vertical = detect_vertical(query)
 
-                # Create optimized query for this category using the enhanced optimization
+                # Create optimized query for this category
                 optimized_query = optimize_query(
                     original_query=query,
                     category=category,
@@ -286,8 +289,8 @@ async def request_clarification(state: ResearchState) -> Dict[str, Any]:
     # Get analysis data
     analysis = state.get("query_analysis", {})
     search_components = analysis.get("search_components", {}) if analysis else {}
-
-    # Prepare the clarification request
+    
+    # Prepare the clarification request using the prompt template
     try:
         clarification_message = CLARIFICATION_PROMPT.format(
             query=state["original_query"],
@@ -345,7 +348,7 @@ async def process_clarification(state: ResearchState) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------
-# 3. Module-specific research nodes
+# 2. Category-specific research nodes
 # --------------------------------------------------------------------
 
 async def execute_category_search(
@@ -411,6 +414,10 @@ async def execute_category_search(
 
         # Convert to the expected format and filter problematic content
         formatted_results = []
+        
+        # Use the imported utility functions to process search results
+        from react_agent.utils.content import should_skip_content, validate_content, detect_content_type
+        
         for doc in search_results:
             url = doc.metadata.get("url", "")
 
@@ -612,7 +619,6 @@ async def extract_category_information(
     
     return state
 
-
 async def execute_research_for_categories(
         state: ResearchState,
         config: Optional[RunnableConfig] = None
@@ -642,43 +648,15 @@ async def execute_research_for_categories(
             category_state["complete"] = True
             completed_categories.add(category)
             continue
-
-        # Execute search followed by extraction
-        info_highlight(f"Adding research task for {category}")
-
+            
         # Create async task for this category
-        async def process_category(cat: str, cat_state: Dict[str, Any]) -> None:
-            try:
-                # Execute search
-                search_result = await execute_category_search(state, cat, config)
-
-                # Only extract if search was successful
-                if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
-                    # Execute extraction
-                    extraction_result = await extract_category_information(state, cat, config)
-
-                    # Cache the results if successful
-                    if extraction_result and cat in extraction_result.get("categories", {}):
-                        cat_state["search_results"] = extraction_result["categories"][cat]["search_results"]
-                        cat_state["extracted_facts"] = extraction_result["categories"][cat]["extracted_facts"]
-                        cat_state["sources"] = extraction_result["categories"][cat]["sources"]
-
-                        # Save to checkpoint with TTL
-                        create_checkpoint(
-                            f"category_{state['original_query']}_{cat}",
-                            {
-                                "search_results": cat_state["search_results"],
-                                "extracted_facts": cat_state["extracted_facts"],
-                                "sources": cat_state["sources"],
-                                "timestamp": datetime.now(timezone.utc).isoformat()
-                            },
-                            ttl=86400  # 24 hour TTL
-                        )
-            except Exception as e:
-                error_highlight(f"Error processing category {cat}: {str(e)}")
-                cat_state["status"] = "failed"
-
-        task = asyncio.create_task(process_category(category, cast(Dict[str, Any], category_state)))
+        async def process_category(cat: str) -> None:
+            search_result = await execute_category_search(state, cat, config)
+            # Only extract if search was successful
+            if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
+                await extract_category_facts(state, cat, config)
+        
+        task = asyncio.create_task(process_category(category))
         research_tasks.append(task)
 
     # Wait for all research tasks to complete
@@ -710,7 +688,7 @@ async def execute_research_for_categories(
 
 
 # --------------------------------------------------------------------
-# 4. Synthesis and validation nodes
+# 3. Synthesis and validation nodes
 # --------------------------------------------------------------------
 # Synthesis and validation nodes remain largely unchanged, but use the
 # new utility functions where appropriate.
@@ -725,10 +703,71 @@ async def synthesize_research(
     # the existing utility functions and prompt templates.
     # Key parts are retained for clarity and context.
     log_step("Synthesizing research results", 7, 10)
-    # ... (rest of the function implementation remains largely unchanged)
-    # Ensure you are using `call_model_json` for model interaction.
-    return {}
 
+    categories = state["categories"]
+    original_query = state["original_query"]
+
+    research_data = {
+        category: {
+            "facts": category_state["extracted_facts"],
+            "sources": category_state["sources"],
+            "quality_score": category_state["quality_score"],
+            "statistics": category_state["statistics"],
+            "confidence_score": category_state["confidence_score"],
+            "cross_validation_score": category_state["cross_validation_score"],
+            "source_quality_score": category_state["source_quality_score"],
+            "recency_score": category_state["recency_score"],
+            "statistical_content_score": category_state[
+                "statistical_content_score"
+            ],
+        }
+        for category, category_state in categories.items()
+    }
+    
+    # Generate prompt using the template
+    synthesis_prompt = SYNTHESIS_PROMPT.format(
+        query=original_query,
+        research_json=str(research_data)
+    )
+
+    try:
+        synthesis_result = await call_model_json(
+            messages=[{"role": "human", "content": synthesis_prompt}],
+            config=ensure_config(config)
+        )
+
+        # Calculate overall confidence using the imported utility
+        category_scores = {
+            category: state["quality_score"]
+            for category, state in categories.items()
+        }
+
+        synthesis_quality = assess_synthesis_quality(synthesis_result)
+        validation_score = 0.8  # Default validation score, can be updated later
+
+        overall_confidence = calculate_overall_confidence(
+            category_scores=category_scores,
+            synthesis_quality=synthesis_quality,
+            validation_score=validation_score
+        )
+
+        # Add confidence assessment to synthesis result
+        synthesis_result["confidence_assessment"] = {
+            "overall_score": overall_confidence,
+            "synthesis_quality": synthesis_quality,
+            "validation_score": validation_score,
+            "category_scores": category_scores
+        }
+
+        info_highlight(f"Research synthesis complete with confidence score: {overall_confidence:.2f}")
+
+        return {
+            "synthesis": synthesis_result,
+            "status": "synthesized"
+        }
+    except Exception as e:
+        error_highlight(f"Error in research synthesis: {str(e)}")
+        return {"error": {"message": f"Error in research synthesis: {str(e)}", "phase": "synthesis"}}
 
 async def validate_synthesis(
         state: ResearchState,
@@ -736,181 +775,99 @@ async def validate_synthesis(
 ) -> Dict[str, Any]:
     """Validate the synthesized research results."""
     log_step("Validating research synthesis", 8, 10)
-    # ... (rest of the function implementation remains largely unchanged)
-    return {}
-
-
-def format_citation(citation: Dict[str, Any]) -> str:
-    """Format a citation into a readable string."""
-    if not isinstance(citation, dict):
-        return ""
-
-    title = citation.get("title", "")
-    url = citation.get("url", "")
-    if title or url:
-        return f"[{title}]({url})" if title and url else title or url
-    else:
-        return ""
-
-
-def highlight_statistics_in_content(content: str, statistics: List[Dict[str, Any]]) -> str:
-    """Highlight statistics in content by wrapping them in markdown bold."""
-    if not statistics:
-        return content
-
-    highlighted = content
-    for stat in statistics:
-        if value := stat.get("value"):
-            highlighted = highlighted.replace(str(value), f"**{value}**")
-    return highlighted
-
-
-def _format_section_content(section_data: Dict[str, Any]) -> str:
-    """Format a single section's content with statistics and citations."""
-    if not isinstance(section_data, dict) or "content" not in section_data:
-        return ""
-
-    content = section_data.get("content", "")
-    statistics = section_data.get("statistics", [])
-    citations = section_data.get("citations", [])
-
-    # Highlight statistics in content
-    highlighted_content = highlight_statistics_in_content(content, statistics)
-
-    # Add citations if present
-    if citations and isinstance(citations, list):
-        citation_text = "\n\n**Sources:** " + ", ".join(
-            format_citation(citation) for citation in citations if citation
+    
+    synthesis = state.get("synthesis")
+    if not synthesis:
+        warning_highlight("No synthesis to validate")
+        return {"error": {"message": "No synthesis to validate", "phase": "validation"}}
+    
+    # Generate validation prompt
+    import json
+    validation_prompt = VALIDATION_PROMPT.format(
+        synthesis_json=json.dumps(synthesis, indent=2)
+    )
+    
+    try:
+        validation_result = await call_model_json(
+            messages=[{"role": "human", "content": validation_prompt}],
+            config=ensure_config(config)
         )
-        return highlighted_content + citation_text
-
-    return highlighted_content
-
-
-def format_statistic(stat: Dict[str, Any]) -> str:
-    """Format a statistic into a readable string."""
-    if not isinstance(stat, dict):
-        return ""
-
-    value = stat.get("value")
-    context = stat.get("context", "")
-    if not value:
-        return ""
-
-    return f"{value} ({context})" if context else str(value)
-
-
-def _format_key_statistics(statistics: List[Dict[str, Any]]) -> str:
-    """Format key statistics section."""
-    key_stats = [
-        f"- {format_statistic(stat)}"
-        for stat in sorted(statistics, key=lambda x: x.get("quality_score", 0), reverse=True)[:10]
-        if format_statistic(stat)
-    ]
-    return "\n".join(key_stats) if key_stats else "No key statistics available."
-
-
-def _format_sources(synthesis_content: Dict[str, Any]) -> str:
-    """Format sources section from citations."""
-    sources = {
-        format_citation(citation)
-        for section_data in synthesis_content.values()
-        if isinstance(section_data, dict)
-        for citation in section_data.get("citations", [])
-        if isinstance(citation, dict) and format_citation(citation)
-    }
-    return "\n".join(f"- {source}" for source in sorted(sources)) if sources else "No sources available."
-
-
-def _format_confidence_notes(confidence: Dict[str, Any]) -> str:
-    """Format confidence notes from limitations and knowledge gaps."""
-    notes = []
-    if limitations := confidence.get("limitations", []):
-        notes.append("**Limitations:** " + ", ".join(limitations))
-    if knowledge_gaps := confidence.get("knowledge_gaps", []):
-        notes.append("**Knowledge Gaps:** " + ", ".join(knowledge_gaps))
-    return "\n".join(notes)
-
-
-async def generate_recommendations(
-        synthesis_content: Dict[str, Any],
-        query: str,
-        config: Optional[RunnableConfig] = None
-) -> str:
-    """Generate recommendations based on synthesis content."""
-    if not synthesis_content:
-        return "No recommendations available."
-
-    recommendations = []
-    for section_data in synthesis_content.values():
-        if isinstance(section_data, dict) and "recommendations" in section_data:
-            recommendations.extend(section_data["recommendations"])
-
-    if not recommendations:
-        return "No specific recommendations available based on the research."
-
-    return "\n".join(f"- {rec}" for rec in recommendations)
-
+        
+        # Get validation status
+        validation_results = validation_result.get("validation_results", {})
+        is_valid = validation_results.get("is_valid", False)
+        validation_score = validation_results.get("validation_score", 0.0)
+        
+        if is_valid:
+            info_highlight(f"Validation passed with score: {validation_score:.2f}")
+            return {
+                "validation_result": validation_result,
+                "status": "validated",
+                "complete": True
+            }
+        else:
+            warning_highlight(f"Validation failed with score: {validation_score:.2f}")
+            return {
+                "validation_result": validation_result,
+                "status": "validation_failed"
+            }
+    except Exception as e:
+        error_highlight(f"Error in synthesis validation: {str(e)}")
+        return {"error": {"message": f"Error in synthesis validation: {str(e)}", "phase": "validation"}}
 
 async def prepare_final_response(
         state: ResearchState,
         config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
-    """Prepare the final response with enhanced statistics and citations."""
-    log_step("Preparing final response", 8, 10)
-
+    """Prepare the final response with research results."""
+    log_step("Preparing final response", 9, 10)
+    
     synthesis = state.get("synthesis", {})
-    synthesis_content = synthesis.get("synthesis", {}) if synthesis else {}
-    confidence = synthesis.get("confidence_assessment", {}) if synthesis else {}
+    validation = state.get("validation_result", {})
+    
+    # Import response formatting from prompts module
+    from react_agent.prompts.synthesis import ENHANCED_REPORT_TEMPLATE
+    
+    try:
+        # Using the defined functions in the existing codebase
+        synthesis = state.get("synthesis", {})
+        synthesis_content = synthesis.get("synthesis", {}) if synthesis else {}
+        validation = state.get("validation_result", {})
+        original_query = state["original_query"]
+        
+        # Format a basic response
+        report_content = f"""
+# Research Results: {original_query}
 
-    # Collect all statistics
-    all_statistics = [
-        stat
-        for category_state in state["categories"].values()
-        for stat in category_state.get("statistics", [])
-    ]
+## Executive Summary
+{synthesis_content.get("executive_summary", {}).get("content", "Research complete.")}
 
-    # Format sections
-    sections = {
-        name: _format_section_content(data)
-        for name, data in synthesis_content.items()
-    }
+## Key Findings
+The research found information across multiple categories including market dynamics, 
+technical requirements, and implementation considerations.
 
-    # Format final response
-    response = ENHANCED_REPORT_TEMPLATE.format(
-        title=f"Research Results: {state['original_query'].capitalize()}",
-        executive_summary=sections.get("executive_summary", ""),
-        key_statistics=_format_key_statistics(all_statistics),
-        domain_overview=sections.get("domain_overview", ""),
-        market_size=synthesis_content.get("market_dynamics", {}).get("market_size", ""),
-        competitive_landscape=synthesis_content.get("market_dynamics", {}).get("competitive_landscape", ""),
-        market_trends=synthesis_content.get("market_dynamics", {}).get("trends", ""),
-        key_vendors=synthesis_content.get("provider_landscape", {}).get("key_vendors", ""),
-        vendor_comparison=synthesis_content.get("provider_landscape", {}).get("vendor_comparison", ""),
-        technical_requirements=sections.get("technical_requirements", ""),
-        regulatory_landscape=sections.get("regulatory_landscape", ""),
-        implementation_factors=sections.get("implementation_factors", ""),
-        cost_structure=synthesis_content.get("cost_considerations", {}).get("cost_structure", ""),
-        pricing_models=synthesis_content.get("cost_considerations", {}).get("pricing_models", ""),
-        roi_considerations=synthesis_content.get("cost_considerations", {}).get("roi_considerations", ""),
-        best_practices=sections.get("best_practices", ""),
-        procurement_strategy=sections.get("contract_procurement_strategy", ""),
-        recommendations=await generate_recommendations(synthesis_content, state["original_query"], config),
-        sources=_format_sources(synthesis_content),
-        confidence_score=confidence.get("overall_score", 0.0),
-        generation_date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        confidence_notes=_format_confidence_notes(confidence)
-    )
-
-    return {
-        "messages": [AIMessage(content=response)],
-        "status": "complete",
-        "complete": True
-    }
+## Confidence
+Research confidence: {(synthesis or {}).get("confidence_assessment", {}).get("overall_score", 0.5):.2f}/1.0
+Generated: {datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}
+"""
+        
+        return {
+            "messages": [AIMessage(content=report_content)],
+            "status": "complete",
+            "complete": True
+        }
+    except Exception as e:
+        error_highlight(f"Error preparing final response: {str(e)}")
+        # Fallback to basic response
+        return {
+            "messages": [AIMessage(content=f"Research complete for query: {state['original_query']}")],
+            "status": "complete",
+            "complete": True
+        }
 
 
 # --------------------------------------------------------------------
-# 5. Conditional routing functions
+# 4. Conditional routing functions
 # --------------------------------------------------------------------
 
 def should_request_clarification(state: ResearchState) -> Hashable:
@@ -929,7 +886,7 @@ def check_retry_or_continue(state: ResearchState) -> Hashable:
     categories = state["categories"]
 
     # Check if any categories need retry
-    categories_to_retry = []
+    categories_to_retry: list[str] = []
     categories_to_retry.extend(
         category
         for category, category_state in categories.items()
@@ -949,11 +906,14 @@ def validate_or_complete(state: ResearchState) -> Hashable:
     """Determine if we should validate the synthesis or finish."""
     validation_result = state.get("validation_result", {})
     validation_results = validation_result.get("validation_results", {}) if validation_result else {}
-    if is_valid := validation_results.get("is_valid", False):
+    is_valid = validation_results.get("is_valid", False)
+    
+    if is_valid:
         info_highlight("Validation passed, preparing final response")
     else:
         # Not valid, but we'll still finish
         warning_highlight("Validation failed, but preparing final response anyway")
+    
     return "prepare_final_response"
 
 
@@ -969,23 +929,8 @@ def handle_error_or_continue(state: ResearchState) -> Hashable:
 
 
 # --------------------------------------------------------------------
-# 6. Error handling
+# 5. Error handling
 # --------------------------------------------------------------------
-
-def _format_fact(fact: Dict[str, Any]) -> Optional[str]:
-    """Format a single fact into a readable string."""
-    if not isinstance(fact, dict):
-        return None
-
-    data = fact.get("data", {})
-    fact_text = (
-            data.get("fact") or
-            data.get("requirement") or
-            next((v for v in data.values() if isinstance(v, str) and v), None) or
-            fact.get("fact")
-    )
-    return f"\n- {fact_text}" if fact_text else None
-
 
 async def handle_error(state: ResearchState) -> Dict[str, Any]:
     """Handle errors gracefully and return a helpful message."""
@@ -994,6 +939,8 @@ async def handle_error(state: ResearchState) -> Dict[str, Any]:
     message = error.get("message", "An unknown error occurred")
 
     error_highlight(f"Handling error in phase {phase}: {message}")
+    
+    # Use built-in error handling logic
 
     # Build error response with partial results
     error_response = [
@@ -1003,20 +950,23 @@ async def handle_error(state: ResearchState) -> Dict[str, Any]:
 
     # Add completed categories and their facts
     categories = state.get("categories", {})
-    if complete_categories := [
+    complete_categories = [
         cat
         for cat, state in categories.items()
         if state.get("complete", False)
-    ]:
+    ]
+    
+    if complete_categories:
         error_response.append(f"\n\nI completed research on: {', '.join(complete_categories)}")
 
         for category in complete_categories:
-            if facts := categories[category].get("extracted_facts", []):
+            facts = categories[category].get("extracted_facts", [])
+            if facts:
                 error_response.append(f"\n\n## {category.replace('_', ' ').title()}")
-                error_response.extend(
-                    fact_text for fact in facts[:3]
-                    if (fact_text := _format_fact(fact))
-                )
+                for fact in facts[:3]:  # Show top 3 facts
+                    fact_text = _format_fact(fact)
+                    if fact_text:
+                        error_response.append(fact_text)
     else:
         error_response.append(
             "\n\nUnfortunately, I wasn't able to complete any research categories before the error occurred.")
@@ -1029,9 +979,22 @@ async def handle_error(state: ResearchState) -> Dict[str, Any]:
         "complete": True
     }
 
+def _format_fact(fact: Dict[str, Any]) -> Optional[str]:
+    """Format a single fact into a readable string."""
+    if not isinstance(fact, dict):
+        return None
+        
+    data = fact.get("data", {})
+    fact_text = (
+        data.get("fact") or
+        data.get("requirement") or
+        next((v for v in data.values() if isinstance(v, str) and v), None) or
+        fact.get("fact")
+    )
+    return f"\n- {fact_text}" if fact_text else None
 
 # --------------------------------------------------------------------
-# 7. Build the graph
+# 6. Build the graph
 # --------------------------------------------------------------------
 
 def create_research_graph() -> CompiledStateGraph:

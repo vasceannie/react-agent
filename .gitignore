@@ -3,7 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 uv.lock
-
+.DS_Store
+DS_Store
 # C extensions
 *.so
 

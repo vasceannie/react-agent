@@ -56,10 +56,13 @@ HIGH_CREDIBILITY_TERMS = [
     'statistics', 'data', 'findings', 'results', 'evidence'
 ]
 
-
-def calculate_quantity_score(extracted_facts: List[Dict[str, Any]], sources: List[Dict[str, Any]], 
-                             min_facts: int, min_sources: int) -> float:
-    """Calculate the score component based on the quantity of facts and sources.
+def calculate_enhanced_category_quality_score(
+    category: str,
+    extracted_facts: List[Dict[str, Any]],
+    sources: List[Dict[str, Any]],
+    thresholds: Dict[str, Any]
+) -> float:
+    """Calculate enhanced quality score for a category based on extracted data.
     
     Args:
         extracted_facts: A list of fact dictionaries
@@ -365,21 +368,9 @@ def assess_fact_consistency(facts: List[Dict[str, Any]]) -> float:
 
 
 def extract_topics_from_facts(facts: List[Dict[str, Any]]) -> List[str]:
-    """Extract key topics or entities from a list of facts.
-
-    This function aggregates topics from individual facts and returns a combined list.
-
-    Args:
-        facts (List[Dict[str, Any]]): A list of fact dictionaries.
-
-    Returns:
-        List[str]: A list of topics extracted from the facts.
-
-    Examples:
-        >>> topics = extract_topics_from_facts(extracted_facts)
-        >>> print(topics)
-    """
-    all_topics: List[str] = []
+    """Extract key topics/entities from facts."""
+    all_topics: list[str] = []
+    
     for fact in facts:
         fact_topics = get_topics_in_fact(fact)
         all_topics.extend(fact_topics)

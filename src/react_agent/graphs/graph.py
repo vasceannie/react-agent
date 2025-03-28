@@ -12,7 +12,7 @@ from langchain_core.prompt_values import PromptValue
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.base import Runnable
 from langgraph.graph import StateGraph
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolNode
 
 from react_agent.configuration import Configuration
 from react_agent.state import InputState, State

@@ -71,7 +71,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Union, cast
+from typing import Any, Dict, List, Literal, Optional, Union, cast, TypedDict
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam

@@ -30,9 +30,9 @@ class ExtractCategoryInfoInput(BaseModel):
 
 # Tool implementations
 class StatisticsExtractionTool(BaseTool):
-    name = "statistics_extractor"
-    description = "Extract statistics and numerical data from text with metadata"
-    args_schema = ExtractStatisticsInput
+    name: str = "statistics_extractor"
+    description: str = "Extract statistics and numerical data from text with metadata"
+    args_schema: type[ExtractStatisticsInput] = ExtractStatisticsInput
     
     def _run(self, text: str, url: str = "", source_title: str = "") -> List[Dict[str, Any]]:
         """Extract statistics from text synchronously."""
@@ -43,8 +43,8 @@ class StatisticsExtractionTool(BaseTool):
         return extract_statistics(text, url, source_title)
 
 class CitationExtractionTool(BaseTool):
-    name = "citation_extractor"
-    description = "Extract citation information from text"
+    name: str = "citation_extractor"
+    description: str = "Extract citation information from text"
     
     def _run(self, text: str) -> List[Dict[str, str]]:
         """Extract citations from text synchronously."""
@@ -55,9 +55,9 @@ class CitationExtractionTool(BaseTool):
         return extract_citations(text)
 
 class CategoryExtractionTool(BaseTool):
-    name = "category_information_extractor"
-    description = "Extract category-specific information from content with enhanced statistical focus"
-    args_schema = ExtractCategoryInfoInput
+    name: str = "category_information_extractor"
+    description: str = "Extract category-specific information from content with enhanced statistical focus"
+    args_schema: type[ExtractCategoryInfoInput] = ExtractCategoryInfoInput
     
     def __init__(self, extraction_model, default_prompt_template: str):
         """Initialize the category extraction tool."""

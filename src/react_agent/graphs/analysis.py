@@ -6,17 +6,28 @@ Works with a chat model to perform structured data analysis tasks.
 import contextlib
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, cast, TypedDict, Annotated, Callable, Union, Coroutine
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Optional,
+    TypedDict,
+    Union,
+    cast,
+)
 
-from langgraph.graph.state import CompiledStateGraph
+import numpy as np
 import pandas as pd
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from openai import AsyncClient
 from pydantic import BaseModel, Field
-import numpy as np
-from langchain_core.runnables import RunnableConfig
 
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
 from react_agent.utils.llm import call_model_json
 
 # Sample prompts (assuming these are imported from somewhere else)

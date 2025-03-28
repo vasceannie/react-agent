@@ -37,7 +37,14 @@ from urllib.parse import unquote, urlparse
 
 import nltk.data  # type: ignore[import]
 import requests  # type: ignore[import]
-from docling.document_converter import DocumentConverter  # type: ignore[import]
+
+# Check if Docling is available
+DOCLING_AVAILABLE = True
+try:
+    from docling.document_converter import DocumentConverter  # type: ignore[import]
+    DOCLING_AVAILABLE = True
+except ImportError:
+    DOCLING_AVAILABLE = False
 
 from react_agent.utils.cache import ProcessorCache
 from react_agent.utils.defaults import (
@@ -664,7 +671,7 @@ def detect_content_type(url: str, content: str) -> str:
         content_based = strategy_data["content_based"]
 
         try:
-            if result := strategy(content if content_based else url):
+            if callable(strategy) and (result := strategy(content if content_based else url)):
                 info_highlight(f"Detected content type: {result}", category="content_type")
                 return result
         except TypeError:

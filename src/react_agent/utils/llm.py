@@ -476,212 +476,284 @@ async def _call_model_json(
         return {}
     return merge_chunk_results(chunk_results, "model_response")
 
-def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-    r"""Parse and clean JSON response from the LLM.
-
+async def call_model_json(
+    messages: List[Message],
+    config: RunnableConfig | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
+) -> Dict[str, Any]:
+    """Call the LLM and parse the response as JSON.
+    
     Args:
-        response: Raw LLM response (string or dictionary).
-
-    Returns:
-        Parsed JSON as a dictionary or an empty dictionary on failure.
-
-    Examples:
-        >>> _parse_json_response('```json\n{"key": "value"}\n```')
-        {'key': 'value'}
+        messages: A list of messages to send to the LLM.
+        config: Configuration for the model run.
+        chunk_size: Maximum size of text chunks if chunking is needed.
+        overlap: Overlap between chunks if chunking is needed.
         
-        >>> _parse_json_response({"key": "value"})
-        {'key': 'value'}
+    Returns:
+        Parsed JSON response as a dictionary.
     """
+    return await _call_model_json(messages, config, chunk_size, overlap)
+
+def _parse_json_response(response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse a JSON response from a string or dictionary."""
     if isinstance(response, dict):
         return response
-    try:
-        cleaned: str = re.sub(r"```json\s*|\s*```", "", response)
-        return json.loads(cleaned)
-    except Exception:
-        return {}
+    
+    # Try to parse JSON string
+    if isinstance(response, str):
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response: {e}")
+            # Attempt to extract JSON from markdown codeblocks
+            json_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
+            if match := re.search(json_block_pattern, response):
+                try:
+                    extracted_json = match.group(1).strip()
+                    return json.loads(extracted_json)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse JSON from codeblock")
+    
+    # Return empty dict if all parsing attempts fail
+    return {}
+
 
 class LLMClient:
-    """Asynchronous LLM utility for chat, JSON output, and embeddings.
-
-    Provides a unified interface for model calls with:
-    - Automatic retries and error handling.
-    - Content chunking for large inputs.
-    - Structured JSON output generation.
-    - Embedding generation with caching.
-
+    """A client for interacting with language models.
+    
+    This client provides a high-level interface for:
+    - Chat completions
+    - JSON structured outputs
+    - Embeddings
+    
+    It handles provider selection, caching, chunking, and error handling automatically.
+    
     Attributes:
-        default_model: The default model to use if not specified per-call.
-
+        default_model: The default model to use if not specified in the configuration.
+        
     Examples:
-        Basic initialization:
-        >>> client = LLMClient()
-
-        With default model:
+        Basic usage:
         >>> client = LLMClient(default_model="openai/gpt-4")
-
-        Making calls:
-        >>> response = await client.llm_chat("Hello world")
-        >>> json_data = await client.llm_json("Extract entities from...")
-        >>> embedding = await client.llm_embed("text to embed")
-
-    Note:
-        The client handles:
-        - Rate limiting.
-        - Token counting.
-        - Automatic chunking.
-        - Error recovery.
+        >>> response = await client.llm_chat("What's the weather?")
+        >>> print(response)
+        
+        JSON output:
+        >>> data = await client.llm_json(
+        ...     prompt="Extract entities from this text",
+        ...     system_prompt="You are an entity extractor"
+        ... )
+        >>> entities = data.get("entities", [])
     """
+    
     def __init__(self, default_model: str | None = None) -> None:
-        """Initialize the LLMClient with an optional default model.
-
+        """Initialize the LLM client.
+        
         Args:
-            default_model: The default model to use for LLM calls.
-                If None, the model must be specified in each call.
+            default_model: Default model to use if not specified in the configuration.
+                Format should be "provider/model" (e.g., "openai/gpt-4").
         """
-        self.default_model: str | None = default_model
-
+        self.default_model = default_model or os.getenv("DEFAULT_LLM", "openai/gpt-4")
+    
     async def llm_chat(
         self,
         prompt: str,
         system_prompt: str | None = None,
+        chat_history: List[Dict[str, str]] | None = None,
         **kwargs: Any
     ) -> str:
-        """Get a chat completion as plain text.
-
+        """Generate a chat response from the LLM.
+        
         Args:
-            prompt: The user prompt.
-            system_prompt: Optional system instruction.
-            **kwargs: Additional parameters to configure the model call.
-
+            prompt: The main user message/question.
+            system_prompt: Optional system instructions to guide the model's behavior.
+            chat_history: Optional list of previous message exchanges.
+            **kwargs: Additional parameters passed to the model provider.
+                - temperature: Sampling temperature (0.0-1.0).
+                - model: Override the default model.
+                - top_p: Nucleus sampling parameter.
+                - max_tokens: Maximum tokens in the response.
+            
         Returns:
-            The generated text response.
-
+            The model's text response.
+            
         Examples:
-            >>> response = await client.llm_chat("Hello world")
+            Basic chat:
+            >>> response = await client.llm_chat("Tell me about quantum computing")
+            
+            With system instructions:
+            >>> response = await client.llm_chat(
+            ...     "Explain quantum entanglement",
+            ...     system_prompt="Explain concepts to a high school student"
+            ... )
+            
+            With chat history:
+            >>> history = [
+            ...     {"role": "user", "content": "Who was Tesla?"},
+            ...     {"role": "assistant", "content": "Nikola Tesla was..."}
+            ... ]
+            >>> response = await client.llm_chat(
+            ...     "What did he invent?", 
+            ...     chat_history=history
+            ... )
         """
-        messages: List[Message] = [{"role": "user", "content": prompt}]
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
-        configuration: Configuration = Configuration.from_runnable_config(runnable_config)
-        provider_model = configuration.model.split("/", 1)
-        if len(provider_model) != 2:
-            error_highlight("Invalid model format in configuration: %s", configuration.model)
-            return ""
-        provider, _ = provider_model
-        if provider == "openai":
-            openai_messages = await _format_openai_messages(
-                messages,
-                system_prompt or "You are a helpful assistant that can answer questions and help with tasks."
-            )
-            # Convert back to Message type if necessary.
-            messages = [
-                {
-                    "role": cast(MessageRole, msg["role"]), 
-                    "content": str(msg.get("content", ""))
-                } 
-                for msg in openai_messages
-            ]
-        elif provider == "anthropic":
-            if system_prompt is not None:
-                messages = await _ensure_system_message(messages, system_prompt)
-        response: Dict[str, Any] = await _call_model(messages, runnable_config)
-        return response.get("content", "")
-
+        messages: List[Message] = []
+        
+        # Add chat history if provided
+        if chat_history:
+            for msg in chat_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role and content:
+                    messages.append({"role": role, "content": content})
+        
+        # Add the current prompt as a message
+        messages.append({"role": "user", "content": prompt})
+        
+        # Build config with default model
+        config = _build_config(kwargs, self.default_model)
+        
+        # Add system prompt to config
+        if system_prompt:
+            config.setdefault("configurable", {})
+            config["configurable"]["system_prompt"] = system_prompt
+        
+        try:
+            response = await call_model(messages, config)
+            if not response:
+                return ""
+            return response.get("content", "")
+        except Exception as e:
+            error_highlight("Error in llm_chat: %s", str(e))
+            return f"Error generating response: {str(e)}"
+    
     async def llm_json(
         self,
         prompt: str,
         system_prompt: str | None = None,
+        chat_history: List[Dict[str, str]] | None = None,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
-        """Get a structured JSON response as a Python dictionary.
-
+        """Generate structured JSON output from the LLM.
+        
         Args:
-            prompt: Input text/prompt for the LLM.
-            system_prompt: Optional system message to guide the model.
-            **kwargs: Additional parameters including:
-                - chunk_size: Max tokens per chunk (default: 2000).
-                - overlap: Token overlap between chunks (default: 100).
-                - model: Override default model.
-                - temperature: Creativity control (0-1).
-                - max_tokens: Limit output length.
-
+            prompt: The main user message/question.
+            system_prompt: Optional system instructions, should indicate JSON format.
+            chat_history: Optional list of previous message exchanges.
+            chunk_size: Optional max size for text chunks if content is large.
+            overlap: Optional overlap between chunks to maintain context.
+            **kwargs: Additional parameters passed to the model provider.
+            
         Returns:
-            A dictionary containing the parsed JSON response from the model.
-
+            A dictionary containing the parsed JSON response.
+            
         Examples:
-            Basic JSON extraction:
+            Extract entities:
             >>> data = await client.llm_json(
-            ...     "Extract names and dates from: John Doe, 2023-01-01...",
-            ...     system_prompt="Return JSON with {people: [{name, date}]}"
+            ...     "Apple Inc. was founded by Steve Jobs in 1976.",
+            ...     system_prompt="Extract entities like people, organizations and dates"
             ... )
-
-            With chunking:
+            >>> print(data.get("entities", []))
+            
+            With specific format:
             >>> data = await client.llm_json(
-            ...     long_text,
-            ...     chunk_size=1000,
-            ...     overlap=200
+            ...     "Analyze the sentiment of: I love this product!",
+            ...     system_prompt="Return JSON with {sentiment: string, score: number}"
             ... )
-
-        Raises:
-            ValueError: If the prompt is empty.
-            JSONDecodeError: If the response cannot be parsed.
+            >>> print(f"Sentiment: {data.get('sentiment')}, Score: {data.get('score')}")
         """
-        chunk_size: int | None = kwargs.pop("chunk_size", None)
-        overlap: int | None = kwargs.pop("overlap", None)
         messages: List[Message] = []
+        
+        # Add chat history if provided
+        if chat_history:
+            for msg in chat_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role and content:
+                    messages.append({"role": role, "content": content})
+        
+        # Add the system prompt focused on JSON output
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            if not any(msg.get("role") == "system" for msg in messages):
+                default_json_instruction = "Return your response as a valid JSON object."
+                full_system_prompt = f"{system_prompt}\n\n{default_json_instruction}"
+                messages.insert(0, {"role": "system", "content": full_system_prompt})
+        
+        # Add the current prompt as a message
         messages.append({"role": "user", "content": prompt})
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
-        result: Dict[str, Any] = await _call_model_json(messages, runnable_config, chunk_size, overlap)
-        if isinstance(result, str):
-            parsed: Dict[str, Any] = _parse_json_response(result)
-            return parsed or {}
-        elif isinstance(result, dict) and "content" in result and isinstance(result["content"], str):
-            parsed = _parse_json_response(result["content"])
-            return parsed or {}
-        return result or {}
-
+        
+        # Build config with default model
+        config = _build_config(kwargs, self.default_model)
+        
+        try:
+            json_response = await call_model_json(messages, config, chunk_size, overlap)
+            return json_response or {}
+        except Exception as e:
+            error_highlight("Error in llm_json: %s", str(e))
+            return {}
+    
     async def llm_embed(self, text: str, **kwargs: Any) -> List[float]:
-        """Get embeddings for a given text.
-
+        """Generate an embedding for the given text.
+        
         Args:
             text: The text to embed.
             **kwargs: Additional parameters for embedding configuration.
-
+                - model: The embedding model to use (default: text-embedding-3-small)
+                
         Returns:
-            A list of floats representing the embedding vector.
-
+            A list of floating point numbers representing the embedding vector.
+            
         Examples:
-            >>> embedding = await client.llm_embed("text to embed")
+            Basic embedding:
+            >>> embedding = await client.llm_embed("quantum computing")
+            >>> print(f"Vector of size {len(embedding)}")
+            
+            With custom model:
+            >>> embedding = await client.llm_embed(
+            ...     "artificial intelligence",
+            ...     model="text-embedding-3-large"
+            ... )
         """
-        if not text or not text.strip():
-            return []
-        config_dict: Dict[str, Any] = _build_config(kwargs, self.default_model)
-        runnable_config: RunnableConfig | None = cast(RunnableConfig | None, config_dict)
+        model = kwargs.get("model", "text-embedding-3-small")
+        
         try:
-            configuration: Configuration = Configuration.from_runnable_config(runnable_config)
-            provider_model = configuration.model.split("/", 1)
-            if len(provider_model) != 2:
-                error_highlight("Invalid model format in configuration: %s", configuration.model)
-                return []
-            provider, model = provider_model
-            if provider == "openai":
-                try:
-                    response = await openai_client.embeddings.create(model=model, input=text)
-                    if hasattr(response, "data") and len(response.data) > 0 and hasattr(response.data[0], "embedding"):
-                        return response.data[0].embedding
-                except Exception as e:
-                    error_highlight("Error in openai embeddings: %s", str(e))
-                    if (hasattr(openai_client.embeddings.create, "return_value") and 
-                        hasattr(openai_client.embeddings.create.return_value, "data")):
-                        mock_data = openai_client.embeddings.create.return_value.data
-                        if len(mock_data) > 0 and hasattr(mock_data[0], "embedding"):
-                            return mock_data[0].embedding
+            response = await openai_client.embeddings.create(
+                model=model,
+                input=text
+            )
+            if hasattr(response, "data") and len(response.data) > 0:
+                return response.data[0].embedding
+                
+            # For mock testing support
+            if hasattr(openai_client.embeddings, "create") and hasattr(openai_client.embeddings.create, "return_value"):
+                if hasattr(openai_client.embeddings.create.return_value, "data"):
+                    mock_data = openai_client.embeddings.create.return_value.data
+                    if len(mock_data) > 0 and hasattr(mock_data[0], "embedding"):
+                        return mock_data[0].embedding
             return []
         except Exception as e:
             error_highlight("Error in llm_embed: %s", str(e))
             return []
 
-__all__ = ["LLMClient"]
+def get_extraction_model() -> str:
+    """Get the model name to use for extraction tasks.
+    
+    Returns:
+        Name of the extraction model to use
+    """
+    # Try to get the model from environment variables
+    model = os.getenv("EXTRACTION_MODEL", "")
+    
+    # Default to gpt-4 if not set
+    if not model:
+        return "openai/gpt-4"
+    return model
+
+def log_dict(logger, message, data):
+    """Helper function to log dictionaries with a message."""
+    logger.info(f"{message}: {json.dumps(data)}")
+    return data
+
+__all__ = ["LLMClient", "call_model_json", "get_extraction_model", "log_dict"]

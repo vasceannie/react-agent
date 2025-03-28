@@ -2,8 +2,8 @@
   "dockerfile_lines": [],
   "graphs": {
     "agent": "src/react_agent/graphs/graph.py:graph",
-    "analysis": "src/react_agent/graphs/analysis.py:graph",
-    "research": "src/react_agent/graphs/research.py:research_graph"
+    "analysis": "src/react_agent/graphs/analysis.py:create_analysis_graph",
+    "research": "src/react_agent/graphs/research.py:create_research_graph"
   },
   "env": ".env",
   "python_version": "3.11",

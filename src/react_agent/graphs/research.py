@@ -7,24 +7,54 @@ improved error handling and validation.
 
 from __future__ import annotations
 
-
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, Hashable, List, Literal, Optional, Sequence, Tuple, cast, Callable
+from datetime import UTC, datetime, timezone
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig, ensure_config
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import START
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
+
+# Define a no-op replacement for step_caching
+def step_caching(*args, **kwargs):
+    """Replacement for langgraph's step_caching decorator.
+    This is a no-op version that simply returns the function unchanged.
+    """
+    def decorator(func): return func
+    return decorator
+
 from langgraph.graph.state import CompiledStateGraph
-from typing_extensions import Annotated, TypedDict
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langgraph.checkpoint.aiosqlite import AioSqliteCheckpointManager
+from langgraph.managed import IsLastStep
+from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode
+from langgraph.store.base import BaseStore
 from pydantic import BaseModel, Field
-from typing_extensions import Unpack, get_type_hints
+from typing_extensions import (
+    Annotated,
+    NotRequired,
+    Required,
+    TypedDict,
+    Unpack,
+    get_type_hints,
+)
 
 from react_agent.prompts.query import detect_vertical, expand_acronyms, optimize_query
 
@@ -38,32 +68,16 @@ from react_agent.prompts.research import (
     get_default_extraction_result,
     get_extraction_prompt,
 )
+from react_agent.tools.derivation import (
+    CategoryExtractionTool,
+    ExtractionTool,
+    ResearchValidationTool,
+    StatisticsAnalysisTool,
+    create_derivation_toolnode,
+)
 
-# Import tools
+# Import tools and tool-related utilities
 from react_agent.tools.jina import search
-from react_agent.utils.cache import create_checkpoint, load_checkpoint
-from react_agent.utils.content import (
-    detect_content_type,
-    should_skip_content,
-    validate_content,
-    process_document_with_docling,
-    DOCLING_AVAILABLE,
-)
-from react_agent.tools import StatisticsExtractionTool, CategoryExtractionTool
-from react_agent.utils.extraction import extract_category_information as original_extract_category_info
-from react_agent.utils.extraction import enrich_extracted_fact
-from react_agent.utils.llm import call_model_json, get_extraction_model
-from react_agent.utils.logging import (
-    error_highlight,
-    get_logger,
-    info_highlight,
-    log_step,
-    warning_highlight,
-)
-from react_agent.utils.statistics import (
-    assess_synthesis_quality,
-    calculate_overall_confidence,
-)
 from react_agent.types import (
     ContentChunk,
     DocumentContent,
@@ -76,36 +90,87 @@ from react_agent.types import (
     TextContent,
     WebContent,
 )
+from react_agent.utils.cache import create_checkpoint, load_checkpoint
+from react_agent.utils.content import (
+    DOCLING_AVAILABLE,
+    detect_content_type,
+    process_document_with_docling,
+    should_skip_content,
+    validate_content,
+)
+from react_agent.utils.extraction import enrich_extracted_fact
+from react_agent.utils.extraction import (
+    extract_category_information as original_extract_category_info,
+)
+from react_agent.utils.llm import call_model_json, get_extraction_model, log_dict
+from react_agent.utils.logging import (
+    error_highlight,
+    get_logger,
+    info_highlight,
+    log_step,
+    warning_highlight,
+)
+from react_agent.utils.statistics import (
+    assess_synthesis_quality,
+    calculate_overall_confidence,
+)
 
 # Initialize logger
-logger = get_logger(__name__)
-
-# Initialize tools
-statistics_tool = StatisticsExtractionTool()
-category_tool = None  # Will be initialized with extraction_model when needed
+logger = get_logger("research_graph")
 
 # Define SearchType as a Literal type
 SearchType = Literal['general', 'authoritative', 'recent', 'comprehensive', 'technical']
 
+# Enhanced state types with proper annotations
+class ResearchCategoryState(TypedDict):
+    """State for a specific research category with improved type safety."""
+    category: str
+    query: str
+    search_results: List[Dict[str, Any]]
+    extracted_facts: List[Dict[str, Any]]
+    sources: List[Dict[str, Any]]
+    complete: bool
+    quality_score: float
+    retry_count: int
+    last_search_query: Optional[str]
+    status: Literal["pending", "in_progress", "searching", "searched", "search_failed", 
+                    "facts_extracted", "complete", "failed"]
+    statistics: List[Dict[str, Any]]
+    confidence_score: float
+    cross_validation_score: float
+    source_quality_score: float
+    recency_score: float
+    statistical_content_score: float
 
-class ResearchCategory(TypedDict):
-    """State for a specific research category."""
-    category: str  # The category being researched (market_dynamics, etc.)
-    query: str  # The search query for this category
-    search_results: List[Dict[str, Any]]  # Raw search results
-    extracted_facts: List[Dict[str, Any]]  # Extracted facts
-    sources: List[Dict[str, Any]]  # Source information
-    complete: bool  # Whether this category is complete
-    quality_score: float  # Quality score for this category (0.0-1.0)
-    retry_count: int  # Number of retry attempts
-    last_search_query: Optional[str]  # Last search query used
-    status: str  # Status of this category (pending, in_progress, complete, failed)
-    statistics: List[Dict[str, Any]]  # Extracted statistics from facts
-    confidence_score: float  # Confidence score for this category (0.0-1.0)
-    cross_validation_score: float  # Cross-validation score for facts (0.0-1.0)
-    source_quality_score: float  # Quality score for sources (0.0-1.0)
-    recency_score: float  # Recency score for sources (0.0-1.0)
-    statistical_content_score: float  # Score for statistical content (0.0-1.0)
+
+class EnhancedResearchState(TypedDict):
+    """Main research state with improved type safety and annotations."""
+    # Basic conversation data
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    
+    # Original query and analysis
+    original_query: str
+    query_analysis: Optional[Dict[str, Any]]
+    
+    # Clarity and context
+    missing_context: List[str]
+    needs_clarification: bool
+    clarification_request: Optional[str]
+    human_feedback: Optional[str]
+    
+    # Category-specific research
+    categories: Dict[str, ResearchCategoryState]
+    
+    # Synthesis and validation
+    synthesis: Optional[Dict[str, Any]]
+    validation_result: Optional[Dict[str, Any]]
+    consolidated_report: Optional[Dict[str, Any]]
+    
+    # Overall status
+    status: Literal["initialized", "analyzed", "clarified", "researched", "synthesized", "validated", "report_generated", "complete", "error"]
+    error: Optional[Dict[str, Any]]
+    complete: bool
+    is_last_step: NotRequired[IsLastStep]
 
 
 class ResearchState(TypedDict):
@@ -124,7 +189,7 @@ class ResearchState(TypedDict):
     human_feedback: Optional[str]
 
     # Category-specific research
-    categories: Dict[str, ResearchCategory]
+    categories: Dict[str, ResearchCategoryState]
 
     # Synthesis and validation
     synthesis: Optional[Dict[str, Any]]
@@ -135,6 +200,12 @@ class ResearchState(TypedDict):
     error: Optional[Dict[str, Any]]
     complete: bool
 
+
+# Initialize tools
+statistics_tool = StatisticsAnalysisTool()
+extraction_tool = ExtractionTool()
+validation_tool = ResearchValidationTool()
+category_tool = None  # Will be initialized with extraction_model when needed
 
 # --------------------------------------------------------------------
 # 1. Core control flow nodes
@@ -506,25 +577,56 @@ async def _process_search_result(
 
     try:
         # Extract category information
-        facts, relevance_score = await original_extract_category_info(
-            content=content,
-            url=url,
-            title=result.get("title", ""),
-            category=category,
-            original_query=original_query,
-            prompt_template=prompt_template,
-            extraction_model=call_model_json,
-            config=ensure_config(config)
-        )
+        # Try using the new extract_with_tool function first
+        try:
+            extraction_result = await extract_with_tool(
+                content=content,
+                url=url,
+                title=result.get("title", ""),
+                category=category,
+                original_query=original_query
+            )
+            facts = extraction_result.get("facts", [])
+            relevance_score = extraction_result.get("relevance", 0.5)
+        except Exception as e:
+            # Fall back to the original method if the new one fails
+            facts, relevance_score = await original_extract_category_info(
+                content=content,
+                url=url,
+                title=result.get("title", ""),
+                category=category,
+                original_query=original_query,
+                prompt_template=prompt_template,
+                extraction_model=call_model_json,
+                config=ensure_config(config)
+            )
 
         # Extract statistics using the statistics tool
         statistics = []
         try:
-            statistics = statistics_tool.run(
-                text=content,
-                url=url,
-                source_title=result.get("title", "")
-            )
+            # Try to use the statistics analysis tool first
+            try:
+                info_highlight(f"Using statistics analysis tool for {url}")
+                
+                # Use the statistics analysis tool
+                statistics = await statistics_tool.ainvoke({
+                    "operation": "statistics",
+                    "text": content,
+                    "url": url,
+                    "source_title": result.get("title", "")
+                }, config)
+                
+                if statistics:
+                    info_highlight(f"Successfully extracted {len(statistics)} statistics using analysis tool")
+            except Exception as stats_error:
+                warning_highlight(f"Error using statistics analysis tool: {str(stats_error)}")
+                # Fall back to the original statistics tool
+                info_highlight(f"Falling back to original statistics tool for {url}")
+                statistics = statistics_tool.run(
+                    text=content,
+                    url=url,
+                    source_title=result.get("title", "")
+                )
         except Exception as e:
             logger.error(f"Error extracting statistics: {str(e)}")
             logger.exception(e)
@@ -564,6 +666,162 @@ async def _process_search_result(
         warning_highlight(f"Error extracting from {url}: {str(e)}")
         return [], [], []
 
+async def extract_with_tool(
+    content: str,
+    url: str,
+    title: str,
+    category: str,
+    original_query: str,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Extract category information using the extraction tool.
+    
+    This function uses the ExtractionTool from the tools package to extract
+    information from content for a specific category.
+    
+    Args:
+        content: The text content to extract from
+        url: The source URL
+        title: The source title
+        category: The category to extract information for
+        original_query: The original search query
+        config: Optional runnable config
+        
+    Returns:
+        Dictionary with extracted facts and relevance score
+    """
+    try:
+        # Use the extraction tool
+        extraction_result = await extraction_tool.ainvoke({
+            "operation": "category",
+            "text": content,
+            "url": url,
+            "source_title": title,
+            "category": category,
+            "original_query": original_query
+        }, config)
+        
+        # Return the extraction result
+        return {
+            "facts": extraction_result.get("facts", []),
+            "relevance": extraction_result.get("relevance", 0.5)
+        }
+    except Exception as e:
+        warning_highlight(f"Error using extraction tool: {str(e)}")
+        raise
+
+async def extract_category_facts(
+        state: ResearchState,
+        category: str,
+        config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Extract facts from search results for a specific category."""
+    log_step(f"Extracting facts for category: {category}", 6, 10)
+    
+    categories = state["categories"]
+    if category not in categories:
+        warning_highlight(f"Unknown category: {category}")
+        return {}
+    
+    category_state = categories[category]
+    search_results = category_state["search_results"]
+    
+    if not search_results:
+        warning_highlight(f"No search results for category: {category}")
+        category_state["status"] = "extraction_failed"
+        return {"categories": categories}
+    
+    try:
+        # Try to use the tools node first for better integration with langgraph
+        if "tools" in state:
+            info_highlight(f"Using tools node for category extraction: {category}")
+            
+            # Create a list of extraction tasks using the tools node
+            extraction_tasks = []
+            for result in search_results:
+                # Prepare the input for the extraction tool
+                tool_input = {
+                    "operation": "category",
+                    "text": result.get("snippet", ""),
+                    "url": result.get("url", ""),
+                    "source_title": result.get("title", ""),
+                    "category": category,
+                    "original_query": state["original_query"],
+                    "extraction_model": state.get("extraction_model")
+                }
+                
+                # Create a task to invoke the extraction tool
+                task = asyncio.create_task(extraction_tool.ainvoke(tool_input, config))
+                extraction_tasks.append((task, result))
+            
+            # Wait for all extraction tasks to complete
+            all_facts, all_sources, all_statistics = [], [], []
+            for i, (task, result) in enumerate(extraction_tasks):
+                try:
+                    extraction_result = await task
+                    facts = extraction_result.get("facts", [])
+                    all_facts.extend(facts)
+                    
+                    # Add source information
+                    source = {
+                        "url": result.get("url", ""),
+                        "title": result.get("title", ""),
+                        "published_date": result.get("published_date"),
+                        "fact_count": len(facts)
+                    }
+                    all_sources.append(source)
+                    
+                    # Extract statistics using the statistics tool
+                    try:
+                        info_highlight(f"Extracting statistics for result {i+1}/{len(extraction_tasks)} in {category}")
+                        
+                        # Use the statistics analysis tool
+                        stats_input = {
+                            "operation": "statistics",
+                            "text": result.get("snippet", ""),
+                            "url": result.get("url", ""),
+                            "source_title": result.get("title", "")
+                        }
+                        
+                        # Create a task to invoke the statistics tool
+                        stats_result = await statistics_tool.ainvoke(stats_input, config)
+                        if stats_result:
+                            info_highlight(f"Extracted {len(stats_result)} statistics from result {i+1}")
+                            all_statistics.extend(stats_result)
+                    except Exception as stats_error:
+                        warning_highlight(f"Error extracting statistics: {str(stats_error)}")
+                        # Continue with the next result
+                except Exception as e:
+                    error_highlight(f"Error in extraction task: {str(e)}")
+                    # Continue with the next result
+                    continue
+        else:
+            # Fall back to the original method
+            info_highlight(f"Using original extraction method for category: {category}")
+            extraction_tasks = [asyncio.create_task(_process_search_result(
+                result=result, category=category, 
+                original_query=state["original_query"], config=config
+            )) for result in search_results]
+            
+            results = await asyncio.gather(*extraction_tasks)
+            all_facts, all_sources, all_statistics = [], [], []
+            for facts, sources, statistics in results:
+                all_facts.extend(facts)
+                all_sources.extend(sources)
+                all_statistics.extend(statistics)
+        
+        # Update the category state
+        category_state["extracted_facts"] = all_facts
+        category_state["sources"] = all_sources
+        category_state["statistics"] = all_statistics
+        category_state["status"] = "extracted" if all_facts else "extraction_failed"
+        category_state["complete"] = True
+    except Exception as e:
+        error_highlight(f"Error extracting facts for category {category}: {str(e)}")
+        category_state["status"] = "extraction_failed"
+        
+    return {"categories": categories}
+
 
 @step_caching()
 async def extract_category_information(
@@ -582,7 +840,7 @@ async def extract_category_information(
     # Initialize the category tool if needed
     if category_tool is None:
         model_name = extraction_model or get_extraction_model()
-        category_tool = CategoryExtractionTool(model_name=model_name)
+        category_tool = CategoryExtractionTool(extraction_model=model_name)
     
     # Find the relevant category in the state
     if not category:
@@ -598,20 +856,66 @@ async def extract_category_information(
         if isinstance(content, WebContent):
             url = content.url
         
-        extracted_info = category_tool.run(
-            text=content.content,
-            category=category,
-            url=url
-        )
-        
-        log_dict(logger, f"Extracted category information for {category}", extracted_info)
-        
-        # Add extracted facts to the category
-        if extracted_info:
-            for fact in extracted_info:
-                # Ensure we don't add duplicates
-                if fact not in category_obj.extracted_facts:
-                    category_obj.extracted_facts.append(fact)
+        # Try to use the extraction tool first
+        try:
+            # Check if we have access to the tools node
+            if hasattr(state, "tools") and state.get("tools"):
+                info_highlight(f"Using tools node for category extraction: {category}")
+                
+                # Use the extraction tool from the tools node
+                extraction_result = await extraction_tool.ainvoke({
+                    "operation": "category",
+                    "text": content.content,
+                    "category": category,
+                    "url": url,
+                    "original_query": state.get("original_query", ""),
+                    "extraction_model": state.get("extraction_model")
+                })
+                
+                extracted_info = extraction_result.get("facts", [])
+            else:
+                # Fall back to the category tool
+                info_highlight(f"Using category tool for extraction: {category}")
+                extracted_info = category_tool.run(
+                    text=content.content,
+                    category=category,
+                    url=url
+                )
+            
+            log_dict(logger, f"Extracted category information for {category}", extracted_info)
+            
+            # Add extracted facts to the category
+            if extracted_info:
+                for fact in extracted_info:
+                    # Ensure we don't add duplicates
+                    if fact not in category_obj.extracted_facts:
+                        category_obj.extracted_facts.append(fact)
+            
+            # Extract statistics using the statistics tool
+            try:
+                info_highlight(f"Extracting statistics for category: {category}")
+                
+                # Use the statistics tool
+                stats_input = {
+                    "operation": "statistics",
+                    "text": content.content,
+                    "url": url,
+                    "source_title": getattr(content, "title", "")
+                }
+                
+                # Extract statistics
+                stats_result = await statistics_tool.ainvoke(stats_input)
+                if stats_result:
+                    info_highlight(f"Extracted {len(stats_result)} statistics for {category}")
+                    
+                    # Add statistics to the category
+                    for stat in stats_result:
+                        if stat not in category_obj.statistics:
+                            category_obj.statistics.append(stat)
+            except Exception as stats_error:
+                warning_highlight(f"Error extracting statistics: {str(stats_error)}")
+        except Exception as tool_error:
+            error_highlight(f"Error using extraction tool: {str(tool_error)}")
     
     except Exception as e:
         logger.error(f"Error extracting category information: {str(e)}")
@@ -652,8 +956,25 @@ async def execute_research_for_categories(
         # Create async task for this category
         async def process_category(cat: str) -> None:
             search_result = await execute_category_search(state, cat, config)
-            # Only extract if search was successful
-            if cat in search_result.get("categories", {}) and search_result["categories"][cat]["status"] == "searched":
+            
+            # Only proceed if search was successful
+            if cat not in search_result.get("categories", {}) or search_result["categories"][cat]["status"] != "searched":
+                return
+                
+            try:
+                # Try to use the tools node first for better integration with langgraph
+                if "tools" in state:
+                    info_highlight(f"Using tools node for category: {cat}")
+                    await state["tools"].ainvoke({
+                        "category": cat,
+                        "state": state
+                    }, config)
+                else:
+                    # Fall back to the original method
+                    await extract_category_facts(state, cat, config)
+            except Exception as e:
+                error_highlight(f"Error processing category {cat}: {str(e)}")
+                # Fall back to the original method
                 await extract_category_facts(state, cat, config)
         
         task = asyncio.create_task(process_category(category))
@@ -1001,8 +1322,60 @@ def create_research_graph() -> CompiledStateGraph:
     """Create the modular research graph."""
     graph = StateGraph(ResearchState)
 
+    # Create a tool node for extraction and validation tools
+    # Initialize tools node function
+    async def initialize_tools(state: ResearchState) -> Dict[str, Any]:
+        """Initialize the tools node with extraction tools."""
+        log_step("Initializing tools node", 2, 10)
+        
+        # Initialize the extraction model
+        extraction_model = get_extraction_model()
+        
+        # Initialize category tool if needed
+        global category_tool
+        if category_tool is None:
+            category_tool = CategoryExtractionTool(extraction_model)
+            info_highlight("Initialized category extraction tool")
+        
+        # Initialize the extraction tool if needed
+        global extraction_tool
+        if extraction_tool is None:
+            extraction_tool = ExtractionTool()
+            info_highlight("Initialized extraction tool")
+        
+        # Initialize the statistics analysis tool if needed
+        global statistics_tool
+        if statistics_tool is None:
+            statistics_tool = StatisticsAnalysisTool()
+            info_highlight("Initialized statistics analysis tool")
+        
+        # Add the extraction model and tools to the state 
+        # The tools node will use these for extraction operations
+        return {
+            "extraction_model": extraction_model,
+            "tools": {
+                "category": category_tool,
+                "extraction": extraction_tool,
+                "statistics": statistics_tool
+            }
+        }
+    
+    # Create the tools node
+    tools_node = create_derivation_toolnode(
+        include_tools=["extraction", "statistics", "validation"]
+    )
+    
+    # Add the tools node to the graph
+    # This allows for more efficient tool usage and better integration with langgraph
+    graph.add_node(
+        "tools", 
+        tools_node, 
+        metadata={"description": "Node for executing extraction and validation tools"}
+    )
+
     # Add the main nodes
     graph.add_node("initialize", initialize_research)
+    graph.add_node("initialize_tools", initialize_tools)
     graph.add_node("analyze_query", analyze_query)
     graph.add_node("request_clarification", request_clarification)
     graph.add_node("process_clarification", process_clarification)
@@ -1020,12 +1393,19 @@ def create_research_graph() -> CompiledStateGraph:
         handle_error_or_continue,
         {
             "handle_error": "handle_error",
-            "continue": "analyze_query"
+            "continue": "initialize_tools"
         }
     )
 
+    # Add the START node connection - This is the entry point of the graph
+    graph.add_edge(START, "initialize")
+
     # Set start point
+    graph.add_edge("initialize_tools", "analyze_query")
     graph.add_edge("initialize", "analyze_query")  # Changed: Directly to analyze_query
+    
+    # Connect initialize to tools node
+    graph.add_edge("initialize", "tools")
 
     # Add conditional branch for clarification from analyze_query
     graph.add_conditional_edges(
@@ -1049,6 +1429,13 @@ def create_research_graph() -> CompiledStateGraph:
             "continue": "check_retry"
         }
     )
+
+    # Connect research flow to tools node
+    graph.add_edge("execute_research_for_categories", "tools")
+    
+    # Connect tools node back to research flow
+    graph.add_edge("tools", "execute_research_for_categories")
+    graph.add_edge("tools", "synthesize_research")
 
     graph.add_conditional_edges(
         "check_retry",
@@ -1078,6 +1465,9 @@ def create_research_graph() -> CompiledStateGraph:
         }
     )
     
+    # Connect synthesis to tools node for validation
+    graph.add_edge("synthesize_research", "tools")
+    
     graph.add_conditional_edges(
         "validate_or_complete",
         lambda state: state.get("next_step", "prepare_final_response"),
@@ -1090,7 +1480,13 @@ def create_research_graph() -> CompiledStateGraph:
     graph.add_edge("prepare_final_response", END)
     graph.add_edge("handle_error", END)
 
-    return graph.compile(checkpointer=MemorySaver())
+    # Create a store for cross-thread data persistence
+    # Removed store initialization as it's an abstract class
+
+    # Compile the graph with checkpointer and store
+    return graph.compile(
+        checkpointer=MemorySaver()
+    )
 
 # Create the graph instance
 research_graph = create_research_graph()
@@ -1116,11 +1512,37 @@ async def add_statistics_to_research_state(
     # Extract statistics from content using the statistics tool
     extracted_statistics = []
     try:
-        extracted_statistics = statistics_tool.run(
-            text=content.content,
-            url=url,
-            source_title=source_title
-        )
+        # Try to use the statistics analysis tool first
+        try:
+            # Check if we have access to the tools node
+            if hasattr(state, "tools") and state.tools:
+                info_highlight(f"Using statistics analysis tool for extraction")
+                
+                # Use the statistics analysis tool
+                analysis_result = await statistics_tool.ainvoke({
+                    "operation": "statistics",
+                    "text": content.content,
+                    "url": url,
+                    "source_title": source_title
+                })
+                
+                extracted_statistics = analysis_result
+            else:
+                # Fall back to the original statistics tool
+                info_highlight(f"Using original statistics tool for extraction")
+                extracted_statistics = statistics_tool.run(
+                    text=content.content,
+                    url=url,
+                    source_title=source_title
+                )
+        except Exception as tool_error:
+            warning_highlight(f"Error using statistics analysis tool: {str(tool_error)}")
+            # Fall back to the original statistics tool
+            extracted_statistics = statistics_tool.run(
+                text=content.content,
+                url=url,
+                source_title=source_title
+            )
         log_dict(logger, "Extracted statistics", extracted_statistics)
     except Exception as e:
         logger.error(f"Error extracting statistics: {str(e)}")
@@ -1158,29 +1580,69 @@ async def extract_category_info(
     """Shim function to use the deprecated extract_category_information function.
     
     Will be updated to use the new CategoryExtractionTool directly in future.
-    """
+    This version now uses the ExtractionTool directly for better integration with langgraph."""
     global category_tool
     
     # Initialize the category tool if needed
     if category_tool is None:
         model_name = get_extraction_model()
-        category_tool = CategoryExtractionTool(model_name=model_name)
+        category_tool = CategoryExtractionTool(extraction_model=model_name)
     
     try:
-        # Use the original function from extraction.py for compatibility
-        # This will be updated to use the tool directly in a future update
-        facts, relevance = await original_extract_category_info(
-            content=content,
-            url=url,
-            title=title,
-            category=category,
-            original_query=original_query,
-            prompt_template=prompt_template,
-            extraction_model=extraction_model,
-            config=config
-        )
-        return facts, relevance
+        # Try to use the extraction tool directly first
+        try:
+            info_highlight(f"Using extraction tool for category: {category}")
+            result = await extraction_tool.ainvoke({
+                "operation": "category",
+                "text": content,
+                "url": url,
+                "source_title": title,
+                "category": category,
+                "original_query": original_query,
+                "prompt_template": prompt_template,
+                "extraction_model": extraction_model
+            }, config)
+            
+            return result.get("facts", []), result.get("relevance", 0.5)
+        except Exception as tool_error:
+            # Fall back to the original method if the new one fails
+            warning_highlight(f"Extraction tool failed, falling back to original method: {str(tool_error)}")
+            facts, relevance = await original_extract_category_info(
+                content=content, url=url, title=title, 
+                category=category, original_query=original_query,
+                prompt_template=prompt_template, 
+                extraction_model=extraction_model, config=config
+            )
+            return facts, relevance
     except Exception as e:
         logger.error(f"Error extracting category information: {str(e)}")
         logger.exception(e)
         return [], 0.0
+
+# Enhanced function to use ExtractionTool directly
+async def extract_with_tool(
+    content: str,
+    url: str,
+    title: str,
+    category: str,
+    original_query: str,
+    state: Annotated[Dict[str, Any], InjectedState] = None,
+    store: Annotated[BaseStore, InjectedStore] = None,
+    config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Extract information using the ExtractionTool asynchronously."""
+    try:
+        # Use the async version of the extraction tool
+        result = await extraction_tool.ainvoke({
+            "operation": "category",
+            "text": content,
+            "url": url,
+            "source_title": title,
+            "category": category,
+            "original_query": original_query
+        }, config)
+        return result
+    except Exception as e:
+        warning_highlight(f"Error using extraction tool: {str(e)}")
+        # Return empty result
+        return {"facts": [], "relevance": 0.0}

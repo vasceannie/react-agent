@@ -30,6 +30,7 @@ Example:
 """
 
 import asyncio
+import hashlib
 import os
 from typing import Annotated, Any, Dict, List, Literal, TypedDict, Union
 
@@ -287,7 +288,7 @@ async def embeddings(
     )
 
     # Create cache key for store
-    cache_key = f"jina_embeddings_{model}_{hash(str(input_texts))}"
+    cache_key = f"jina_embeddings_{model}_{hashlib.sha256(str(input_texts).encode('utf8')).hexdigest()}"
 
     # Check cache if store is available and caching is enabled
     if store and state and state.get("cache_results", True):
@@ -593,8 +594,7 @@ async def reader(
 
     if "error" in response:
         error_highlight(f"Reader API error: {response['error']}", "JinaTool")
-        raise ToolException("Jina Reader API error: " + 
-                          response['error'].get('message', 'Unknown error'))
+        raise ToolException(f"Jina Reader API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache write with guard clause
     if store and should_use_cache:

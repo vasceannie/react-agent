@@ -206,8 +206,13 @@ def _get_jina_api_key(state: Union[Dict[str, Any], JinaToolState, None] = None, 
             return configuration.jina_api_key
 
     # Then check if key exists in state
-    if state and isinstance(state, dict) and "jina_api_key" in state and state["jina_api_key"]:
-        return str(state["jina_api_key"])
+    if state and isinstance(state, dict) and "jina_api_key" in state:
+        # Ensure the API key is a non-empty string
+        if state["jina_api_key"] and isinstance(state["jina_api_key"], (str, int, float, bool)):
+            return str(state["jina_api_key"])
+        elif state["jina_api_key"] is not None:
+            logger.warning("jina_api_key in state is not a valid type, converting to string")
+            return str(state["jina_api_key"])
 
     if key := os.environ.get("JINA_API_KEY"):
         return key
@@ -573,21 +578,39 @@ async def reader(
     if headers_dict:
         headers_model = ReaderHeaders()
         for field_name, field_value in headers_dict.items():
-            if field_name == "x_with_links_summary" and isinstance(field_value, bool):
-                headers_model.x_with_links_summary = field_value
-            elif field_name == "x_with_images_summary" and isinstance(field_value, bool):
-                headers_model.x_with_images_summary = field_value
-            elif field_name == "x_with_generated_alt" and isinstance(field_value, bool):
-                headers_model.x_with_generated_alt = field_value
-            elif field_name == "x_no_cache" and isinstance(field_value, bool):
-                headers_model.x_no_cache = field_value
-            elif field_name == "x_return_format" and isinstance(field_value, str):
-                if field_value in ["markdown", "html", "text"]:
-                    headers_model.x_return_format = field_value  # type: ignore
+            # Boolean fields
+            if field_name in ["x_with_links_summary", "x_with_images_summary", "x_with_generated_alt", "x_no_cache"]:
+                if isinstance(field_value, bool):
+                    setattr(headers_model, field_name, field_value)
                 else:
-                    raise ValueError(f"Invalid return_format value: {field_value}. Must be one of: 'markdown', 'html', 'text'")
-            elif field_name == "x_token_budget" and isinstance(field_value, int):
-                headers_model.x_token_budget = field_value
+                    logger.warning(f"Expected boolean for {field_name}, got {type(field_value).__name__}. Converting to bool.")
+                    setattr(headers_model, field_name, bool(field_value))
+            # String enum field
+            elif field_name == "x_return_format":
+                if isinstance(field_value, str):
+                    if field_value in ["markdown", "html", "text"]:
+                        headers_model.x_return_format = field_value  # type: ignore
+                    else:
+                        raise ValueError(f"Invalid return_format value: {field_value}. Must be one of: 'markdown', 'html', 'text'")
+                else:
+                    raise ValueError(f"Expected string for {field_name}, got {type(field_value).__name__}")
+            # Integer field
+            elif field_name == "x_token_budget":
+                if isinstance(field_value, int):
+                    if field_value > 0:
+                        headers_model.x_token_budget = field_value
+                    else:
+                        raise ValueError(f"Token budget must be positive, got {field_value}")
+                else:
+                    try:
+                        int_value = int(field_value)
+                        if int_value > 0:
+                            logger.warning(f"Converting {field_name} from {type(field_value).__name__} to int: {int_value}")
+                            headers_model.x_token_budget = int_value
+                        else:
+                            raise ValueError(f"Token budget must be positive, got {int_value}")
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Cannot convert {field_name} value to a valid integer: {field_value}")
 
     try:
         # Validate URL before creating the request

@@ -291,14 +291,14 @@ async def embeddings(
     cache_key = f"jina_embeddings_{model}_{hashlib.sha256(str(input_texts).encode('utf8')).hexdigest()}"
 
     # Check cache if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight(f"Using cached embeddings result for {model}", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -326,12 +326,12 @@ async def embeddings(
         raise ToolException(f"Jina Embeddings API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache result if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight(f"Cached embeddings result for {model}", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching embeddings result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
 
     return response
 
@@ -406,14 +406,14 @@ async def rerank(
     cache_key = f"jina_rerank_{model}_{query}_{doc_hash}_{top_n}_{return_documents}"
     
     # Check cache if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight(f"Using cached reranking result for {query}", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
     
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -441,12 +441,12 @@ async def rerank(
         raise ToolException(f"Jina Reranker API error: {response['error'].get('message', 'Unknown error')}")
     
     # Cache result if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight(f"Cached reranking result for {query}", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching reranking result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
     
     return response
 
@@ -556,13 +556,13 @@ async def reader(
     should_use_cache = not no_cache and state and state.get("cache_results", True)
 
     # Cache check with early return
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            if cached := store.get(["jina", cache_key]):
+            if cached := load_checkpoint(cache_key):
                 info_highlight(f"Using cached reader result for {url}", "JinaTool")
-                return cached.value
+                return cached
         except Exception as e:
-            warning_highlight(f"Cache access error: {e}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {e}", "JinaTool")
 
     # API request preparation
     api_key = _get_jina_api_key(state, config)
@@ -597,12 +597,12 @@ async def reader(
         raise ToolException(f"Jina Reader API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache write with guard clause
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight(f"Cached reader result for {url}", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Cache write error: {e}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {e}", "JinaTool")
 
     return response
 
@@ -697,14 +697,14 @@ async def search(
     cache_key = f"jina_search_{query}_{options}_{site}"
 
     # Check cache if store is available and caching is enabled
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight(f"Using cached search result for '{query}'", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -738,12 +738,12 @@ async def search(
         raise ToolException(f"Jina Search API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache result if store is available and caching is enabled (and no_cache wasn't set)
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight(f"Cached search result for '{query}'", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching search result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
 
     return response
 
@@ -828,14 +828,14 @@ async def grounding(
     cache_key = f"jina_grounding_{statement}_{site}"
 
     # Check cache if store is available and caching is enabled
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight("Using cached grounding result for statement", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -872,12 +872,12 @@ async def grounding(
         raise ToolException(f"Jina Grounding API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache result if store is available and caching is enabled (and no_cache wasn't set)
-    if store and should_use_cache:
+    if should_use_cache:
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight("Cached grounding result for statement", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching grounding result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
 
     return response
 
@@ -983,14 +983,14 @@ async def segmenter(
     cache_key = f"jina_segmenter_{tokenizer}_{content_hash}_{return_tokens}_{return_chunks}_{max_chunk_length}_{head}_{tail}"
 
     # Check cache if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight("Using cached segmenter result", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -1018,12 +1018,12 @@ async def segmenter(
         raise ToolException(f"Jina Segmenter API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache result if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight("Cached segmenter result", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching segmenter result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
 
     return response
 
@@ -1114,14 +1114,14 @@ async def classifier(
     cache_key = f"jina_classifier_{model}_{classifier_id}_{inputs_hash}_{labels_hash}"
 
     # Check cache if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            cached_data = store.get(["jina", cache_key])
-            if cached_data and cached_data.value:
+            cached_data = load_checkpoint(cache_key)
+            if cached_data:
                 info_highlight("Using cached classifier result", "JinaTool")
-                return cached_data.value
+                return cached_data
         except Exception as e:
-            warning_highlight(f"Error accessing cache: {str(e)}", "JinaTool")
+            warning_highlight(f"Error loading checkpoint: {str(e)}", "JinaTool")
 
     # Get API key and retry configuration
     api_key = _get_jina_api_key(state, config)
@@ -1149,12 +1149,12 @@ async def classifier(
         raise ToolException(f"Jina Classifier API error: {response['error'].get('message', 'Unknown error')}")
 
     # Cache result if store is available and caching is enabled
-    if store and state and state.get("cache_results", True):
+    if state and state.get("cache_results", True):
         try:
-            store.put(["jina", cache_key], response)
+            create_checkpoint(cache_key, response)
             info_highlight("Cached classifier result", "JinaTool")
         except Exception as e:
-            warning_highlight(f"Error caching classifier result: {str(e)}", "JinaTool")
+            warning_highlight(f"Error creating checkpoint: {str(e)}", "JinaTool")
 
     return response
 

@@ -1,6 +1,6 @@
 """Enhanced extraction module for research categories with statistics focus.
 
-This module improves the extraction of facts and statistics from search results,dd
+This module improves the extraction of facts and statistics from search results,
 with a particular emphasis on numerical data, trends, and statistical information.
 
 DEPRECATION WARNING: Direct usage of functions in this module is deprecated.
